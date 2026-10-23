@@ -1,0 +1,12 @@
+**/bin/
+**/obj/
+**/TestResults/
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+examples/generated-data/
+examples/*/generated-data/
+examples/*/output/
+node_modules/

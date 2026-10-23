@@ -1,0 +1,25 @@
+{
+  "name": "migration4dataverse-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build"
+  },
+  "dependencies": {
+    "@fluentui/react-components": "9.74.10",
+    "@xyflow/react": "12.8.4",
+    "elkjs": "0.12.0",
+    "lucide-react": "0.468.0",
+    "react": "17.0.2",
+    "react-dom": "17.0.2"
+  },
+  "devDependencies": {
+    "@types/react": "17.0.83",
+    "@types/react-dom": "17.0.26",
+    "@vitejs/plugin-react": "4.7.0",
+    "typescript": "5.8.3",
+    "vite": "6.4.5"
+  }
+}

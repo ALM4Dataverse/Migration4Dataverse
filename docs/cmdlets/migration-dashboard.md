@@ -1,0 +1,87 @@
+# Migration dashboard
+
+`Start-MigrationDashboard` starts the engine-hosted React single-page app and read-only HTTP API. The SPA uses React Flow for pipeline graphs. `Stop-MigrationDashboard` stops and disposes the returned server handle.
+
+The interface uses the project logo and Fluent UI 9 theme tokens with native HTML controls. The dependency graph fills the workspace below the header; the run overview and combined step inspector are collapsible panels. The inspector has separate tabs for captured rows and configuration. Row inspection is available per step in debug-captured runs: each captured stage has its own search and tab, system metadata appears before individual payload properties, and a toggle switches the payload to one JSON column. Rows load as the table is scrolled; search, column filters, and sorting are applied across all matching snapshots by the server. Selecting a row highlights its lineage and shows captured values at each traced step directly in the graph.
+
+```powershell
+$dashboard = Start-MigrationDashboard -DatabasePath './state/migration.sqlite3'
+Write-Host "Open $($dashboard.Url)"
+try {
+    # Run Invoke-Migration in this process, or leave the dashboard open to inspect stored runs.
+    $dashboard | Out-Null
+    Read-Host 'Press Enter to stop the dashboard'
+}
+finally {
+    Stop-MigrationDashboard -Dashboard $dashboard
+}
+```
+
+The dashboard can show stored run history, an in-memory configuration preview, or both:
+
+```powershell
+# Preview a configuration without executing it or creating a run database.
+$dashboard = Start-MigrationDashboard -Steps $steps -Connections $connections
+
+# Show the supplied configuration alongside persisted run history.
+$dashboard = Start-MigrationDashboard -DatabasePath './state/migration.sqlite3' `
+    -Steps $steps -Connections $connections
+```
+
+`-Steps` and `-Connections` accept the same objects as `Invoke-Migration`. Configuration preview does not execute scripts or connect to endpoints. The preview exists only for the dashboard process; when `Invoke-Migration` runs, a safe configuration snapshot is persisted with the run so completed runs can still show their original step properties.
+
+The default URL is `http://127.0.0.1:5180`. `-Url` may select another HTTP loopback address/port; non-loopback URLs are rejected. Remote access, HTTPS termination, authentication, and multi-user authorization are not implemented. Run the dashboard only in a trusted local session, and protect the SQLite file using operating-system access controls.
+
+## Dashboard views
+
+- Run selector and compact overview with an overall input/output rows-per-second chart, current and run-average rates, elapsed time, target rows, succeeded/error counts, and a progress bar when the target total is known. Hover chart points to see their time interval and rate. The overview estimates completion only when a finalized target total and a positive output rate are available; completed runs show their completion time.
+- Interactive React Flow dependency graph with a separate node for every step, labeled states, filtering, zoom/pan, a minimap, and a longest-observed-dependency-chain highlight. Graph nodes and table rows show a mini rows-per-second chart from their first working period through completion (or the current time while running); hovering a sample shows its interval and rows per second. Nodes also show connector- or step-specific details. Dataverse targets display configured or effective batch size and DOP, including the live auto-tuning phase and sample progress when available.
+- The expanded run overview contains only the execution timeline and runtime hotspots. Step states, batch progress, outcomes, and failure details remain available in the graph, table, and step inspector.
+- Configuration preview for supplied steps and connections; historical runs display the sanitized configuration captured at invocation plus connection snapshots captured at run start and completion.
+- Optional row snapshot and lineage inspection when that run was created with `Invoke-Migration -EnableDebugCapture`. Select a graph step to browse its captured inputs, transform outputs, and downstream rows by stage; search within each stage and select a row to show its captured values at each stage on the graph. Snapshot and lineage grids use Fluent UI DataGrid with sorting, server-side column filters for all matching snapshots, drag or keyboard column reordering, resizing, content-based widths capped at 360 pixels, and a searchable column-visibility checklist. Payload cells show a copy-value action on hover or keyboard focus.
+
+Totals are based on persisted data. Standard `Records` batches are counted when queued; arbitrary callback payloads without a `Records` array are marked unknown. Source totals can be configured explicitly or resolved before the run using a wrapped SQLite/DuckDB query (or explicit `CountQuery`), Dataverse `-TotalRecordCount` for Simple/FetchXML, a custom-source `CountCallback`, or Parquet file metadata. Other source totals become known as rows flow. Intermediate and target totals are finalized only after their inputs complete, so the UI shows a growing/unknown total instead of an unreliable percentage. With multiple targets, the overview counts target-write work, not unique source rows. A running ETA uses the remaining known target rows divided by the observed run-average target output rate; it remains “Estimating…” while either value is unavailable and is a projection, not a guarantee. The orange path is the longest observed activity chain, not a guaranteed critical path or completion estimate.
+
+Runtime hotspots are a scheduler-pressure heuristic: queued work and waiting descendants increase a step's rank, while active throughput moderates it. Steps that have completed their own work and are waiting only because downstream work is slow are excluded. Treat the ranking as a diagnostic guide, not a causal profiler.
+
+The dashboard polls the API every three seconds. It is read-only and does not expose controls to pause, retry, or mutate a migration.
+
+## Debug snapshots and retention
+
+Basic run/step/batch metadata is always retained, including the latest Dataverse target tuning state recorded with its batch outcomes. Debug snapshots are separately opt-in per run and include step inputs and outputs, callback-provided `MigrationDebugStage` records, dependency child rows, and outcomes/errors. Callback nodes can add named intermediate stages by returning them in `MigrationBatchResult.DebugStages`.
+
+For one-to-many or merged transformations within the current batch, `MigrationDebugStage.ParentRecordIndices` may specify, for each output record, the zero-based input record indices that contributed to it. For example, `new IReadOnlyList<int>[] { new[] { 0, 1 } }` says one output row came from input rows 0 and 1.
+
+For a row that combines records from distinct dependency batches, the callback can use `StoredBatch.ParentBatchIds` and `MigrationDebugStage.ParentRecordReferences`. Each output row receives an array of `MigrationDebugParentRecordReference` values identifying a parent batch ID and an input record index. References may target the current batch or a direct parent batch, including required parent batches; a reference must point to a valid input row from that batch. `ParentRecordIndices` and `ParentRecordReferences` are mutually exclusive. When neither mapping is supplied, the engine retains its legacy positional lineage behavior. A compact input-lineage index remains available while a run is active and for the configured retention period after completion; row payload snapshots still expire based on their capture time.
+
+The engine redacts JSON properties whose names include common credential, password, secret, token, authorization, API-key, private-key, connection-string, or SAS markers. This is a defense in depth, not a guarantee that arbitrary sensitive values are recognized. Do not capture data unless its storage is approved. SQLite is not encrypted by this feature.
+
+Configuration snapshots use the same name-based redaction policy. Script blocks are represented by a marker rather than evaluated or shown. Connection instance details are safe property snapshots, not retained live .NET objects; older runs created before this metadata was added remain viewable but cannot reconstruct configuration or connection details.
+
+The default snapshot retention is 30 days; set `-DebugCaptureRetentionDays` from 1 to 3650 days. Expired snapshots are removed when the dashboard starts and when new snapshots are captured. Run graph, batch outcomes, checkpoints, and other basic metadata are not removed by this policy. Resume a run with the same debug-capture and retention settings.
+
+Snapshots carry deterministic lineage IDs, stage names, attempt numbers, batch/step references, and parent IDs for generated dependency children and explicitly mapped merged rows. Selecting a row follows every recorded parent-child link in both directions so the dashboard can show multiple contributing rows across the pipeline. Transform and Filter steps record their outputs with input-row lineage, including expanded records. For callback-provided intermediate stages, handlers should provide `ParentRecordIndices` for reordered, merged, split, or otherwise non-positional output, and `ParentRecordReferences` when a row depends on records from multiple stored parent batches.
+
+## Demo
+
+From the repository root, with Node.js/npm, the .NET 10 SDK, and PowerShell 7.6+ installed:
+
+```powershell
+pwsh ./examples/dashboard/Setup-Example.ps1
+pwsh ./examples/dashboard/example.ps1
+```
+
+The demo uses synthetic customer records and callback steps; it does not connect to Dataverse. It starts the dashboard, runs a deliberately paced 48-batch extract/transform/load graph with debug capture enabled, and keeps the server alive after completion so you can inspect the run and trace rows. It stores data under `examples/dashboard/state`.
+
+## HTTP API
+
+| Method and path | Description |
+| --- | --- |
+| `GET /api/runs` | Recent run summaries and pipeline metadata. |
+| `GET /api/runs/{runId}` | One run summary, per-step status/count/timing, sanitized configuration, and connection instance snapshots. |
+| `GET /api/configuration` | In-memory configuration preview supplied when the dashboard started; returns 404 if none was supplied. |
+| `GET /api/runs/{runId}/batches/{stepId}?limit=100` | Recent batch states, attempts, outcomes, and errors. Limit is 1–500. |
+| `GET /api/runs/{runId}/snapshots?batchId=...&lineageId=...&limit=500` | Captured rows for a run. Returns 404 if debug capture was disabled. |
+| `GET /api/runs/{runId}/rows?stepId=...&stageName=...&search=...&sortColumn=record&sortDirection=descending&filters=...&limit=100&offset=0` | Searchable, sorted, filtered pages of input/output snapshots for one pipeline step, with counts and payload-column names for each captured stage. `stageName` is optional and filters to an exact stage. `filters` is a JSON object mapping column IDs (`record`, `attempt`, `captured`, `batch`, `lineage`, `stage`, `payload-json`, or `payload:<property>`) to substring matches. Limit is 1–500; offset is non-negative. |
+| `GET /api/runs/{runId}/trace/{lineageId}` | Captured lineage history, including recorded child relationships. |
+| `GET /health` | Local host readiness check. |

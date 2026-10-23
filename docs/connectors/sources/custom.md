@@ -1,0 +1,54 @@
+# Custom PowerShell source
+
+The `custom` source calls a paged PowerShell callback. It may use any caller-provided non-null runtime connection object and does not require a file path.
+
+## Configuration and callback example
+
+```powershell
+Source = @{
+    Type = 'custom'
+    ConnectionId = 'service'
+    Key = 'SourceId'
+    Id = 'DataverseId'
+    Custom = @{
+        Identity = 'customers-source-v1'
+        PageSize = 500
+        Modules = @('My.Source.Module')
+        Callback = {
+            param($Connection, $Cursor, $PageSize, $StepId, $Path)
+            @{
+                Records = @()
+                NextCursor = $null
+                Done = $true
+            }
+        }
+        CountCallback = {
+            param($Connection, $StepId, $Path, $Options)
+            [long]$Connection.RecordCount
+        }
+    }
+}
+```
+
+`Callback` receives the runtime connection, prior cursor (`$null` on first call), configured page size, step ID, and path argument (null for this connector). It must emit exactly one page object:
+
+- `Records`: required array of record objects.
+- `Done`: required Boolean.
+- `NextCursor`: optional cursor; when `Done` is false it must be non-empty and different from the previous cursor.
+
+Every page must contain no more than `PageSize` records. Diagnostics must go to a non-output stream such as `Write-Verbose`; additional success-stream output invalidates the page.
+
+When no positive `ExpectedRecordCount` is configured, the optional `CountCallback` runs once before the migration starts and receives the runtime connection, step ID, path, and source `Options` hashtable. It must return exactly one non-negative integer, using a provider-side count operation rather than reading records. Its result supplies the source's progress total and is checked against the streamed row count; without it, the count remains unknown until the stream is consumed.
+
+## Options
+
+| Property | Required | Default | Description |
+|---|---:|---:|---|
+| `Identity` | Yes | — | Stable implementation identity included in resume compatibility. Change it when callback behavior changes. |
+| `Callback` | Yes | — | Scriptblock implementing the page protocol. |
+| `CountCallback` | No | — | Optional lightweight count query that returns one non-negative integer. |
+| `PageSize` | No | `100` | Positive maximum number of records returned by a page. |
+| `Modules` | No | `[]` | Module names or paths imported in the embedded runspace pool. |
+| `MaxConcurrency` | No | `1` | Accepted positive integer. This field does not configure a source-specific callback semaphore; each source enumeration fetches its pages sequentially. |
+
+The page cursor is local to one enumeration, not the scheduler checkpoint. On resume, the callback is restarted and records are replayed through the last completed root key. Return records in a stable order by `Source.Key`; make the callback deterministic and replayable. A source capable of seeking directly to the checkpoint key may avoid rereading earlier pages.
