@@ -23,14 +23,70 @@ The runtime needs PowerShell 7.6+ and the .NET 10 SDK; it does not require SSIS,
 - Streaming one- and multi-parent relationships: join children to keyed parent rows as they become available instead of waiting for every parent job to finish. Unmatched non-null keys fail clearly; null relationship keys remain unjoined.
 - Bounded, fair scheduling with per-step queue limits and downstream-capacity reservations, so a slow fan-out branch is less likely to starve other branches.
 - Checkpoints and replay-aware targets for recovery; Dataverse targets can tune batch size and concurrency automatically within configured limits.
+- Embedded SQLite and DuckDB connectors and database-backed transforms for local staging and SQL-based processing without a separate SQL Server service.
 - Optional efficient source totals from supported query/count providers, without streaming the full source solely to count it.
 - A local dashboard for live input/output throughput, target progress and outcomes, execution timeline, runtime hotspots, and optional captured-row lineage.
 
 ## How it works
 
-PowerShell defines a directed acyclic graph of migration steps and named connections. The C#/.NET engine schedules bounded batches, coordinates row-flow and completion dependencies, and persists run state for recovery. Optional debug capture records inputs and outputs for row tracing.
+PowerShell defines a directed acyclic graph of migration steps and named connections. The C#/.NET engine schedules bounded batches, coordinates row-flow and completion dependencies, and persists run state for recovery. Optional debug capture records inputs and outputs for row tracing. When an operation is easier to express with staging or SQL than as a streaming step, SQLite or DuckDB connectors can persist data locally and feed query results into later steps; database-backed transforms can also use a live connection. Both are embedded databases, so these workflows do not require a separate SQL Server service.
 
 The standalone data-flow API separately provides streaming Append, sorted Merge, external-memory Sort, Transform, and Filter nodes. See the [transformation reference](./docs/transformations/README.md), [step configuration](./docs/configuration.md), and [developer engine overview](./docs/dev/engine-overview.md) for usage and implementation details.
+
+For operations that are not practical as a streaming transform, SQLite and DuckDB connectors and database-backed transforms can stage and query data locally. These embedded engines provide set-based SQL without requiring a separate SQL Server service, while keeping data processing flexible and performant.
+
+### Brief configuration and invocation
+
+Steps are ordinary PowerShell hashtables. This small CSV-to-Dataverse example declares a source, a row transform, and an upsert target, then runs the graph with `Invoke-Migration`:
+
+```powershell
+$steps = @(
+    @{
+        Id = 'AccountsSource'
+        Type = 'source'
+        Inputs = @()
+        Source = @{
+            Type = 'csv'
+            ConnectionId = 'files'
+            Path = 'account.csv'
+            Key = 'id'
+        }
+    }
+    @{
+        Id = 'MapAccounts'
+        Type = 'transform'
+        Inputs = @('AccountsSource')
+        Script = {
+            param($row)
+            @{
+                new_salesforceid = [string]$row.id
+                name = [string]$row.name
+            }
+        }
+    }
+    @{
+        Id = 'AccountsTarget'
+        Type = 'target'
+        Inputs = @('MapAccounts')
+        Target = @{
+            Type = 'dataverse'
+            ConnectionId = 'crm'
+            Table = 'account'
+            Operation = 'Upsert'
+            BatchSize = 'auto'
+            Options = @{ MatchOn = ,@('new_salesforceid') }
+        }
+    }
+)
+
+$connections = @{
+    files = [System.IO.DirectoryInfo]'/data/import'
+    crm = $dataverseConnection
+}
+
+Invoke-Migration -DatabasePath './migration.sqlite3' `
+    -RunName 'Account import' -Steps $steps -Connections $connections
+```
 
 ## Examples: standalone PowerShell migrations
 
@@ -88,7 +144,13 @@ pwsh ./examples/dashboard/example.ps1
 
 Open the printed `http://127.0.0.1:5180` URL while the 48-batch sample runs. Afterward, the server remains available for completed-run inspection until you press Enter. `Start-MigrationDashboard -Steps $steps -Connections $connections` also opens a configuration preview without executing a migration; use [`Get-MigrationRun`](./docs/cmdlets/get-migration-run.md) to list or inspect saved execution history. See the [dashboard guide](./docs/cmdlets/migration-dashboard.md) for retention and security details.
 
-![Migration4Dataverse dashboard at 90% during a long-running migration, showing stage tabs, separate payload columns, and a selected row's captured values across the graph](./docs/assets/migration-dashboard-running.png)
+**Complex engine graph:** configuration-only preview of the 37-step Dataverse sample, showing independent sources, streaming joins, transforms, and targets. No migration is executing.
+
+![Configuration preview of the complex Dataverse example, showing independent source streams, streaming joins, transforms, and target nodes](./docs/assets/dataverse-migration-graph.png)
+
+**Dashboard UI:** a running sample with its dependency graph, captured rows, and selected-row lineage.
+
+![Migration4Dataverse dashboard during a migration, showing the dependency graph, captured rows, and selected-row lineage](./docs/assets/migration-dashboard-running.png)
 
 ## Documentation
 
