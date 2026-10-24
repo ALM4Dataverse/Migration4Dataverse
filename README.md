@@ -152,6 +152,18 @@ Open the printed `http://127.0.0.1:5180` URL while the 48-batch sample runs. Aft
 
 ![Migration4Dataverse dashboard during a migration, showing the dependency graph, captured rows, and selected-row lineage](./docs/assets/migration-dashboard-running.png)
 
+### Screenshots from the running Dataverse example
+
+These views were captured during the full Salesforce Kaggle migration, using its 37-step graph and live run progress:
+
+![Running Dataverse migration with JoinOpportunities selected, its related graph branch highlighted, and the view zoomed in](./docs/assets/dashboard-graph-selected.png)
+
+![Live Dataverse migration table view with per-step status, row counts, and throughput charts](./docs/assets/dashboard-table-view.png)
+
+![Expanded JoinOpportunities step inspection with captured input rows and row-lineage links](./docs/assets/dashboard-step-inspection.png)
+
+![Run progress panel with input and output throughput, elapsed time, target row counts, and errors](./docs/assets/dashboard-progress-panel.png)
+
 ## Documentation
 
 - [Documentation index](./docs/README.md) — public cmdlets, step configuration, concepts, connectors, and transformations.
