@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Security;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Migration4Dataverse.Engine.Storage;
 
 namespace Migration4Dataverse.Engine.PowerShell;
 
@@ -23,7 +24,10 @@ public static class MigrationConfigurationSnapshot
         "sas"
     ];
 
-    public static string CreateJson(PSObject[] steps, IDictionary connections)
+    public static string CreateJson(
+        PSObject[] steps,
+        IDictionary connections,
+        MigrationSchedulerLimits? schedulerLimits = null)
     {
         ArgumentNullException.ThrowIfNull(steps);
         ArgumentNullException.ThrowIfNull(connections);
@@ -55,11 +59,21 @@ public static class MigrationConfigurationSnapshot
         }
 
         var connectionNodes = CreateConnectionNodes(connections);
-        return new JsonObject
+        var configuration = new JsonObject
         {
             ["steps"] = stepNodes,
             ["connections"] = connectionNodes
-        }.ToJsonString();
+        };
+        if (schedulerLimits is not null)
+        {
+            configuration["schedulerLimits"] = new JsonObject
+            {
+                ["maxDegreeOfParallelism"] = schedulerLimits.MaxDegreeOfParallelism,
+                ["maxQueuedBatches"] = schedulerLimits.MaxQueuedBatches,
+                ["maxQueuedBatchesPerStep"] = schedulerLimits.MaxQueuedBatchesPerStep
+            };
+        }
+        return configuration.ToJsonString();
     }
 
     public static string CaptureConnectionInstances(IDictionary connections, string phase)

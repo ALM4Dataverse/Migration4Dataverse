@@ -21,6 +21,63 @@ public sealed class InvokeMigrationCommandTests
     }
 
     [Fact]
+    public void NoRetryDiagnosticModeCapsSchedulerAttemptsAtOne()
+    {
+        var temporaryDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"migration4dataverse-no-retry-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(temporaryDirectory);
+        var attemptsPath = Path.Combine(temporaryDirectory, "attempts.txt");
+        var escapedAttemptsPath = attemptsPath.Replace("'", "''", StringComparison.Ordinal);
+        var step = PSObject.AsPSObject(new
+        {
+            Id = "FailingCallback",
+            Type = "callback",
+            Inputs = Array.Empty<string>(),
+            ReadBatches = ScriptBlock.Create("""
+                param($checkpoint, $connection, $cursor)
+                if ($null -eq $cursor) {
+                    [Migration4Dataverse.Engine.Scheduling.MigrationWorkBatch]::new(
+                        '{"Records":[{"id":1}]}',
+                        '"done"',
+                        $true)
+                }
+                """),
+            ExecuteBatch = ScriptBlock.Create(
+                $"[System.IO.File]::AppendAllText('{escapedAttemptsPath}', 'x'); throw 'intentional test failure'")
+        });
+
+        try
+        {
+            using var powershell = System.Management.Automation.PowerShell.Create();
+            powershell.AddCommand("Import-Module")
+                .AddParameter("Name", typeof(InvokeMigrationCommand).Assembly.Location);
+            powershell.Invoke();
+            Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
+
+            powershell.Commands.Clear();
+            var exception = Assert.Throws<CmdletInvocationException>(() =>
+                powershell.AddCommand("Invoke-Migration")
+                .AddParameter("DatabasePath", Path.Combine(temporaryDirectory, "migration.sqlite3"))
+                .AddParameter("RunName", "NoRetryDiagnosticTest")
+                .AddParameter("RunId", "no-retry-diagnostic-test")
+                .AddParameter("Steps", new[] { step })
+                .AddParameter("MaxAttempts", 4)
+                .AddParameter("DataverseNoRetryDiagnosticMode", true)
+                .Invoke());
+
+            Assert.Contains("failed after 1 attempts", exception.Message, StringComparison.Ordinal);
+            Assert.Equal("x", File.ReadAllText(attemptsPath));
+            Assert.Contains(powershell.Streams.Warning, warning =>
+                warning.Message.Contains("no-retry diagnostic mode is enabled", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void BinaryCmdletWritesLivePowerShellProgressForLongRunningWork()
     {
         var temporaryDirectory = Path.Combine(
@@ -1053,6 +1110,147 @@ public sealed class InvokeMigrationCommandTests
                     Custom = (object?)null
                 }
             });
+        }
+
+        [Fact]
+        public void BinaryCmdletStagesSingleOutputJoinRecordsWithoutCollapsingArray()
+        {
+            var temporaryDirectory = Path.Combine(
+                Path.GetTempPath(),
+                $"migration4dataverse-single-join-output-{Guid.NewGuid():N}");
+            var sourceDirectory = Path.Combine(temporaryDirectory, "source");
+            var targetDirectory = Path.Combine(temporaryDirectory, "target");
+            Directory.CreateDirectory(sourceDirectory);
+            Directory.CreateDirectory(targetDirectory);
+
+            try
+            {
+                WriteJsonLines(
+                    Path.Combine(sourceDirectory, "children.jsonl"),
+                    """
+                    {"SourceId":"C1","JoinKey":"A"}
+                    {"SourceId":"C2","JoinKey":"B"}
+                    """);
+                WriteJsonLines(
+                    Path.Combine(sourceDirectory, "parents.jsonl"),
+                    """
+                    {"SourceId":"A"}
+                    {"SourceId":"X"}
+                    """);
+                WriteJsonLines(
+                    Path.Combine(sourceDirectory, "lookups.jsonl"),
+                    """
+                    {"SourceId":"L1","LookupKey":"A"}
+                    {"SourceId":"L2","LookupKey":"Z"}
+                    """);
+
+                var firstJoin = PSObject.AsPSObject(new
+                {
+                    Id = "FirstJoin",
+                    Type = "join",
+                    JoinType = "inner",
+                    Inputs = new object[]
+                    {
+                        new System.Collections.Hashtable(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["Job"] = "ChildrenSource",
+                            ["As"] = "Left"
+                        },
+                        new System.Collections.Hashtable(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["Job"] = "ParentsSource",
+                            ["As"] = "Right",
+                            ["Keys"] = new System.Collections.Hashtable(StringComparer.OrdinalIgnoreCase)
+                            {
+                                ["Child"] = "JoinKey",
+                                ["Parent"] = "SourceId"
+                            }
+                        }
+                    }
+                });
+                var secondJoin = PSObject.AsPSObject(new
+                {
+                    Id = "SecondJoin",
+                    Type = "join",
+                    JoinType = "left",
+                    Inputs = new object[]
+                    {
+                        new System.Collections.Hashtable(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["Job"] = "FirstJoin",
+                            ["As"] = "First"
+                        },
+                        new System.Collections.Hashtable(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["Job"] = "LookupSource",
+                            ["As"] = "Lookup",
+                            ["Keys"] = new System.Collections.Hashtable(StringComparer.OrdinalIgnoreCase)
+                            {
+                                ["Child"] = "Left.JoinKey",
+                                ["Parent"] = "LookupKey"
+                            }
+                        }
+                    }
+                });
+                var steps = new[]
+                {
+                    SourceStep("ChildrenSource", "children.jsonl"),
+                    SourceStep("ParentsSource", "parents.jsonl"),
+                    SourceStep("LookupSource", "lookups.jsonl"),
+                    firstJoin,
+                    secondJoin,
+                    TargetStep("JoinTarget", "SecondJoin", "JoinResults")
+                };
+
+                using var powershell = System.Management.Automation.PowerShell.Create();
+                powershell.AddCommand("Import-Module")
+                    .AddParameter("Name", typeof(InvokeMigrationCommand).Assembly.Location);
+                powershell.Invoke();
+                Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
+
+                powershell.Commands.Clear();
+                var output = powershell.AddCommand("Invoke-Migration")
+                    .AddParameter("DatabasePath", Path.Combine(temporaryDirectory, "migration.sqlite3"))
+                    .AddParameter("RunName", "SingleJoinOutputTest")
+                    .AddParameter("RunId", "single-join-output-test")
+                    .AddParameter("BatchSize", 2)
+                    .AddParameter("Steps", steps)
+                    .AddParameter("Connections", new System.Collections.Hashtable
+                    {
+                        ["source"] = new DirectoryInfo(sourceDirectory),
+                        ["target"] = new DirectoryInfo(targetDirectory)
+                    })
+                    .AddParameter("MaxDegreeOfParallelism", 2)
+                    .AddParameter("MaxAttempts", 1)
+                    .Invoke();
+
+                Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
+                Assert.IsType<DependencySchedulerResult>(Assert.Single(output).BaseObject);
+                var joinedRows = ReadJsonLines(
+                    Path.Combine(targetDirectory, "JoinResults", "single-join-output-test"));
+                try
+                {
+                    var joinedRow = Assert.Single(joinedRows);
+                    Assert.Equal(
+                        "A",
+                        joinedRow.RootElement
+                            .GetProperty("First")
+                            .GetProperty("Left")
+                            .GetProperty("JoinKey")
+                            .GetString());
+                }
+                finally
+                {
+                    foreach (var row in joinedRows)
+                    {
+                        row.Dispose();
+                    }
+                }
+            }
+            finally
+            {
+                Directory.Delete(temporaryDirectory, recursive: true);
+            }
         }
 
         private static PSObject Step(string id, string type, string[] inputs, ScriptBlock script)

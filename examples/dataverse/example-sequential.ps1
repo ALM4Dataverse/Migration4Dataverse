@@ -835,6 +835,8 @@ $dashboard = Start-MigrationDashboard -DatabasePath $databasePath
 try {
     Write-Host 'Migration dashboard is available at:'
     Write-Host "  $($dashboard.Url)"
+    # Auto-tuned Dataverse limits are reused by target step ID from this database on later runs.
+    # Clear one or all saved profiles with Clear-MigrationTargetTuning when retuning is needed.
     Invoke-Migration `
         -DatabasePath $databasePath `
         -RunName $runName `

@@ -415,9 +415,9 @@ public sealed class RowLinkedSourceBatchSource
 
     private static (string Key, long Ordinal)? ReadCursor(MigrationStepCheckpoint checkpoint)
     {
-        if (checkpoint.LastCompletedSequence < 0)
+        if (checkpoint.ResumeSequence < 0)
         {
-            if (checkpoint.CursorJson is not null)
+            if (checkpoint.ResumeCursorJson is not null)
             {
                 throw new InvalidDataException("An initial source checkpoint must not contain a cursor.");
             }
@@ -425,13 +425,13 @@ public sealed class RowLinkedSourceBatchSource
             return null;
         }
 
-        if (string.IsNullOrWhiteSpace(checkpoint.CursorJson))
+        if (string.IsNullOrWhiteSpace(checkpoint.ResumeCursorJson))
         {
             throw new InvalidDataException(
-                $"Checkpoint sequence {checkpoint.LastCompletedSequence} has no source cursor.");
+                $"Checkpoint sequence {checkpoint.ResumeSequence} has no source cursor.");
         }
 
-        using var cursor = JsonDocument.Parse(checkpoint.CursorJson);
+        using var cursor = JsonDocument.Parse(checkpoint.ResumeCursorJson);
         if (cursor.RootElement.ValueKind != JsonValueKind.Object ||
             !cursor.RootElement.TryGetProperty("LastKey", out var keyElement) ||
             keyElement.ValueKind != JsonValueKind.String ||

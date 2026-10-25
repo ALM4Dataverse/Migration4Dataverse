@@ -131,7 +131,9 @@ pwsh ./examples/dataverse/example-sequential.ps1
 
 To resume an interrupted Dataverse run, set `$env:M4D_RUN_ID` to that run's stored ID before running `example.ps1`; this reuses the existing checkpoints and migration database.
 
-The CSV, JSON Lines, Parquet, SQLite, DuckDB, and custom examples are small demonstrations. The Dataverse example processes the full Kaggle dataset (257,375 rows) using 250-row batches and 32 scheduler workers; Dataverse writes sharing one connection remain serialized. Debug capture is enabled for lineage and stores payload snapshots in the SQLite migration database, so expect substantially higher local storage use than the source CSV size. To change source, target, or run settings, edit the relevant `example.ps1`. See the [step and connector reference](./docs/reference.md) for supported options and callback contracts.
+Dataverse auto batch-size experiments are serialized across the pipeline and scored against total successful target throughput. Auto concurrency shares one adaptive budget per connection and uses available retry/throttle telemetry; both values persist in the migration SQLite database and are reused when compatible with the target and connection. Normal retries remain enabled; `-DataverseNoRetryDiagnosticMode` is available for deliberate no-retry diagnostics. Clear a single target profile or all saved profiles with `Clear-MigrationTargetTuning`.
+
+The CSV, JSON Lines, Parquet, SQLite, DuckDB, and custom examples are small demonstrations. The Dataverse example processes the full Kaggle dataset (257,375 rows) using 250-row batches and 32 scheduler workers; targets sharing a connection use the same adaptive concurrency budget. Debug capture is enabled for lineage and stores payload snapshots in the SQLite migration database, so expect substantially higher local storage use than the source CSV size. To change source, target, or run settings, edit the relevant `example.ps1`. See the [step and connector reference](./docs/reference.md) for supported options and callback contracts.
 
 ## Live migration dashboard demo
 

@@ -14,19 +14,35 @@ internal sealed class MigrationStepSet : IDisposable
     public MigrationStepSet(
         IReadOnlyList<MigrationStepDefinition> steps,
         IReadOnlyList<SemaphoreSlim> semaphores,
-        IReadOnlyList<AdaptiveDataverseTargetTuner> targetTuners)
+        IReadOnlyList<PipelineAdaptiveDataverseConnectionController> targetControllers,
+        PipelineThroughputMeter throughputMeter)
     {
         Steps = steps;
         _semaphores = semaphores;
-        TargetTuners = targetTuners;
+        TargetControllers = targetControllers;
+        ThroughputMeter = throughputMeter;
     }
 
     public IReadOnlyList<MigrationStepDefinition> Steps { get; }
 
-    public IReadOnlyList<AdaptiveDataverseTargetTuner> TargetTuners { get; }
+    public IReadOnlyList<PipelineAdaptiveDataverseConnectionController> TargetControllers { get; }
+
+    public PipelineThroughputMeter ThroughputMeter { get; }
+
+    public void PersistTuningProfiles()
+    {
+        foreach (var targetController in TargetControllers)
+        {
+            targetController.PersistCurrentConcurrency();
+        }
+    }
 
     public void Dispose()
     {
+        foreach (var targetController in TargetControllers)
+        {
+            targetController.Dispose();
+        }
         foreach (var semaphore in _semaphores)
         {
             semaphore.Dispose();
@@ -237,14 +253,16 @@ internal static partial class PowerShellMigrationStepFactory
 
         if ($context.Type -eq 'target' -and $outputRecords.Count -gt 0) {
             $records = $outputRecords.ToArray()
+            $targetExecutionLease = $null
             $targetTuningLease = $null
             $targetSucceeded = $false
             if ($context.TargetType -in @('dataverse', 'custom', 'sqlite', 'duckdb')) {
-                if ($null -ne $context.TargetTuner) {
-                    $targetTuningLease = $context.ExecutionLease
-                    if ($null -eq $targetTuningLease) {
-                        throw "Target step '$($context.StepId)' reached execution without its tuning lease."
+                if ($null -ne $context.TargetController) {
+                    $targetExecutionLease = $context.ExecutionLease
+                    if ($null -eq $targetExecutionLease) {
+                        throw "Target step '$($context.StepId)' reached execution without its Dataverse connection lease."
                     }
+                    $targetTuningLease = $targetExecutionLease
                 }
                 elseif ($null -eq $context.ExecutionLease) {
                     throw "Target step '$($context.StepId)' reached execution without its concurrency lease."
@@ -271,7 +289,7 @@ internal static partial class PowerShellMigrationStepFactory
                                 $context.BatchSize
                             }
                             MaxDegreeOfParallelism = 1
-                            Retries = 5
+                            Retries = if ($context.DisableDataverseRetriesForDiagnostics) { 0 } else { 5 }
                             InitialRetryDelay = 2
                             ErrorAction = 'Stop'
                         }
@@ -374,20 +392,32 @@ internal static partial class PowerShellMigrationStepFactory
                     }
                 }
                 $targetSucceeded = $true
+                $context.PipelineThroughputMeter.Record([long]$records.Count)
             }
             finally {
-                if ($null -ne $targetTuningLease) {
-                    $context.TargetTuner.Complete($targetTuningLease, $records.Count, $targetSucceeded)
+                if ($null -ne $targetExecutionLease) {
+                    if ($targetSucceeded) {
+                        $context.TargetController.Complete($targetExecutionLease, $records.Count, $true)
+                    }
+                    else {
+                        try {
+                            $context.TargetController.Complete($targetExecutionLease, $records.Count, $false)
+                        }
+                        catch {
+                            Write-Warning -WarningAction Continue "Failed to persist tuning profile for target '$($context.StepId)' while handling a failed target batch: $($_.Exception.Message)"
+                        }
+                    }
                 }
             }
         }
 
         if ($context.JoinInputConsumers.Count -gt 0) {
-            $joinInputRecords = if ($null -ne $targetOutputRecords) {
-                $targetOutputRecords.ToArray()
+            $joinInputRecords = [System.Collections.Generic.List[object]]::new()
+            if ($null -ne $targetOutputRecords) {
+                $joinInputRecords.AddRange($targetOutputRecords)
             }
             else {
-                $outputRecords.ToArray()
+                $joinInputRecords.AddRange($outputRecords)
             }
             foreach ($joinConsumer in $context.JoinInputConsumers) {
                 $stagedRecords = [System.Collections.Generic.List[Migration4Dataverse.Engine.Storage.JoinInputRecordMapping]]::new()
@@ -508,8 +538,8 @@ internal static partial class PowerShellMigrationStepFactory
         }
 
         $outcomeData = [ordered]@{ Succeeded = $outputRecords.Count; Failed = 0 }
-        if ($context.TargetType -eq 'dataverse' -and $null -ne $context.TargetTuner) {
-            $outcomeData.SpecialistInfo = $context.TargetTuner.GetDashboardState()
+        if ($context.TargetType -eq 'dataverse' -and $null -ne $context.TargetController) {
+            $outcomeData.SpecialistInfo = $context.TargetController.GetDashboardState($context.StepId)
         }
         $outcomes = ConvertTo-Json -InputObject $outcomeData -Depth 10 -Compress -ErrorAction Stop
         [Migration4Dataverse.Engine.Scheduling.MigrationBatchResult]::new(

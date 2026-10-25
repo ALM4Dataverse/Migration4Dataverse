@@ -367,7 +367,10 @@ public sealed class MigrationDashboardTests
                 ["State"] = "Open"
             }
         };
-        var configurationJson = MigrationConfigurationSnapshot.CreateJson([step], connections);
+        var configurationJson = MigrationConfigurationSnapshot.CreateJson(
+            [step],
+            connections,
+            new MigrationSchedulerLimits(4, 64, 32));
         var initialSnapshot = MigrationConfigurationSnapshot.AppendConnectionInstanceSnapshot(
             null,
             MigrationConfigurationSnapshot.CaptureConnectionInstances(connections, "Started"));
@@ -392,6 +395,10 @@ public sealed class MigrationDashboardTests
             .GetProperty("targetConnectionId").GetString());
         Assert.Equal("SqlServer", run.Configuration.Value.GetProperty("steps")[0]
             .GetProperty("targetConnectionType").GetString());
+        var schedulerLimits = run.Configuration.Value.GetProperty("schedulerLimits");
+        Assert.Equal(4, schedulerLimits.GetProperty("maxDegreeOfParallelism").GetInt32());
+        Assert.Equal(64, schedulerLimits.GetProperty("maxQueuedBatches").GetInt32());
+        Assert.Equal(32, schedulerLimits.GetProperty("maxQueuedBatchesPerStep").GetInt32());
         Assert.Equal("dbo.Customer", run.Configuration!.Value.GetProperty("steps")[0]
             .GetProperty("properties").GetProperty("Target").GetProperty("Table").GetString());
         Assert.Equal("[REDACTED]", run.Configuration.Value.GetProperty("connections")[0]
@@ -737,6 +744,12 @@ public sealed class MigrationDashboardTests
             "web-test",
             "hash",
             pipelineJson: """[{"Id":"Customers","Inputs":[],"HasSource":true,"Type":"source"}]""");
+        var leaseStartedUtc = DateTimeOffset.UtcNow;
+        Assert.True(store.TryAcquireRunLease(
+            "web-run",
+            "scheduler-1",
+            TimeSpan.FromMinutes(1),
+            leaseStartedUtc));
         var port = GetAvailablePort();
         await using var dashboard = await MigrationDashboardServer.StartAsync(
             database.Path,
@@ -747,10 +760,18 @@ public sealed class MigrationDashboardTests
         Assert.Contains("/assets/index-", html, StringComparison.Ordinal);
         Assert.Contains("/logo.png", html, StringComparison.Ordinal);
         Assert.NotEmpty(await client.GetByteArrayAsync(new Uri(dashboard.Url, "/logo.png")));
+        var processMetrics = await client.GetFromJsonAsync<JsonElement>(
+            new Uri(dashboard.Url, "/api/process-metrics"));
+        Assert.True(processMetrics.GetProperty("logicalProcessorCount").GetInt32() > 0);
+        Assert.True(processMetrics.GetProperty("workingSetBytes").GetInt64() > 0);
+        Assert.True(processMetrics.GetProperty("managedHeapBytes").GetInt64() > 0);
+        Assert.True(processMetrics.GetProperty("cpuTimeMilliseconds").GetDouble() >= 0);
+        Assert.True(processMetrics.TryGetProperty("memoryLimitBytes", out _));
         var runs = await client.GetFromJsonAsync<MigrationRunSummary[]>(
             new Uri(dashboard.Url, "/api/runs"));
         var run = Assert.Single(runs!);
         Assert.Equal("web-run", run.RunId);
+        Assert.Equal(leaseStartedUtc.AddMinutes(1), run.SchedulerLeaseExpiresUtc);
         Assert.Single(run.Steps);
 
         using var remoteRequest = new HttpRequestMessage(HttpMethod.Get, dashboard.Url);
@@ -761,6 +782,53 @@ public sealed class MigrationDashboardTests
             new[] { HttpStatusCode.BadRequest, HttpStatusCode.NotFound });
         Assert.Equal("ok", JsonDocument.Parse(await client.GetStringAsync(new Uri(dashboard.Url, "/health")))
             .RootElement.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task DashboardServesFullBatchErrorsByStep()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        store.CreateRun("error-details-run", "error-details-test", "hash");
+        store.EnqueueBatch("error-details-run", "BrokenStep", 0, "failed-batch", null, "{}");
+        var batch = store.TryLeaseNextBatch("error-details-run", "worker", TimeSpan.FromMinutes(1));
+        Assert.NotNull(batch);
+        const string errorDetails = "Invalid record.\n   at Example.Transform() in migration.ps1:line 12";
+        const string newerErrorDetails = "A second record failed.";
+        store.CompleteBatch(
+            batch.BatchId,
+            "worker",
+            """{"succeeded":0,"failed":1}""",
+            hasErrors: true,
+            lastError: errorDetails);
+        store.EnqueueBatch("error-details-run", "BrokenStep", 1, "newer-failed-batch", null, "{}");
+        var newerBatch = store.TryLeaseNextBatch("error-details-run", "worker", TimeSpan.FromMinutes(1));
+        Assert.NotNull(newerBatch);
+        store.CompleteBatch(
+            newerBatch.BatchId,
+            "worker",
+            """{"succeeded":0,"failed":1}""",
+            hasErrors: true,
+            lastError: newerErrorDetails);
+
+        var port = GetAvailablePort();
+        await using var dashboard = await MigrationDashboardServer.StartAsync(
+            database.Path,
+            $"http://127.0.0.1:{port}");
+        using var client = new HttpClient();
+
+        var newestErrors = await client.GetFromJsonAsync<MigrationDashboardBatch[]>(
+            new Uri(dashboard.Url, "/api/runs/error-details-run/batch-errors/BrokenStep?limit=1&offset=0"));
+        var newestError = Assert.Single(newestErrors!);
+        Assert.Equal("newer-failed-batch", newestError.BatchId);
+        Assert.Equal(newerErrorDetails, newestError.LastError);
+
+        var olderErrors = await client.GetFromJsonAsync<MigrationDashboardBatch[]>(
+            new Uri(dashboard.Url, "/api/runs/error-details-run/batch-errors/BrokenStep?limit=1&offset=1"));
+        var error = Assert.Single(olderErrors!);
+        Assert.Equal("failed-batch", error.BatchId);
+        Assert.Equal(errorDetails, error.LastError);
+        Assert.Equal(1, error.FailedRows);
     }
 
     [Fact]

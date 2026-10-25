@@ -126,4 +126,4 @@ function Stop-MigrationDashboard {
 Export-ModuleMember `
     -Function New-MigrationJobStore, Complete-MigrationBatch, Set-MigrationRunStatus, `
         Start-MigrationDashboard, Stop-MigrationDashboard `
-    -Cmdlet Invoke-Migration, Get-MigrationRun
+    -Cmdlet Invoke-Migration, Get-MigrationRun, Clear-MigrationTargetTuning

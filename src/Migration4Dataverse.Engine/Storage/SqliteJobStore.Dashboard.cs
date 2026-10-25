@@ -77,12 +77,13 @@ public sealed partial class SqliteMigrationStore
         string pipelineJson;
         string configurationJson;
         string connectionInstancesJson;
+        DateTimeOffset? schedulerLeaseExpiresUtc;
         using (var run = connection.CreateCommand())
         {
             run.CommandText = """
                 SELECT RunName, Status, CreatedUtc, UpdatedUtc, DebugCaptureEnabled,
                        DebugCaptureRetentionDays, PipelineJson, ConfigurationJson,
-                       ConnectionInstancesJson
+                       ConnectionInstancesJson, SchedulerLeaseExpiresUtc
                 FROM Runs
                 WHERE RunId = $runId;
                 """;
@@ -102,6 +103,7 @@ public sealed partial class SqliteMigrationStore
             pipelineJson = reader.GetString(6);
             configurationJson = reader.GetString(7);
             connectionInstancesJson = reader.GetString(8);
+            schedulerLeaseExpiresUtc = reader.IsDBNull(9) ? null : ParseUtc(reader.GetString(9));
         }
 
         var steps = ReadPipeline(pipelineJson);
@@ -289,6 +291,8 @@ public sealed partial class SqliteMigrationStore
 
         var allComplete = string.Equals(status, MigrationRunStatus.Completed.ToString(), StringComparison.Ordinal);
         var metricTime = DateTimeOffset.UtcNow;
+        var runIsActive = status == MigrationRunStatus.Running.ToString() &&
+                          (schedulerLeaseExpiresUtc is null || schedulerLeaseExpiresUtc > metricTime);
         var pendingBatches = steps.Sum(step => step.PendingBatches);
         var inFlightBatches = steps.Sum(step => step.InFlightBatches);
         var succeededBatches = steps.Sum(step => step.SucceededBatches);
@@ -336,7 +340,7 @@ public sealed partial class SqliteMigrationStore
             step.RowsPerSecondSamples = BuildRowsPerSecondSamples(
                 step.ActivityPeriods,
                 step.CompletedBatchRows,
-                IsComplete(step) || status != MigrationRunStatus.Running.ToString(),
+                IsComplete(step) || !runIsActive,
                 metricTime);
         }
 
@@ -363,9 +367,10 @@ public sealed partial class SqliteMigrationStore
                       step.Inputs.All(input =>
                           stepIndex.TryGetValue(input, out var inputStep) && IsComplete(inputStep)),
                 metricTime,
-                status == "Running")).ToArray(),
+                runIsActive)).ToArray(),
             ParseOptionalJson(configurationJson),
-            ParseOptionalJson(connectionInstancesJson));
+            ParseOptionalJson(connectionInstancesJson),
+            schedulerLeaseExpiresUtc);
     }
 
     private static IReadOnlyList<MigrationDashboardRateSample> BuildRowsPerSecondSamples(
@@ -450,6 +455,54 @@ public sealed partial class SqliteMigrationStore
         command.Parameters.AddWithValue("$runId", runId);
         command.Parameters.AddWithValue("$stepId", stepId);
         command.Parameters.AddWithValue("$limit", limit);
+        using var reader = command.ExecuteReader();
+        var batches = new List<MigrationDashboardBatch>();
+        while (reader.Read())
+        {
+            var outcomes = reader.IsDBNull(7) ? null : reader.GetString(7);
+            var rowCounts = outcomes is null ? default : ReadRowCounts(outcomes);
+            batches.Add(new MigrationDashboardBatch(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetInt64(3),
+                reader.GetString(4),
+                reader.GetInt32(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                outcomes,
+                ParseUtc(reader.GetString(8)),
+                ParseUtc(reader.GetString(9)),
+                rowCounts.Succeeded,
+                rowCounts.Failed));
+        }
+
+        return batches;
+    }
+
+    public IReadOnlyList<MigrationDashboardBatch> GetDashboardBatchErrors(
+        string runId,
+        string stepId,
+        int limit = 100,
+        int offset = 0)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT BatchId, RunId, StepId, Sequence, State, Attempts, LastError,
+                   OutcomesJson, CreatedUtc, UpdatedUtc
+            FROM Batches
+            WHERE RunId = $runId AND StepId = $stepId AND State = 'CompletedWithErrors'
+            ORDER BY Sequence DESC
+            LIMIT $limit OFFSET $offset;
+            """;
+        command.Parameters.AddWithValue("$runId", runId);
+        command.Parameters.AddWithValue("$stepId", stepId);
+        command.Parameters.AddWithValue("$limit", limit);
+        command.Parameters.AddWithValue("$offset", offset);
         using var reader = command.ExecuteReader();
         var batches = new List<MigrationDashboardBatch>();
         while (reader.Read())

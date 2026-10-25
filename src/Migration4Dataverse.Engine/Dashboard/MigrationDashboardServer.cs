@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -154,6 +155,23 @@ public static class MigrationDashboardServer
                 return;
             }
 
+            if (path == "/api/process-metrics")
+            {
+                using var process = Process.GetCurrentProcess();
+                process.Refresh();
+                var memoryLimitBytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+                await WriteJsonAsync(response, HttpStatusCode.OK, new
+                {
+                    cpuTimeMilliseconds = process.TotalProcessorTime.TotalMilliseconds,
+                    logicalProcessorCount = Math.Max(1, Environment.ProcessorCount),
+                    workingSetBytes = process.WorkingSet64,
+                    managedHeapBytes = GC.GetTotalMemory(forceFullCollection: false),
+                    memoryLimitBytes = memoryLimitBytes > 0 ? memoryLimitBytes : (long?)null,
+                    capturedUtc = DateTimeOffset.UtcNow
+                }, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             if (path == "/health")
             {
                 await WriteJsonAsync(response, HttpStatusCode.OK, new { status = "ok" }, cancellationToken)
@@ -191,6 +209,20 @@ public static class MigrationDashboardServer
                             runId,
                             segments[4],
                             ParseLimit(query["limit"], 100)),
+                        cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
+                if (segments.Length == 5 && segments[3] == "batch-errors")
+                {
+                    await WriteJsonAsync(
+                        response,
+                        HttpStatusCode.OK,
+                        store.GetDashboardBatchErrors(
+                            runId,
+                            segments[4],
+                            ParseLimit(query["limit"], 100),
+                            ParseOffset(query["offset"])),
                         cancellationToken).ConfigureAwait(false);
                     return;
                 }

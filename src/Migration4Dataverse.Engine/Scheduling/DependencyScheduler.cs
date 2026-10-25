@@ -1,10 +1,13 @@
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using Migration4Dataverse.Engine.Storage;
 
 namespace Migration4Dataverse.Engine.Scheduling;
 
 public sealed class DependencyScheduler
 {
+    private const int MaxSqliteLeaseRetries = 5;
     private readonly SqliteMigrationStore _store;
 
     public DependencyScheduler(SqliteMigrationStore store)
@@ -54,6 +57,7 @@ public sealed class DependencyScheduler
                 step.Type,
                 step.Inputs,
                 step.CompletionDependencies,
+                step.DispatchWeight,
                 HasSource = step.ReadSourceBatches is not null,
                 ExpectedRecordCount = expectedRecordCounts[step.Id]
             }));
@@ -175,6 +179,7 @@ public sealed class DependencyScheduler
             rootSteps.Length,
             rootSteps.Select(step => step.Id),
             steps.Keys,
+            steps.ToDictionary(entry => entry.Key, entry => entry.Value.DispatchWeight, StringComparer.Ordinal),
             nonTerminalBatchCounts,
             hasDependentJobs: steps.Values.Any(step =>
                 step.Inputs.Count > 0 || step.CompletionDependencies.Count > 0));
@@ -250,7 +255,7 @@ public sealed class DependencyScheduler
         await heartbeatTask.ConfigureAwait(false);
         if (runtime.FailureTask.IsCompleted)
         {
-            throw await runtime.FailureTask.ConfigureAwait(false);
+            (await runtime.FailureTask.ConfigureAwait(false)).Throw();
         }
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -408,8 +413,8 @@ public sealed class DependencyScheduler
     {
         var source = step.ReadSourceBatches
             ?? throw new InvalidOperationException($"Root step '{step.Id}' has no batch source.");
-        var checkpoint = _store.GetStepCheckpoint(runId, step.Id);
-        var sequence = checked(checkpoint.LastCompletedSequence + 1);
+        var checkpoint = _store.GetStepSourceCheckpoint(runId, step.Id);
+        var sequence = checked(checkpoint.ResumeSequence + 1);
         var sourceKeyProperty = step.SourceKeyProperty;
         await foreach (var workBatch in source(checkpoint, cancellationToken)
                            .WithCancellation(cancellationToken)
@@ -560,16 +565,19 @@ public sealed class DependencyScheduler
 
                 try
                 {
-                    var batch = _store.TryLeaseNextBatch(
-                        runId,
-                        workerId,
-                        options.BatchLeaseDuration,
-                        stepId: candidate.StepId);
+                    var batch = await RetrySqliteLockAsync(
+                        () => _store.TryLeaseNextBatch(
+                            runId,
+                            workerId,
+                            options.BatchLeaseDuration,
+                            stepId: candidate.StepId),
+                        cancellationToken).ConfigureAwait(false);
                     if (batch is null)
                     {
                         continue;
                     }
 
+                    runtime.CandidateDispatched(candidate.StepId);
                     runtime.SignalWork();
                     if (runtime.FailureTask.IsCompleted)
                     {
@@ -610,6 +618,30 @@ public sealed class DependencyScheduler
             }
 
             await runtime.WaitForWorkAsync(options.PollInterval, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    internal static async Task<T> RetrySqliteLockAsync<T>(
+        Func<T> operation,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        for (var retry = 0; ; retry++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return operation();
+            }
+            catch (SqliteException exception) when (
+                (exception.SqliteErrorCode is 5 or 6) && retry < MaxSqliteLeaseRetries)
+            {
+                var backoffMilliseconds = Math.Min(5_000, 200 * (1 << retry));
+                var jitterMilliseconds = Random.Shared.Next(0, backoffMilliseconds / 2 + 1);
+                await Task.Delay(
+                    TimeSpan.FromMilliseconds(backoffMilliseconds + jitterMilliseconds),
+                    cancellationToken).ConfigureAwait(false);
+            }
         }
     }
 
@@ -1321,6 +1353,12 @@ public sealed class DependencyScheduler
         foreach (var step in stepArray)
         {
             ArgumentNullException.ThrowIfNull(step);
+            if (!double.IsFinite(step.DispatchWeight) || step.DispatchWeight <= 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(steps),
+                    $"Dispatch weight for step '{step.Id}' must be finite and greater than zero.");
+            }
             if (!stepMap.TryAdd(step.Id, step))
             {
                 throw new ArgumentException($"Step name '{step.Id}' is not unique.", nameof(steps));
@@ -1453,13 +1491,15 @@ public sealed class DependencyScheduler
         private readonly int _maxQueuedBatchesPerStep;
         private readonly SemaphoreSlim _workSignal = new(0, 1);
         private readonly SemaphoreSlim _dependencySignal = new(0, 1);
-        private readonly TaskCompletionSource<Exception> _failure =
+        private readonly TaskCompletionSource<ExceptionDispatchInfo> _failure =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly HashSet<string> _rootJobNames;
         private readonly string[] _stepOrder;
+        private readonly IReadOnlyDictionary<string, double> _dispatchWeights;
         private readonly Dictionary<string, long> _outstandingByStep;
         private readonly Dictionary<string, long> _producerReservationsByStep = new(StringComparer.Ordinal);
         private readonly Dictionary<string, long> _readyPendingEventsByStep;
+        private readonly Dictionary<string, long> _dispatchedByStep = new(StringComparer.Ordinal);
         private int _nextCandidateIndex;
         private TaskCompletionSource _stateChanged = NewSignal();
         private long _outstandingBatches;
@@ -1480,6 +1520,7 @@ public sealed class DependencyScheduler
             int rootFeedersRemaining,
             IEnumerable<string> rootJobNames,
             IEnumerable<string> stepNames,
+            IReadOnlyDictionary<string, double> dispatchWeights,
             IReadOnlyDictionary<string, long> outstandingByStep,
             bool hasDependentJobs)
         {
@@ -1496,6 +1537,7 @@ public sealed class DependencyScheduler
             _rootFeedersRemaining = rootFeedersRemaining;
             _rootJobNames = new HashSet<string>(rootJobNames, StringComparer.Ordinal);
             _stepOrder = stepNames.OrderBy(stepName => stepName, StringComparer.Ordinal).ToArray();
+            _dispatchWeights = dispatchWeights;
             _outstandingByStep = outstandingByStep.ToDictionary(
                 entry => entry.Key,
                 entry => entry.Value,
@@ -1506,7 +1548,7 @@ public sealed class DependencyScheduler
                 : maxQueuedBatches;
         }
 
-        public Task<Exception> FailureTask => _failure.Task;
+        public Task<ExceptionDispatchInfo> FailureTask => _failure.Task;
 
         public bool IsComplete
         {
@@ -1542,25 +1584,23 @@ public sealed class DependencyScheduler
                     return candidates;
                 }
 
-                var ordered = new List<PendingBatchStepCandidate>(candidates.Count);
-                foreach (var priorityGroup in candidates.GroupBy(candidate => candidate.Priority)
-                             .OrderBy(group => group.Key))
-                {
-                    var byStep = priorityGroup.ToDictionary(candidate => candidate.StepId, StringComparer.Ordinal);
-                    for (var offset = 0; offset < _stepOrder.Length; offset++)
-                    {
-                        var index = (_nextCandidateIndex + offset) % _stepOrder.Length;
-                        if (byStep.Remove(_stepOrder[index], out var candidate))
-                        {
-                            ordered.Add(candidate);
-                        }
-                    }
-
-                    ordered.AddRange(byStep.Values.OrderBy(candidate => candidate.StepId, StringComparer.Ordinal));
-                }
-
+                var ordered = PipelineDispatchOrderer.Order(
+                    candidates,
+                    _stepOrder,
+                    _dispatchWeights,
+                    _dispatchedByStep,
+                    _nextCandidateIndex);
                 _nextCandidateIndex = (_nextCandidateIndex + 1) % _stepOrder.Length;
                 return ordered;
+            }
+        }
+
+        public void CandidateDispatched(string stepId)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
+            lock (_stateLock)
+            {
+                _dispatchedByStep[stepId] = checked(_dispatchedByStep.GetValueOrDefault(stepId) + 1);
             }
         }
 
@@ -1843,7 +1883,7 @@ public sealed class DependencyScheduler
         public void Fail(Exception exception)
         {
             ArgumentNullException.ThrowIfNull(exception);
-            if (_failure.TrySetResult(exception))
+            if (_failure.TrySetResult(ExceptionDispatchInfo.Capture(exception)))
             {
                 SignalDependencyWork();
             }

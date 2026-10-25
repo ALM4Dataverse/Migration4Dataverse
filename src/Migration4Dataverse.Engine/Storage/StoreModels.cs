@@ -39,7 +39,10 @@ public sealed record StoredBatch(
     public IReadOnlyList<string> ParentBatchIds { get; init; } = Array.Empty<string>();
 }
 
-public sealed record PendingBatchStepCandidate(string StepId, int Priority);
+public sealed record PendingBatchStepCandidate(
+    string StepId,
+    int Priority,
+    long PendingBatchCount = 1);
 
 public sealed record SourceKeyBatchReference(
     string SourceKey,
@@ -55,7 +58,18 @@ public sealed record MigrationStepCheckpoint(
     string StepId,
     long LastCompletedSequence,
     string? CursorJson,
-    DateTimeOffset? UpdatedUtc);
+    DateTimeOffset? UpdatedUtc)
+{
+    public long? LastEnqueuedSequence { get; init; }
+
+    public string? LastEnqueuedCursorJson { get; init; }
+
+    public long ResumeSequence => LastEnqueuedSequence ?? LastCompletedSequence;
+
+    public string? ResumeCursorJson => LastEnqueuedSequence.HasValue
+        ? LastEnqueuedCursorJson
+        : CursorJson;
+}
 
 public sealed record DependencyEvent(
     string EventId,
@@ -116,6 +130,19 @@ public sealed record MigrationRunProgress(
     public long NonTerminalBatchCount => PendingBatches + InFlightBatches;
 }
 
+public sealed record MigrationSchedulerLimits(
+    int MaxDegreeOfParallelism,
+    int MaxQueuedBatches,
+    int MaxQueuedBatchesPerStep);
+
+public sealed record DataverseTargetTuningProfile(
+    string StepId,
+    int? BatchSize,
+    int? MaxConcurrency,
+    DateTimeOffset UpdatedUtc,
+    int AlgorithmVersion = 1,
+    string? ConnectionId = null);
+
 public sealed record MigrationRunSummary(
     string RunId,
     string RunName,
@@ -132,7 +159,8 @@ public sealed record MigrationRunSummary(
     long FailedRows,
     IReadOnlyList<MigrationDashboardStep> Steps,
     JsonElement? Configuration = null,
-    JsonElement? ConnectionInstances = null);
+    JsonElement? ConnectionInstances = null,
+    DateTimeOffset? SchedulerLeaseExpiresUtc = null);
 
 public sealed record MigrationDashboardStep(
     string Id,

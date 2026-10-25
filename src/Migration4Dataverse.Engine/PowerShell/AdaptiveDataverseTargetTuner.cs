@@ -11,12 +11,15 @@ internal sealed class AdaptiveDataverseTargetTuner
 
     private readonly object _sync = new();
     private readonly Func<long> _getTimestamp;
+    private readonly Func<double>? _getPipelineThroughput;
     private readonly int[] _batchCandidates;
     private readonly int[] _concurrencyCandidates;
     private readonly int _maxBatchSize;
     private readonly int _maxConcurrency;
+    private readonly int? _persistedConcurrency;
     private readonly bool _autoBatchSize;
     private readonly bool _autoConcurrency;
+    private readonly Action<int?, int?>? _persistTunedValues;
     private int _active;
     private int _epoch;
     private int _batchIndex;
@@ -30,6 +33,7 @@ internal sealed class AdaptiveDataverseTargetTuner
     private int _bestBatchSize;
     private int _bestConcurrency;
     private bool _transitionPending;
+    private bool _profilePersisted;
     private TuningStage _stage;
 
     public AdaptiveDataverseTargetTuner(
@@ -39,26 +43,55 @@ internal sealed class AdaptiveDataverseTargetTuner
         bool autoConcurrency,
         int fixedBatchSize,
         int fixedConcurrency,
-        Func<long>? getTimestamp = null)
+        Func<long>? getTimestamp = null,
+        Func<double>? getPipelineThroughput = null,
+        int? persistedBatchSize = null,
+        int? persistedConcurrency = null,
+        Action<int?, int?>? persistTunedValues = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxBatchSize);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxConcurrency);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(fixedBatchSize);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(fixedConcurrency);
+        if (persistedBatchSize is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(persistedBatchSize));
+        }
+        if (persistedConcurrency is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(persistedConcurrency));
+        }
 
         _getTimestamp = getTimestamp ?? Stopwatch.GetTimestamp;
+        _getPipelineThroughput = getPipelineThroughput;
         _autoBatchSize = autoBatchSize;
         _autoConcurrency = autoConcurrency;
+        _persistTunedValues = persistTunedValues;
         _maxBatchSize = maxBatchSize;
         _maxConcurrency = maxConcurrency;
-        _batchCandidates = BatchSizeCandidates.Where(value => value <= maxBatchSize).ToArray();
+        var initialBatchSize = Math.Min(persistedBatchSize ?? fixedBatchSize, maxBatchSize);
+        _batchCandidates = CreateBatchCandidateOrder(
+            BatchSizeCandidates.Where(value => value <= maxBatchSize),
+            initialBatchSize);
         _concurrencyCandidates = ConcurrencyCandidates.Where(value => value <= maxConcurrency).ToArray();
-        BatchSize = autoBatchSize ? 1 : Math.Min(fixedBatchSize, maxBatchSize);
-        MaxConcurrency = autoConcurrency ? 1 : Math.Min(fixedConcurrency, maxConcurrency);
-        _stage = autoBatchSize ? TuningStage.BatchSize : autoConcurrency ? TuningStage.Concurrency : TuningStage.Complete;
+        var tuneBatchSize = autoBatchSize;
+        var tuneConcurrency = autoConcurrency && persistedConcurrency is null;
+        _persistedConcurrency = autoConcurrency && persistedConcurrency.HasValue
+            ? Math.Min(persistedConcurrency.Value, maxConcurrency)
+            : null;
+        BatchSize = tuneBatchSize ? _batchCandidates[0] : initialBatchSize;
+        MaxConcurrency = tuneConcurrency || tuneBatchSize && autoConcurrency
+            ? 1
+            : _persistedConcurrency ?? Math.Min(fixedConcurrency, maxConcurrency);
+        _stage = tuneBatchSize
+            ? TuningStage.BatchSize
+            : tuneConcurrency
+                ? TuningStage.Concurrency
+                : TuningStage.Complete;
+        _profilePersisted = _stage == TuningStage.Complete;
         if (_stage == TuningStage.BatchSize)
         {
-            _batchIndex = Array.IndexOf(_batchCandidates, 1);
+            _batchIndex = 0;
         }
         else if (_stage == TuningStage.Concurrency)
         {
@@ -72,7 +105,7 @@ internal sealed class AdaptiveDataverseTargetTuner
 
     public string StepId { get; set; } = string.Empty;
 
-    public TargetTuningLease Acquire()
+    public TargetTuningLease Acquire(bool countsForTuning = true)
     {
         lock (_sync)
         {
@@ -82,11 +115,11 @@ internal sealed class AdaptiveDataverseTargetTuner
             }
 
             _active++;
-            return new TargetTuningLease(this, _epoch, BatchSize, _getTimestamp());
+            return CreateLease(countsForTuning);
         }
     }
 
-    public TargetTuningLease? TryAcquire()
+    public TargetTuningLease? TryAcquire(bool countsForTuning = true)
     {
         lock (_sync)
         {
@@ -96,7 +129,7 @@ internal sealed class AdaptiveDataverseTargetTuner
             }
 
             _active++;
-            return new TargetTuningLease(this, _epoch, BatchSize, _getTimestamp());
+            return CreateLease(countsForTuning);
         }
     }
 
@@ -116,7 +149,10 @@ internal sealed class AdaptiveDataverseTargetTuner
                 throw new InvalidOperationException("The target tuning lease is not active.");
             }
 
-            if (succeeded && lease.Epoch == _epoch && _stage != TuningStage.Complete)
+            if (succeeded &&
+                lease.CountsForTuning &&
+                lease.Epoch == _epoch &&
+                _stage != TuningStage.Complete)
             {
                 _samples++;
                 _sampleRows += rowsWritten;
@@ -133,7 +169,14 @@ internal sealed class AdaptiveDataverseTargetTuner
             {
                 FinishCandidate();
             }
-            Monitor.PulseAll(_sync);
+            try
+            {
+                PersistCompletedProfile();
+            }
+            finally
+            {
+                Monitor.PulseAll(_sync);
+            }
         }
     }
 
@@ -151,8 +194,28 @@ internal sealed class AdaptiveDataverseTargetTuner
             {
                 FinishCandidate();
             }
-            Monitor.PulseAll(_sync);
+            try
+            {
+                PersistCompletedProfile();
+            }
+            finally
+            {
+                Monitor.PulseAll(_sync);
+            }
         }
+    }
+
+    private void PersistCompletedProfile()
+    {
+        if (_stage != TuningStage.Complete || _profilePersisted)
+        {
+            return;
+        }
+
+        _persistTunedValues?.Invoke(
+            _autoBatchSize ? BatchSize : null,
+            _autoConcurrency ? MaxConcurrency : null);
+        _profilePersisted = true;
     }
 
     public string GetSummary()
@@ -208,7 +271,9 @@ internal sealed class AdaptiveDataverseTargetTuner
     private void FinishCandidate()
     {
         var elapsed = Stopwatch.GetElapsedTime(_sampleStart, _sampleEnd).TotalSeconds;
-        var throughput = elapsed > 0 ? _sampleRows / elapsed : 0;
+        var throughput = _getPipelineThroughput is null
+            ? elapsed > 0 ? _sampleRows / elapsed : 0
+            : _getPipelineThroughput();
         var currentValue = _stage == TuningStage.BatchSize ? BatchSize : MaxConcurrency;
         var currentBestValue = _stage == TuningStage.BatchSize ? _bestBatchSize : _bestConcurrency;
 
@@ -275,12 +340,40 @@ internal sealed class AdaptiveDataverseTargetTuner
 
     private void StartConcurrencyStage()
     {
+        if (_persistedConcurrency.HasValue)
+        {
+            MaxConcurrency = _persistedConcurrency.Value;
+            _stage = TuningStage.Complete;
+            return;
+        }
+
         _stage = TuningStage.Concurrency;
         _bestThroughput = 0;
         _bestConcurrency = 0;
         _nonImprovingCandidates = 0;
         _concurrencyIndex = Array.IndexOf(_concurrencyCandidates, 1);
         MaxConcurrency = 1;
+    }
+
+    private TargetTuningLease CreateLease(bool countsForTuning) =>
+        new(
+            this,
+            _epoch,
+            BatchSize,
+            _getTimestamp(),
+            countsForTuning,
+            _getPipelineThroughput?.Invoke() ?? 0);
+
+    private static int[] CreateBatchCandidateOrder(IEnumerable<int> candidates, int startingBatchSize)
+    {
+        var values = candidates.ToHashSet();
+        values.Add(startingBatchSize);
+        return
+        [
+            startingBatchSize,
+            .. values.Where(value => value > startingBatchSize).Order(),
+            .. values.Where(value => value < startingBatchSize).OrderDescending()
+        ];
     }
 
     private enum TuningStage
@@ -295,7 +388,9 @@ internal sealed class TargetTuningLease(
     AdaptiveDataverseTargetTuner tuner,
     int epoch,
     int batchSize,
-    long startedAt) : IDisposable
+    long startedAt,
+    bool countsForTuning,
+    double pipelineRateAtStart) : IDisposable
 {
     private int _released;
 
@@ -304,6 +399,10 @@ internal sealed class TargetTuningLease(
     public int BatchSize { get; } = batchSize;
 
     public long StartedAt { get; } = startedAt;
+
+    public bool CountsForTuning { get; } = countsForTuning;
+
+    public double PipelineRateAtStart { get; } = pipelineRateAtStart;
 
     internal bool TryMarkCompleted() => Interlocked.Exchange(ref _released, 1) == 0;
 
@@ -327,4 +426,17 @@ internal sealed record AdaptiveDataverseTargetTuningState(
     int ConcurrencyLimit,
     string Stage,
     int SamplesCompleted,
-    int SamplesPerCandidate);
+    int SamplesPerCandidate)
+{
+    public string? ConnectionId { get; init; }
+
+    public int ActiveConnectionCalls { get; init; }
+
+    public int ConnectionConcurrencyBudget { get; init; }
+
+    public int RetryCount { get; init; }
+
+    public int ThrottleCount { get; init; }
+
+    public bool RetryTelemetryAvailable { get; init; }
+}

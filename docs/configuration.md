@@ -116,7 +116,7 @@ See the [dependency guide](./concepts/dependencies.md) for examples and constrai
 | `Table` | Dataverse and database targets | Dataverse logical table name or SQLite/DuckDB output table (optionally schema-qualified). |
 | `Operation` | No | `Upsert` for Dataverse; `Write` for file, database, and custom targets. |
 | `BatchSize` | No | Positive override for the invocation's `-BatchSize`; Dataverse also accepts `auto` (the default) to tune up to the invocation batch size. |
-| `MaxConcurrency` | Dataverse only | Positive per-target limit or `auto` (default) for concurrent target batches. Auto tuning is bounded by `-MaxDegreeOfParallelism`; target steps sharing a connection tune independently. |
+| `MaxConcurrency` | Dataverse only | Positive per-target cap or `auto` (default). Auto mode shares one adaptive concurrency budget among Dataverse targets using the same connection, bounded by `-MaxDegreeOfParallelism`; batch-size experiments are serialized across the pipeline and measured against total target output throughput. |
 | `Options` | No | Connector-specific options. Database targets default to creating a missing table from the first non-empty batch; `Schema` can declare column types up front and `CreateTable = $false` requires a pre-created table. Existing table columns and types are validated. See [SQLite targets](./connectors/targets/sqlite.md) and [DuckDB targets](./connectors/targets/duckdb.md). Dataverse options include `MatchOn` and `LookupColumns`; CSV or Parquet settings are described in the [CSV](./connectors/targets/csv.md) and [Parquet](./connectors/targets/parquet.md) references. |
 | `Custom` | Custom only | Custom callback definition; see [custom targets](./connectors/targets/custom.md). |
 

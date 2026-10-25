@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using Microsoft.Data.Sqlite;
 using Migration4Dataverse.Engine.Scheduling;
 using Migration4Dataverse.Engine.Storage;
 
@@ -6,6 +7,113 @@ namespace Migration4Dataverse.Engine.Tests.Scheduling;
 
 public sealed class DependencySchedulerTests
 {
+    [Fact]
+    public async Task SqliteBusyWhileLeasingIsRetried()
+    {
+        var attempts = 0;
+        var result = await DependencyScheduler.RetrySqliteLockAsync(() =>
+        {
+            if (++attempts == 1)
+            {
+                throw new SqliteException("Database is locked.", 5, 5);
+            }
+
+            return "leased";
+        }, CancellationToken.None);
+
+        Assert.Equal("leased", result);
+        Assert.Equal(2, attempts);
+    }
+
+    [Fact]
+    public async Task SqliteLeaseRetryDoesNotRetryUnrelatedErrors()
+    {
+        var attempts = 0;
+        await Assert.ThrowsAsync<SqliteException>(() =>
+            DependencyScheduler.RetrySqliteLockAsync<int>(() =>
+            {
+                attempts++;
+                throw new SqliteException("Constraint failed.", 19, 19);
+            }, CancellationToken.None));
+
+        Assert.Equal(1, attempts);
+    }
+
+    [Fact]
+    public void HigherPipelineImpactGetsMoreDispatchesWithoutStarvingOtherTargets()
+    {
+        var candidates = new[]
+        {
+            new PendingBatchStepCandidate("HighImpact", 0),
+            new PendingBatchStepCandidate("LowerImpact", 0)
+        };
+        var counts = new Dictionary<string, long>(StringComparer.Ordinal);
+        var weights = new Dictionary<string, double>(StringComparer.Ordinal)
+        {
+            ["HighImpact"] = 4,
+            ["LowerImpact"] = 1
+        };
+        var highImpactDispatches = 0;
+        var lowerImpactDispatches = 0;
+
+        for (var dispatch = 0; dispatch < 40; dispatch++)
+        {
+            var candidate = PipelineDispatchOrderer.Order(
+                candidates,
+                ["HighImpact", "LowerImpact"],
+                weights,
+                counts,
+                dispatch % 2).First();
+            counts[candidate.StepId] = counts.GetValueOrDefault(candidate.StepId) + 1;
+            if (candidate.StepId == "HighImpact")
+            {
+                highImpactDispatches++;
+            }
+            else
+            {
+                lowerImpactDispatches++;
+            }
+        }
+
+        Assert.Equal(32, highImpactDispatches);
+        Assert.Equal(8, lowerImpactDispatches);
+    }
+
+    [Fact]
+    public void LargerReadyBacklogIncreasesDispatchPriority()
+    {
+        var candidates = new[]
+        {
+            new PendingBatchStepCandidate("Backlogged", 0, PendingBatchCount: 8),
+            new PendingBatchStepCandidate("LightlyQueued", 0, PendingBatchCount: 1)
+        };
+        var counts = new Dictionary<string, long>(StringComparer.Ordinal);
+        var weights = new Dictionary<string, double>(StringComparer.Ordinal)
+        {
+            ["Backlogged"] = 1,
+            ["LightlyQueued"] = 1
+        };
+        var backloggedDispatches = 0;
+
+        for (var dispatch = 0; dispatch < 40; dispatch++)
+        {
+            var candidate = PipelineDispatchOrderer.Order(
+                candidates,
+                ["Backlogged", "LightlyQueued"],
+                weights,
+                counts,
+                dispatch % 2).First();
+            counts[candidate.StepId] = counts.GetValueOrDefault(candidate.StepId) + 1;
+            if (candidate.StepId == "Backlogged")
+            {
+                backloggedDispatches++;
+            }
+        }
+
+        Assert.True(backloggedDispatches > 20);
+        Assert.True(backloggedDispatches < 40);
+    }
+
     [Fact]
     public async Task FastFanOutBranchProgressesWhileSlowTargetPermitIsUnavailable()
     {
@@ -742,6 +850,42 @@ public sealed class DependencySchedulerTests
     }
 
     [Fact]
+    public async Task SchedulerPreservesStackTraceForBackgroundFailure()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+
+        async IAsyncEnumerable<MigrationWorkBatch> ReadBatches(
+            MigrationStepCheckpoint checkpoint,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            yield return new MigrationWorkBatch("{}");
+            await Task.Yield();
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new InvalidOperationException("Source read failed.");
+        }
+
+        var jobs = new[]
+        {
+            new MigrationStepDefinition(
+                "Accounts",
+                inputs: null,
+                ReadBatches,
+                (_, _) => Task.FromResult(new MigrationBatchResult("{}")))
+        };
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new DependencyScheduler(store).ExecuteAsync(
+                "background-failure-run",
+                "background-failure-test",
+                "hash-1",
+                jobs,
+                CreateOptions(maxDegreeOfParallelism: 1, maxQueuedBatches: 1)));
+
+        Assert.Contains(nameof(ReadBatches), exception.StackTrace, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ExpiredBatchIsNotExecutedAgainAfterMaximumAttempts()
     {
         using var database = new TemporaryDatabase();
@@ -799,7 +943,7 @@ public sealed class DependencySchedulerTests
     }
 
     [Fact]
-    public async Task RootSourceResumesFromItsPersistedCheckpoint()
+    public async Task RootSourceResumesAfterItsPersistedBatches()
     {
         using var database = new TemporaryDatabase();
         const string runId = "cursor-resume-run";
@@ -833,6 +977,7 @@ public sealed class DependencySchedulerTests
 
         MigrationStepCheckpoint? sourceCheckpoint = null;
         var executedSequences = new List<long>();
+        var executedPayloads = new List<string>();
         async IAsyncEnumerable<MigrationWorkBatch> ReadRemainingBatches(
             MigrationStepCheckpoint checkpoint,
             [EnumeratorCancellation] CancellationToken cancellationToken)
@@ -840,7 +985,9 @@ public sealed class DependencySchedulerTests
             sourceCheckpoint = checkpoint;
             Assert.Equal(0, checkpoint.LastCompletedSequence);
             Assert.Equal("{\"next\":1}", checkpoint.CursorJson);
-            yield return new MigrationWorkBatch("{\"id\":1}", "{\"next\":2}");
+            Assert.Equal(1, checkpoint.ResumeSequence);
+            Assert.Equal("{\"next\":2}", checkpoint.ResumeCursorJson);
+            yield return new MigrationWorkBatch("{\"id\":2}", "{\"next\":3}");
             await Task.Yield();
             cancellationToken.ThrowIfCancellationRequested();
         }
@@ -854,6 +1001,8 @@ public sealed class DependencySchedulerTests
                 (batch, _) =>
                 {
                     executedSequences.Add(batch.Sequence);
+                    Assert.NotNull(batch.PayloadJson);
+                    executedPayloads.Add(batch.PayloadJson);
                     return Task.FromResult(new MigrationBatchResult("{}"));
                 })
         };
@@ -866,11 +1015,12 @@ public sealed class DependencySchedulerTests
             CreateOptions(maxDegreeOfParallelism: 1, maxQueuedBatches: 1));
 
         Assert.NotNull(sourceCheckpoint);
-        Assert.Equal(new long[] { 1 }, executedSequences);
-        Assert.Equal(2, result.SucceededBatches);
+        Assert.Equal(new long[] { 1, 2 }, executedSequences);
+        Assert.Equal(new[] { "{\"id\":1}", "{\"id\":2}" }, executedPayloads);
+        Assert.Equal(3, result.SucceededBatches);
         var checkpoint = store.GetStepCheckpoint(runId, "Accounts");
-        Assert.Equal(1, checkpoint.LastCompletedSequence);
-        Assert.Equal("{\"next\":2}", checkpoint.CursorJson);
+        Assert.Equal(2, checkpoint.LastCompletedSequence);
+        Assert.Equal("{\"next\":3}", checkpoint.CursorJson);
     }
 
     [Fact]
@@ -1005,12 +1155,26 @@ public sealed class DependencySchedulerTests
         var store = new SqliteMigrationStore(database.Path);
         var firstAttemptStarted = NewSignal();
         var attempts = 0;
+        async IAsyncEnumerable<MigrationWorkBatch> ReadAccountBatches(
+            MigrationStepCheckpoint checkpoint,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            if (checkpoint.ResumeSequence >= 0)
+            {
+                yield break;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return new MigrationWorkBatch("{\"id\":1}");
+            await Task.Yield();
+        }
+
         var jobs = new[]
         {
             new MigrationStepDefinition(
                 "Accounts",
                 inputs: null,
-                (_, cancellationToken) => SingleBatch("{\"id\":1}", cancellationToken),
+                ReadAccountBatches,
                 async (_, cancellationToken) =>
                 {
                     if (Interlocked.Increment(ref attempts) == 1)

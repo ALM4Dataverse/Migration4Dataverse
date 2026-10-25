@@ -7,6 +7,12 @@ import {
   DataGridHeader,
   DataGridHeaderCell,
   DataGridRow,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
   FluentProvider,
   Input,
   Menu,
@@ -103,6 +109,58 @@ interface OverallThroughput {
   endedUtc: string;
 }
 
+interface SchedulerLimits {
+  maxDegreeOfParallelism: number;
+  maxQueuedBatches: number;
+  maxQueuedBatchesPerStep: number;
+}
+
+interface SchedulerSample {
+  runId: string;
+  sampledAt: number;
+  outstandingBatches: number;
+  inFlightBatches: number;
+  outstandingByStep: Record<string, number>;
+  blockedAncestorsByStep: Record<string, number>;
+}
+
+interface ApiProcessMetrics {
+  cpuTimeMilliseconds: number;
+  logicalProcessorCount: number;
+  workingSetBytes: number;
+  managedHeapBytes: number;
+  memoryLimitBytes: number | null;
+  capturedUtc: string;
+}
+
+interface ProcessSample extends Omit<ApiProcessMetrics, "capturedUtc"> {
+  sampledAt: number;
+}
+
+interface DashboardBatchError {
+  batchId: string;
+  sequence: number;
+  state: string;
+  attempts: number;
+  lastError: string | null;
+  outcomesJson: string | null;
+  failedRows: number;
+}
+
+interface TaskErrorDialogState {
+  stepId: string;
+  totalErrors: number;
+  batches: DashboardBatchError[];
+  isLoading: boolean;
+  loadError: string | null;
+}
+
+interface BlockingHotspot {
+  job: DashboardJob;
+  blockedAncestors: number;
+  ancestorSeconds: number;
+}
+
 interface DashboardJob {
   name: string;
   type: string;
@@ -161,6 +219,7 @@ interface ConnectionReference {
 interface MigrationConfiguration {
   jobs: ConfigurationJob[];
   connections: ConfigurationConnection[];
+  schedulerLimits?: SchedulerLimits;
 }
 
 interface ConnectionInstance {
@@ -181,6 +240,7 @@ interface RunSummary {
   status: RunStatus;
   createdUtc: string;
   updatedUtc: string;
+  schedulerLeaseExpiresUtc: string | null;
   debugCaptureEnabled: boolean;
   pendingBatches: number;
   inFlightBatches: number;
@@ -229,6 +289,7 @@ interface ApiStep {
 interface ApiConfiguration {
   steps: ApiStep[];
   connections: ConfigurationConnection[];
+  schedulerLimits?: SchedulerLimits;
 }
 
 interface ApiDashboardStep extends Omit<DashboardJob, "name" | "dependsOn"> {
@@ -276,6 +337,7 @@ interface JobNodeData extends Record<string, unknown> {
   sourceConnection?: ConnectionReference;
   targetConnection?: ConnectionReference;
   onSelect: (jobName: string) => void;
+  onShowErrors: (job: DashboardJob) => void;
 }
 
 interface SpecialistInfoLine {
@@ -304,6 +366,7 @@ const jobTypeIcon = (type: string) => jobTypeInfo[type.toLowerCase()]?.icon ?? L
 
 const number = new Intl.NumberFormat();
 const rateNumber = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
+const formatRowsPerMinute = (rowsPerSecond: number) => rateNumber.format(rowsPerSecond * 60);
 const api = async <T,>(path: string, signal?: AbortSignal): Promise<T> => {
   const response = await fetch(path, { cache: "no-store", signal });
   if (!response.ok) {
@@ -335,6 +398,7 @@ function normalizeConfiguration(configuration: ApiConfiguration): MigrationConfi
       };
     }),
     connections: configuration.connections,
+    schedulerLimits: configuration.schedulerLimits,
   };
 }
 
@@ -350,6 +414,16 @@ function normalizeRun(run: ApiRunSummary): RunSummary {
     })),
     configuration: run.configuration ? normalizeConfiguration(run.configuration) : null,
   };
+}
+
+function isRunStalled(run: Pick<RunSummary, "status" | "schedulerLeaseExpiresUtc">): boolean {
+  if (run.status !== "Running" || !run.schedulerLeaseExpiresUtc) return false;
+  const leaseExpiresAt = Date.parse(run.schedulerLeaseExpiresUtc);
+  return Number.isFinite(leaseExpiresAt) && leaseExpiresAt <= Date.now();
+}
+
+function runStatusLabel(run: RunSummary): string {
+  return isRunStalled(run) ? "Stalled" : run.status;
 }
 
 function normalizeSnapshot(snapshot: ApiDebugSnapshot): DebugSnapshot {
@@ -420,7 +494,7 @@ function getTerminalTargetNames(run: RunSummary): Set<string> {
 
 function buildOverallThroughput(jobs: DashboardJob[], run: RunSummary): OverallThroughput | null {
   const start = Date.parse(run.createdUtc);
-  const end = run.status === "Running" ? Date.now() : Date.parse(run.updatedUtc);
+  const end = run.status === "Running" && !isRunStalled(run) ? Date.now() : Date.parse(run.updatedUtc);
   const elapsedMilliseconds = end - start;
   if (!Number.isFinite(start) || !Number.isFinite(end) || elapsedMilliseconds <= 0) return null;
 
@@ -644,6 +718,75 @@ function blockingTaskFor(job: DashboardJob, jobs: DashboardJob[]): DashboardJob 
   return furthestFailedDependency(job, jobs) ?? furthestActiveDownstream(job, jobs);
 }
 
+function getUpstreamBlockingCounts(jobs: DashboardJob[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const upstream of jobs) {
+    if (!isBlockedByDownstream(upstream, jobs)) continue;
+    const blocker = furthestActiveDownstream(upstream, jobs);
+    if (blocker) counts[blocker.name] = (counts[blocker.name] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function createSchedulerSample(run: RunSummary, sampledAt = Date.now()): SchedulerSample {
+  return {
+    runId: run.runId,
+    sampledAt,
+    outstandingBatches: run.pendingBatches + run.inFlightBatches,
+    inFlightBatches: run.inFlightBatches,
+    outstandingByStep: Object.fromEntries(run.jobs.map((job) => [
+      job.name,
+      job.pendingBatches + job.inFlightBatches,
+    ])),
+    blockedAncestorsByStep: getUpstreamBlockingCounts(run.jobs),
+  };
+}
+
+function rankBlockingHotspots(
+  jobs: DashboardJob[],
+  samples: SchedulerSample[],
+  runId: string,
+): BlockingHotspot[] {
+  const now = Date.now();
+  const windowStart = now - 60_000;
+  const recentSamples = samples
+    .filter((sample) => sample.runId === runId && sample.sampledAt >= windowStart)
+    .toSorted((left, right) => left.sampledAt - right.sampledAt);
+  const ancestorSecondsByStep = new Map<string, number>();
+  recentSamples.forEach((sample, index) => {
+    const nextSampleAt = recentSamples[index + 1]?.sampledAt ?? now;
+    const durationSeconds = Math.min(5, Math.max(0, nextSampleAt - sample.sampledAt) / 1000);
+    for (const [stepName, blockedAncestors] of Object.entries(sample.blockedAncestorsByStep)) {
+      ancestorSecondsByStep.set(
+        stepName,
+        (ancestorSecondsByStep.get(stepName) ?? 0) + blockedAncestors * durationSeconds,
+      );
+    }
+  });
+
+  const currentCounts = getUpstreamBlockingCounts(jobs);
+  const stepNames = new Set([
+    ...ancestorSecondsByStep.keys(),
+    ...Object.keys(currentCounts),
+  ]);
+  const jobsByName = new Map(jobs.map((job) => [job.name, job]));
+  return [...stepNames]
+    .map((stepName) => ({
+      job: jobsByName.get(stepName),
+      blockedAncestors: currentCounts[stepName] ?? 0,
+      ancestorSeconds: ancestorSecondsByStep.get(stepName) ?? 0,
+    }))
+    .filter((item): item is BlockingHotspot & { job: DashboardJob } =>
+      item.job !== undefined &&
+      (item.blockedAncestors > 0 || item.ancestorSeconds > 0),
+    )
+    .toSorted((left, right) =>
+      right.ancestorSeconds - left.ancestorSeconds ||
+      right.blockedAncestors - left.blockedAncestors ||
+      left.job.name.localeCompare(right.job.name),
+    );
+}
+
 function activityHintFor(job: DashboardJob, jobs: DashboardJob[], configurationOnly = false): string | null {
   if (configurationOnly || job.isComplete || job.batchesWithErrors > 0) return null;
   if (statusFor(job, jobs) === "Blocked") {
@@ -753,6 +896,12 @@ function specialistInfoFor(
       const currentDop = getNumberProperty(runtime, "MaxConcurrency");
       const dopLimit = getNumberProperty(runtime, "ConcurrencyLimit");
       const dopState = getStringProperty(runtime, "ConcurrencyState");
+      const connectionId = getStringProperty(runtime, "ConnectionId");
+      const connectionBudget = getNumberProperty(runtime, "ConnectionConcurrencyBudget");
+      const activeConnectionCalls = getNumberProperty(runtime, "ActiveConnectionCalls");
+      const retryCount = getNumberProperty(runtime, "RetryCount");
+      const throttleCount = getNumberProperty(runtime, "ThrottleCount");
+      const retryTelemetryAvailable = getPropertyValue(runtime, "RetryTelemetryAvailable");
       const runtimeUnavailable = job.succeededBatches > 0
         ? "runtime state unavailable"
         : "awaiting first batch";
@@ -803,6 +952,22 @@ function specialistInfoFor(
       );
       add("Batch size", batchInfo.value, batchInfo.title);
       add("DOP", dopInfo.value, dopInfo.title);
+      add("Connection", connectionId);
+      if (connectionBudget !== undefined || activeConnectionCalls !== undefined) {
+        add(
+          "Connection activity",
+          `${number.format(activeConnectionCalls ?? 0)} active / ${number.format(connectionBudget ?? 0)} budget`,
+        );
+      }
+      if (retryCount !== undefined || throttleCount !== undefined) {
+        add(
+          "Retries / throttles",
+          `${number.format(retryCount ?? 0)} / ${number.format(throttleCount ?? 0)}`,
+        );
+      }
+      if (typeof retryTelemetryAvailable === "boolean") {
+        add("Retry telemetry", retryTelemetryAvailable ? "available" : "unavailable");
+      }
     } else {
       const batchSize = getPropertyValue(target, "BatchSize");
       if (batchSize !== undefined) add("Batch size", String(batchSize));
@@ -870,8 +1035,6 @@ function lineageStages(snapshots: DebugSnapshot[]): [string, DebugSnapshot[]][] 
 
 function JobThroughputChart({ job }: { job: DashboardJob }) {
   const samples = job.rowsPerSecondSamples ?? [];
-  if (samples.length === 0) return null;
-
   const width = 200;
   const height = 24;
   const maximumRate = Math.max(0, ...samples.map((sample) => sample.rowsPerSecond));
@@ -883,35 +1046,45 @@ function JobThroughputChart({ job }: { job: DashboardJob }) {
   const lineCoordinates = samples.length === 1
     ? `0,${coordinates[0].y} ${width},${coordinates[0].y}`
     : coordinates.map(({ x, y }) => `${x},${y}`).join(" ");
-  const startedUtc = samples[0].periodStartedUtc;
-  const endedUtc = samples[samples.length - 1].periodEndedUtc;
-  const timeRange = `${new Date(startedUtc).toLocaleString()} – ${new Date(endedUtc).toLocaleString()}`;
-  const label = `${job.name} rows per second from ${timeRange}`;
+  const timeRange = samples.length > 0
+    ? `${new Date(samples[0].periodStartedUtc).toLocaleString()} – ${new Date(samples[samples.length - 1].periodEndedUtc).toLocaleString()}`
+    : null;
+  const label = timeRange
+    ? `${job.name} rows per minute from ${timeRange}`
+    : `${job.name} average throughput in rows per minute`;
 
   return (
     <div className="job-node-throughput" title={label}>
       <div className="job-node-throughput-header">
-        <span>Rows/s</span>
-        <span>{formatElapsed(startedUtc, endedUtc)} · max {rateNumber.format(maximumRate)}</span>
+        <span>
+          {job.rowsPerSecond === null ? "Avg — rows/min" : `Avg ${formatRowsPerMinute(job.rowsPerSecond)} rows/min`}
+        </span>
+        <span>
+          {timeRange
+            ? `${formatElapsed(samples[0].periodStartedUtc, samples[samples.length - 1].periodEndedUtc)} · max ${formatRowsPerMinute(maximumRate)}`
+            : "No batch samples"}
+        </span>
       </div>
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label} preserveAspectRatio="none">
-        <title>{label}</title>
-        <line className="job-node-throughput-baseline" x1="0" y1={height - 1} x2={width} y2={height - 1} />
-        <polyline className="job-node-throughput-line" points={lineCoordinates} />
-        {coordinates.map(({ sample, x, y }) => (
-          <circle
-            key={`${sample.periodStartedUtc}-${sample.periodEndedUtc}`}
-            className="job-node-throughput-point"
-            cx={x}
-            cy={y}
-            r="3"
-          >
-            <title>
-              {`${new Date(sample.periodStartedUtc).toLocaleString()} – ${new Date(sample.periodEndedUtc).toLocaleString()}: ${rateNumber.format(sample.rowsPerSecond)} rows/s`}
-            </title>
-          </circle>
-        ))}
-      </svg>
+      {samples.length > 0 && (
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label} preserveAspectRatio="none">
+          <title>{label}</title>
+          <line className="job-node-throughput-baseline" x1="0" y1={height - 1} x2={width} y2={height - 1} />
+          <polyline className="job-node-throughput-line" points={lineCoordinates} />
+          {coordinates.map(({ sample, x, y }) => (
+            <circle
+              key={`${sample.periodStartedUtc}-${sample.periodEndedUtc}`}
+              className="job-node-throughput-point"
+              cx={x}
+              cy={y}
+              r="3"
+            >
+              <title>
+                {`${new Date(sample.periodStartedUtc).toLocaleString()} – ${new Date(sample.periodEndedUtc).toLocaleString()}: ${formatRowsPerMinute(sample.rowsPerSecond)} rows/min`}
+              </title>
+            </circle>
+          ))}
+        </svg>
+      )}
     </div>
   );
 }
@@ -931,12 +1104,12 @@ function JobNode({ data }: NodeProps<Node<JobNodeData>>) {
     lineageSnapshots,
     sourceConnection,
     targetConnection,
+    onShowErrors,
   } = data;
   const meta = statusInfo[status];
   const TypeIcon = jobTypeIcon(jobType);
   const StatusIcon = meta.icon;
   const typeLabel = jobTypeInfo[jobType.toLowerCase()]?.label ?? "Step";
-  const done = job.succeededBatches + job.batchesWithErrors;
   const rowProgress = inputRowProgress(job);
   const stages = lineageStages(lineageSnapshots);
 
@@ -952,7 +1125,20 @@ function JobNode({ data }: NodeProps<Node<JobNodeData>>) {
         </div>
         {lineageActive
           ? <span className="lineage-node-label">{highlighted ? `${lineageSnapshots.length} row snapshots` : "Outside lineage"}</span>
-          : <span className="job-status-label"><StatusIcon size={12} aria-hidden="true" />{meta.label}</span>}
+          : job.batchesWithErrors > 0
+            ? (
+              <button
+                type="button"
+                className="job-status-label job-error-trigger nodrag"
+                title="Show full batch error details"
+                aria-label={`Show full error details for ${job.name}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onShowErrors(job);
+                }}
+              ><StatusIcon size={12} aria-hidden="true" />{meta.label}</button>
+            )
+            : <span className="job-status-label"><StatusIcon size={12} aria-hidden="true" />{meta.label}</span>}
       </div>
       {!lineageActive && (sourceConnection || targetConnection) && (
         <div className="job-node-connections">
@@ -997,9 +1183,6 @@ function JobNode({ data }: NodeProps<Node<JobNodeData>>) {
         <>
           <div className="job-node-metrics">
             <span>{number.format(job.succeededRows)} rows</span>
-            <span>{number.format(done)} batches done</span>
-          </div>
-          <div className="job-node-metrics">
             <span
               className={rowProgress ? "job-node-progress-cell" : undefined}
               title={`Input rows in completed batches${job.inputFinalized ? "" : "; expected total may grow"}`}
@@ -1016,19 +1199,6 @@ function JobNode({ data }: NodeProps<Node<JobNodeData>>) {
                   aria-label={`${job.name} input row progress${job.inputFinalized ? "" : "; expected total may grow"}`}
                 />
               )}
-            </span>
-            <span title="Rows excluded at this step; counts are across pipeline steps">{number.format(job.filteredRows)} filtered</span>
-          </div>
-          <div className="job-node-metrics">
-            <span title="Average throughput across observed batches">
-              {job.rowsPerSecond === null ? "— avg rows/s" : `Avg ${rateNumber.format(job.rowsPerSecond)} rows/s`}
-            </span>
-            <span title={job.lastBatchUtc ? `Most recent batch update: ${new Date(job.lastBatchUtc).toLocaleString()}` : undefined}>
-              {job.isComplete
-                ? "Finished"
-                : job.lastBatchUtc
-                  ? `Last batch update ${formatElapsed(job.lastBatchUtc)} ago`
-                  : "No output yet"}
             </span>
           </div>
           {activityHint && (
@@ -1050,7 +1220,22 @@ function JobNode({ data }: NodeProps<Node<JobNodeData>>) {
           ))}
         </div>
       )}
-      {job.failedRows > 0 && <div className="job-node-error">{number.format(job.failedRows)} failed rows</div>}
+      {(job.failedRows > 0 || job.batchesWithErrors > 0) && (
+        <button
+          type="button"
+          className="job-node-error job-error-trigger nodrag"
+          title="Show full batch error details"
+          onClick={(event) => {
+            event.stopPropagation();
+            onShowErrors(job);
+          }}
+        >
+          {job.batchesWithErrors > 0
+            ? `${number.format(job.batchesWithErrors)} failed batches`
+            : `${number.format(job.failedRows)} failed rows`}
+          {job.batchesWithErrors > 0 && job.failedRows > 0 ? ` · ${number.format(job.failedRows)} rows` : ""}
+        </button>
+      )}
       <Handle type="source" position={Position.Right} />
     </div>
   );
@@ -1095,6 +1280,9 @@ export default function App() {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [runId, setRunId] = useState("");
   const [run, setRun] = useState<RunSummary | null>(null);
+  const [schedulerSamples, setSchedulerSamples] = useState<SchedulerSample[]>([]);
+  const [processSamples, setProcessSamples] = useState<ProcessSample[]>([]);
+  const [taskErrorDialog, setTaskErrorDialog] = useState<TaskErrorDialogState | null>(null);
   const [previewConfiguration, setPreviewConfiguration] = useState<MigrationConfiguration | null>(null);
   const [showConfiguration, setShowConfiguration] = useState(false);
   const [summaryExpanded, setSummaryExpanded] = useState(false);
@@ -1130,6 +1318,9 @@ export default function App() {
   } | null>(null);
   const [graphLayoutError, setGraphLayoutError] = useState("");
   const flowCanvasRef = useRef<HTMLDivElement | null>(null);
+  const lastAutoFit = useRef<{ instance: ReactFlowInstance; key: string } | null>(null);
+  const lastCenteredSelection = useRef<{ instance: ReactFlowInstance; key: string } | null>(null);
+  const taskErrorRequestVersion = useRef(0);
   const rowRequestVersion = useRef(0);
   const loadMoreController = useRef<AbortController | null>(null);
   const rowSearch = rowSearchByStage[selectedStage] ?? "";
@@ -1156,9 +1347,99 @@ export default function App() {
     );
   }, [inspectorPanelOpen]);
 
+  const showTaskErrors = useCallback(async (job: DashboardJob) => {
+    const requestVersion = ++taskErrorRequestVersion.current;
+    const activeRunId = run?.runId;
+    setTaskErrorDialog({
+      stepId: job.name,
+      totalErrors: job.batchesWithErrors,
+      batches: [],
+      isLoading: true,
+      loadError: null,
+    });
+    if (!activeRunId) {
+      setTaskErrorDialog({
+        stepId: job.name,
+        totalErrors: job.batchesWithErrors,
+        batches: [],
+        isLoading: false,
+        loadError: "No migration run is selected.",
+      });
+      return;
+    }
+    try {
+      const batches = await api<DashboardBatchError[]>(
+        `/api/runs/${encodeURIComponent(activeRunId)}/batch-errors/${encodeURIComponent(job.name)}?limit=100&offset=0`,
+      );
+      if (requestVersion !== taskErrorRequestVersion.current) return;
+      setTaskErrorDialog({
+        stepId: job.name,
+        totalErrors: job.batchesWithErrors,
+        batches,
+        isLoading: false,
+        loadError: null,
+      });
+    } catch (reason) {
+      if (requestVersion !== taskErrorRequestVersion.current) return;
+      setTaskErrorDialog({
+        stepId: job.name,
+        totalErrors: job.batchesWithErrors,
+        batches: [],
+        isLoading: false,
+        loadError: String(reason),
+      });
+    }
+  }, [run?.runId]);
+
+  const loadMoreTaskErrors = useCallback(async () => {
+    const dialog = taskErrorDialog;
+    const activeRunId = run?.runId;
+    if (!dialog || dialog.isLoading || !activeRunId || dialog.batches.length >= dialog.totalErrors) return;
+    const requestVersion = taskErrorRequestVersion.current;
+    setTaskErrorDialog({ ...dialog, isLoading: true, loadError: null });
+    try {
+      const batches = await api<DashboardBatchError[]>(
+        `/api/runs/${encodeURIComponent(activeRunId)}/batch-errors/${encodeURIComponent(dialog.stepId)}?limit=100&offset=${dialog.batches.length}`,
+      );
+      if (requestVersion !== taskErrorRequestVersion.current) return;
+      setTaskErrorDialog((current) => current?.stepId === dialog.stepId
+        ? { ...current, batches: [...current.batches, ...batches], isLoading: false, loadError: null }
+        : current);
+    } catch (reason) {
+      if (requestVersion !== taskErrorRequestVersion.current) return;
+      setTaskErrorDialog((current) => current?.stepId === dialog.stepId
+        ? { ...current, isLoading: false, loadError: String(reason) }
+        : current);
+    }
+  }, [run?.runId, taskErrorDialog]);
+
+  const closeTaskErrorDialog = useCallback(() => {
+    taskErrorRequestVersion.current++;
+    setTaskErrorDialog(null);
+  }, []);
+
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const listedRuns = (await api<ApiRunSummary[]>("/api/runs", signal)).map(normalizeRun);
     setRuns(listedRuns);
+    const processMetrics = await api<ApiProcessMetrics>("/api/process-metrics", signal);
+    const sampledAt = Date.parse(processMetrics.capturedUtc);
+    if (!Number.isFinite(sampledAt)) {
+      throw new Error("The dashboard returned an invalid process-metrics timestamp.");
+    }
+    setProcessSamples((previous) => {
+      const lastSample = previous.at(-1);
+      if (lastSample && sampledAt - lastSample.sampledAt < 2500) return previous;
+      return [...previous, {
+        sampledAt,
+        cpuTimeMilliseconds: processMetrics.cpuTimeMilliseconds,
+        logicalProcessorCount: processMetrics.logicalProcessorCount,
+        workingSetBytes: processMetrics.workingSetBytes,
+        managedHeapBytes: processMetrics.managedHeapBytes,
+        memoryLimitBytes: processMetrics.memoryLimitBytes,
+      }]
+        .filter((sample) => sample.sampledAt >= sampledAt - 6 * 60_000)
+        .slice(-120);
+    });
     const configurationResponse = await fetch("/api/configuration", { cache: "no-store", signal });
     if (configurationResponse.ok) {
       setPreviewConfiguration(normalizeConfiguration(
@@ -1181,6 +1462,17 @@ export default function App() {
       await api<ApiRunSummary>(`/api/runs/${encodeURIComponent(currentId)}`, signal),
     );
     setRun(currentRun);
+    const sample = createSchedulerSample(currentRun);
+    setSchedulerSamples((previous) => {
+      const currentRunSamples = previous.filter((item) => item.runId === currentRun.runId);
+      const lastSample = currentRunSamples.at(-1);
+      if (lastSample && sample.sampledAt - lastSample.sampledAt < 2500) {
+        return currentRunSamples;
+      }
+      return [...currentRunSamples, sample]
+        .filter((item) => item.sampledAt >= sample.sampledAt - 6 * 60_000)
+        .slice(-120);
+    });
     setError("");
   }, [runId]);
 
@@ -1205,6 +1497,8 @@ export default function App() {
 
   useEffect(() => {
     rowRequestVersion.current++;
+    taskErrorRequestVersion.current++;
+    setTaskErrorDialog(null);
     loadMoreController.current?.abort();
     setSelectedJob("");
     setJobRows([]);
@@ -1494,7 +1788,7 @@ export default function App() {
               (activityHint ? 28 : 0) +
               ((job.rowsPerSecondSamples?.length ?? 0) > 0 ? 42 : 0) +
               (specialistInfo.length > 0 ? 8 + specialistInfo.length * 18 : 0) +
-              (job.failedRows > 0 ? 29 : 0);
+              (job.failedRows > 0 || job.batchesWithErrors > 0 ? 29 : 0);
           const position = {
             x: level * (lineageActive ? 410 : 350),
             y: top,
@@ -1522,6 +1816,7 @@ export default function App() {
               sourceConnection,
               targetConnection,
               onSelect: selectJob,
+              onShowErrors: showTaskErrors,
             },
           };
         });
@@ -1536,6 +1831,7 @@ export default function App() {
     selectedJob,
     selectedRelationshipJobs,
     selectJob,
+    showTaskErrors,
     trace,
     traceJobNames,
   ]);
@@ -1579,6 +1875,13 @@ export default function App() {
   const graphLayoutKey = [
     ...baseNodes.map((node) => `${node.id}:${node.width}:${node.height}`),
     ...edges.map((edge) => `${edge.source}->${edge.target}`),
+  ].join("|");
+  const graphAutoFitKey = [
+    runId,
+    configurationOnly ? "configuration" : "run",
+    graphJobs.map((job) => job.name).join(","),
+    edges.map((edge) => edge.id).join(","),
+    trace.length > 0 ? "lineage" : "workflow",
   ].join("|");
 
   // Status-only refreshes should not rerun the layered graph layout.
@@ -1646,6 +1949,8 @@ export default function App() {
   useEffect(() => {
     const canvas = flowCanvasRef.current;
     if (!flowInstance || !canvas || nodes.length === 0 || graphLayout?.key !== graphLayoutKey) return;
+    if (lastAutoFit.current?.instance === flowInstance &&
+        lastAutoFit.current.key === graphAutoFitKey) return;
     const timer = window.setTimeout(() => {
       const bounds = flowInstance.getNodesBounds(flowInstance.getNodes());
       const viewport = getViewportForBounds(
@@ -1657,12 +1962,16 @@ export default function App() {
         0.18,
       );
       void flowInstance.setViewport(viewport);
+      lastAutoFit.current = { instance: flowInstance, key: graphAutoFitKey };
     }, 100);
     return () => window.clearTimeout(timer);
-  }, [flowInstance, graphLayout?.key, graphLayoutKey, inspectorPanelOpen, nodes.length, summaryExpanded]);
+  }, [flowInstance, graphAutoFitKey, graphLayout?.key, graphLayoutKey, nodes.length]);
 
   useEffect(() => {
     if (!flowInstance || !selectedJob || graphLayout?.key !== graphLayoutKey) return;
+    const selectionKey = `${graphAutoFitKey}|${selectedJob}`;
+    if (lastCenteredSelection.current?.instance === flowInstance &&
+        lastCenteredSelection.current.key === selectionKey) return;
     const node = flowInstance.getNode(selectedJob);
     if (!node) return;
     const timer = window.setTimeout(() => {
@@ -1671,9 +1980,10 @@ export default function App() {
         node.position.y + (node.height ?? 120) / 2,
         { zoom: Math.max(flowInstance.getZoom(), 0.7), duration: 350 },
       );
+      lastCenteredSelection.current = { instance: flowInstance, key: selectionKey };
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [flowInstance, graphLayout?.key, graphLayoutKey, selectedJob]);
+  }, [flowInstance, graphAutoFitKey, graphLayout?.key, graphLayoutKey, selectedJob]);
 
   const viewRun = configurationOnly ? null : run;
   const activeInspectorTab = configuration && (!viewRun || inspectorTab === "configuration")
@@ -1755,6 +2065,58 @@ export default function App() {
 
   return (
     <FluentProvider className="fluent-root" theme={webLightTheme}>
+      <Dialog
+        open={taskErrorDialog !== null}
+        onOpenChange={(_, data) => {
+          if (!data.open) closeTaskErrorDialog();
+        }}
+      >
+        <DialogSurface className="task-error-dialog">
+          <DialogBody>
+            <DialogTitle>{taskErrorDialog ? `Failed task details · ${taskErrorDialog.stepId}` : "Failed task details"}</DialogTitle>
+            <DialogContent>
+              {taskErrorDialog && (
+                <>
+                  <p className="task-error-summary">
+                    {number.format(taskErrorDialog.totalErrors)} failed batches recorded
+                    {taskErrorDialog.batches.length > 0
+                      ? ` · showing ${number.format(taskErrorDialog.batches.length)}`
+                      : ""}
+                  </p>
+                  {taskErrorDialog.loadError && (
+                    <div className="notice notice-error" role="alert">{taskErrorDialog.loadError}</div>
+                  )}
+                  {taskErrorDialog.isLoading && <FluentSpinner label="Loading failed batch details…" />}
+                  {!taskErrorDialog.isLoading && !taskErrorDialog.loadError &&
+                    taskErrorDialog.batches.length === 0 && (
+                      <p className="inline-empty">No failed batch details are available for this step.</p>
+                    )}
+                  <div className="task-error-list">
+                    {taskErrorDialog.batches.map((batch) => (
+                      <article className="task-error-entry" key={batch.batchId}>
+                        <h3>
+                          <span>Batch {batch.sequence} · {batch.batchId}</span>
+                          <small>{number.format(batch.failedRows)} failed rows · {batch.attempts} attempts</small>
+                        </h3>
+                        <pre>{batch.lastError || "No error message was recorded for this failed batch."}</pre>
+                      </article>
+                    ))}
+                  </div>
+                  {!taskErrorDialog.isLoading && !taskErrorDialog.loadError &&
+                    taskErrorDialog.batches.length < taskErrorDialog.totalErrors && (
+                      <Button appearance="secondary" onClick={() => void loadMoreTaskErrors()}>
+                        Load more failed batches
+                      </Button>
+                    )}
+                </>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="primary" onClick={closeTaskErrorDialog}>Close</Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
       <div className="app-shell">
         <header className="topbar">
           <div className="brand">
@@ -1780,7 +2142,7 @@ export default function App() {
               {previewConfiguration && <option value="__configuration__">Configuration preview · not executing</option>}
               {runs.map((item) => (
                 <option key={item.runId} value={item.runId}>
-                  {item.jobName} · {item.status} · {new Date(item.createdUtc).toLocaleString()}
+                  {item.jobName} · {runStatusLabel(item)} · {new Date(item.createdUtc).toLocaleString()}
                 </option>
               ))}
               {runs.length === 0 && !previewConfiguration && <option value="__empty__" disabled>No runs found</option>}
@@ -1797,6 +2159,18 @@ export default function App() {
         </header>
 
       {error && <div className="notice notice-error" role="alert">{error}</div>}
+
+      {viewRun && isRunStalled(viewRun) && (
+        <div className="notice notice-warning run-stalled-notice" role="alert">
+          <span>
+            <strong>Run stalled — scheduler lease expired.</strong>
+            {" "}It is still marked Running, but no scheduler lease is active. Last persisted update:{" "}
+            {new Date(viewRun.updatedUtc).toLocaleString()}. Persisted work is resumable with the same run ID
+            {" "}({viewRun.runId}) and unchanged step definition; {number.format(viewRun.inFlightBatches)} in flight,{" "}
+            {number.format(viewRun.pendingBatches)} pending.
+          </span>
+        </div>
+      )}
 
       {!viewRun && !configurationOnly ? (
         <section className="empty-state">
@@ -1922,10 +2296,8 @@ export default function App() {
                       <th scope="col">Job</th>
                       <th scope="col">Status / activity</th>
                       <th scope="col">Output rows</th>
-                      <th scope="col">Batches</th>
                       <th scope="col">Input rows</th>
-                      <th scope="col">Filtered</th>
-                      <th scope="col">Avg rows/s</th>
+                      <th scope="col">Throughput</th>
                       <th scope="col">Inputs</th>
                       <th scope="col">Outputs</th>
                     </tr>
@@ -1945,8 +2317,6 @@ export default function App() {
                       const JobIcon = jobTypeIcon(jobTypeName);
                       const sourceConnection = endpointConnection(jobConfiguration, connectionsById, "Source");
                       const targetConnection = endpointConnection(jobConfiguration, connectionsById, "Target");
-                      const batchesDone = job.succeededBatches + job.batchesWithErrors;
-                      const batchesObserved = batchesDone + job.pendingBatches + job.inFlightBatches;
                       const activity = activityHintFor(job, jobs, configurationOnly);
                       const blockingTask = status === "Blocked" ? blockingTaskFor(job, jobs) : null;
                       const outputs = (jobOutputs.get(job.name) ?? []).toSorted((left, right) => left.localeCompare(right));
@@ -2020,7 +2390,16 @@ export default function App() {
                             </button>
                           </td>
                           <td className="job-table-status-cell">
-                            <span className={`job-table-status ${meta.color}`}><StatusIcon size={12} />{meta.label}</span>
+                            {job.batchesWithErrors > 0
+                              ? (
+                                <button
+                                  type="button"
+                                  className={`job-table-status ${meta.color} job-error-trigger`}
+                                  title="Show full batch error details"
+                                  onClick={() => void showTaskErrors(job)}
+                                ><StatusIcon size={12} />{meta.label}</button>
+                              )
+                              : <span className={`job-table-status ${meta.color}`}><StatusIcon size={12} />{meta.label}</span>}
                             {blockingTask
                               ? <small className="job-table-activity" title={`Furthest blocking task: ${blockingTask.name}`}>Blocked by: {blockingTask.name}</small>
                               : activity && <small className="job-table-activity" title={activity}>{activity}</small>}
@@ -2028,9 +2407,6 @@ export default function App() {
                           <td>
                             <span>{number.format(job.succeededRows)}</span>
                             {job.failedRows > 0 && <small className="job-table-secondary">{number.format(job.failedRows)} failed</small>}
-                          </td>
-                          <td title={`${batchesDone} completed or failed batches; ${job.inFlightBatches} in progress; ${job.pendingBatches} queued`}>
-                            {number.format(batchesDone)} / {number.format(batchesObserved)}
                           </td>
                           <td title={`${inputRows} input rows${job.inputFinalized ? "" : " · expected total may grow"}${inputWork ? ` · ${inputWork}` : ""}`}>
                             <span>{inputRows}</span>
@@ -2044,9 +2420,7 @@ export default function App() {
                             )}
                             {inputWork && <small className="job-table-secondary">{inputWork}</small>}
                           </td>
-                          <td>{number.format(job.filteredRows)}</td>
                           <td className="job-table-throughput-cell">
-                            <span>{job.rowsPerSecond === null ? "—" : rateNumber.format(job.rowsPerSecond)}</span>
                             <JobThroughputChart job={job} />
                           </td>
                           <td>{renderJobLinks(job.dependsOn.toSorted((left, right) => left.localeCompare(right)))}</td>
@@ -2105,6 +2479,8 @@ export default function App() {
             <MigrationSummaryPanel
               run={viewRun}
               jobs={jobs}
+              samples={schedulerSamples}
+              processSamples={processSamples}
               expanded={summaryExpanded}
               onToggle={() => setSummaryExpanded((expanded) => !expanded)}
               onSelectJob={selectJob}
@@ -2239,12 +2615,16 @@ export default function App() {
 function MigrationSummaryPanel({
   run,
   jobs,
+  samples,
+  processSamples,
   expanded,
   onToggle,
   onSelectJob,
 }: {
   run: RunSummary;
   jobs: DashboardJob[];
+  samples: SchedulerSample[];
+  processSamples: ProcessSample[];
   expanded: boolean;
   onToggle: () => void;
   onSelectJob: (jobName: string) => void;
@@ -2265,8 +2645,11 @@ function MigrationSummaryPanel({
     : targetRowsExpected === 0
       ? 100
       : Math.min(100, (targetRowsProcessed / targetRowsExpected) * 100);
+  const runStalled = isRunStalled(run);
   const overallThroughput = buildOverallThroughput(jobs, run);
-  const estimatedCompletion = run.status === "Completed"
+  const estimatedCompletion = runStalled
+    ? "Run stalled — resume required"
+    : run.status === "Completed"
     ? `Completed ${new Date(run.updatedUtc).toLocaleString()}`
     : run.status !== "Running"
       ? "Unavailable"
@@ -2278,6 +2661,7 @@ function MigrationSummaryPanel({
               Date.now() +
               ((targetRowsExpected - targetRowsProcessed) / overallThroughput.output.average) * 1000,
             ).toLocaleString();
+  const blockingHotspots = rankBlockingHotspots(jobs, samples, run.runId);
 
   return (
     <section className={`summary-panel${expanded ? " expanded" : ""}`} aria-label="Migration overview">
@@ -2286,7 +2670,7 @@ function MigrationSummaryPanel({
         <div className="summary-header-metrics">
           <div className="summary-header-metric">
             <span>Elapsed</span>
-            <strong>{formatElapsed(run.createdUtc, run.status === "Running" ? undefined : run.updatedUtc)}</strong>
+            <strong>{formatElapsed(run.createdUtc, run.status === "Running" && !runStalled ? undefined : run.updatedUtc)}</strong>
           </div>
           <div className="summary-target-metric">
             <div className="summary-target-count">
@@ -2328,10 +2712,22 @@ function MigrationSummaryPanel({
               <Timeline jobs={jobs} onSelect={onSelectJob} />
             </section>
             <section className="summary-block">
-              <Text variant="mediumPlus" className="section-title"><Gauge size={16} /> Runtime hotspots</Text>
-              <Hotspots jobs={jobs} />
+              <Text variant="mediumPlus" className="section-title"><Gauge size={16} /> Upstream blocking hotspots</Text>
+              <Hotspots hotspots={blockingHotspots} />
             </section>
           </div>
+          <section className="summary-block scheduler-capacity-block">
+            <Text variant="mediumPlus" className="section-title"><Gauge size={16} /> Scheduler limits and current values</Text>
+            <SchedulerCapacityChart
+              run={run}
+              samples={samples}
+              blockingStepName={blockingHotspots[0]?.job.name ?? null}
+            />
+          </section>
+          <section className="summary-block">
+            <Text variant="mediumPlus" className="section-title"><Activity size={16} /> Process CPU and memory</Text>
+            <ProcessResourceCharts samples={processSamples} />
+          </section>
         </div>
       )}
     </section>
@@ -2360,7 +2756,7 @@ function OverallThroughputChart({ throughput }: { throughput: OverallThroughput 
       Math.max(1, inputPoints.length);
     const start = Date.parse(throughput.startedUtc) + index * bucketDuration;
     const end = start + bucketDuration;
-    return `${seriesName}: ${new Date(start).toLocaleString()} – ${new Date(end).toLocaleString()}: ${rateNumber.format(rate)} rows/s`;
+    return `${seriesName}: ${new Date(start).toLocaleString()} – ${new Date(end).toLocaleString()}: ${formatRowsPerMinute(rate)} rows/min`;
   };
   const pointMarkers = (seriesName: string, seriesClass: string, points: number[]) => (
     points.map((rate, index) => {
@@ -2379,12 +2775,12 @@ function OverallThroughputChart({ throughput }: { throughput: OverallThroughput 
     })
   );
   const rateSummary = (series: ThroughputSeries | undefined) => series
-    ? `Current ${rateNumber.format(series.current)} · avg ${rateNumber.format(series.average)} rows/s`
-    : "Current — · avg — rows/s";
+    ? `Current ${formatRowsPerMinute(series.current)} · avg ${formatRowsPerMinute(series.average)} rows/min`
+    : "Current — · avg — rows/min";
 
   return (
     <div className="overall-throughput" aria-label="Overall migration throughput">
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Input and output rows per second over the run">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Input and output rows per minute over the run">
         <line className="overall-throughput-grid" x1="0" y1="2" x2={width} y2="2" />
         <line className="overall-throughput-grid" x1="0" y1={height / 2} x2={width} y2={height / 2} />
         <line className="overall-throughput-grid" x1="0" y1={height - 1} x2={width} y2={height - 1} />
@@ -2396,6 +2792,148 @@ function OverallThroughputChart({ throughput }: { throughput: OverallThroughput 
       <div className="overall-throughput-legend">
         <span className="overall-throughput-label input"><i />Input (source)<small>{rateSummary(throughput?.input)}</small></span>
         <span className="overall-throughput-label output"><i />Output (target)<small>{rateSummary(throughput?.output)}</small></span>
+      </div>
+    </div>
+  );
+}
+
+function ProcessResourceCharts({ samples }: { samples: ProcessSample[] }) {
+  const liveSamples = samples.toSorted((left, right) => left.sampledAt - right.sampledAt);
+  if (liveSamples.length === 0) {
+    return <div className="inline-empty">Waiting for the first process-resource sample.</div>;
+  }
+
+  const cpuValues = liveSamples.map((sample, index) => {
+    const previous = liveSamples[index - 1];
+    if (!previous) return 0;
+    const elapsedMilliseconds = Math.max(1, sample.sampledAt - previous.sampledAt);
+    const cpuMilliseconds = Math.max(0, sample.cpuTimeMilliseconds - previous.cpuTimeMilliseconds);
+    return Math.min(100, cpuMilliseconds / elapsedMilliseconds /
+      Math.max(1, sample.logicalProcessorCount) * 100);
+  });
+  const memoryLimit = liveSamples.some((sample) => sample.memoryLimitBytes !== null)
+    ? liveSamples.map((sample) => sample.memoryLimitBytes ?? 0)
+    : null;
+  const memoryMaximum = Math.max(
+    1,
+    ...liveSamples.map((sample) => sample.workingSetBytes),
+    ...liveSamples.map((sample) => sample.managedHeapBytes),
+    ...(memoryLimit ?? []),
+  ) * 1.05;
+  const chartWidth = 640;
+  const chartHeight = 136;
+  const left = 34;
+  const right = 8;
+  const top = 8;
+  const bottom = 20;
+  const x = (index: number) => liveSamples.length === 1
+    ? chartWidth - right
+    : left + index * (chartWidth - left - right) / (liveSamples.length - 1);
+  const y = (value: number, maximum: number) => chartHeight - bottom -
+    Math.max(0, value) / maximum * (chartHeight - top - bottom);
+  const polyline = (values: number[], maximum: number) => values
+    .map((value, index) => `${x(index)},${y(value, maximum)}`)
+    .join(" ");
+  const formatMemory = (bytes: number) => {
+    const gibibytes = bytes / (1024 ** 3);
+    return gibibytes >= 1
+      ? `${rateNumber.format(gibibytes)} GiB`
+      : `${rateNumber.format(bytes / (1024 ** 2))} MiB`;
+  };
+  const latest = liveSamples.at(-1)!;
+  const cpuPoints = cpuValues.map((value, index) => (
+    <circle
+      key={index}
+      className="resource-chart-point cpu"
+      cx={x(index)}
+      cy={y(value, 100)}
+      r="2.5"
+    >
+      <title>{`${new Date(liveSamples[index].sampledAt).toLocaleString()}: ${rateNumber.format(value)}% CPU`}</title>
+    </circle>
+  ));
+  const memorySeries = [
+    {
+      key: "working-set",
+      label: "Working set",
+      values: liveSamples.map((sample) => sample.workingSetBytes),
+      current: formatMemory(latest.workingSetBytes),
+    },
+    {
+      key: "managed-heap",
+      label: "Managed heap",
+      values: liveSamples.map((sample) => sample.managedHeapBytes),
+      current: formatMemory(latest.managedHeapBytes),
+    },
+    ...(memoryLimit
+      ? [{
+          key: "memory-limit",
+          label: "Runtime-reported memory budget",
+          values: memoryLimit,
+          current: formatMemory(latest.memoryLimitBytes ?? 0),
+        }]
+      : []),
+  ];
+
+  return (
+    <div className="resource-charts">
+      <div className="resource-chart">
+        <div className="resource-chart-heading"><strong>CPU utilization</strong><span>{rateNumber.format(cpuValues.at(-1) ?? 0)}%</span></div>
+        <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} role="img" aria-label="Process CPU utilization over time">
+          {[0, 50, 100].map((value) => (
+            <g key={value}>
+              <line className="resource-chart-grid" x1={left} y1={y(value, 100)} x2={chartWidth - right} y2={y(value, 100)} />
+              <text className="resource-chart-axis" x={left - 5} y={y(value, 100) + 3} textAnchor="end">{value}%</text>
+            </g>
+          ))}
+          <polyline className="resource-chart-line cpu" points={polyline(cpuValues, 100)} />
+          {cpuPoints}
+        </svg>
+      </div>
+      <div className="resource-chart">
+        <div className="resource-chart-heading">
+          <strong>Memory usage</strong>
+          <span>{formatMemory(latest.workingSetBytes)} working set</span>
+        </div>
+        <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} role="img" aria-label="Process working set and managed heap over time">
+          {[0, 0.5, 1].map((fraction) => {
+            const value = memoryMaximum * fraction;
+            return (
+              <g key={fraction}>
+                <line className="resource-chart-grid" x1={left} y1={y(value, memoryMaximum)} x2={chartWidth - right} y2={y(value, memoryMaximum)} />
+                <text className="resource-chart-axis" x={left - 5} y={y(value, memoryMaximum) + 3} textAnchor="end">{formatMemory(value)}</text>
+              </g>
+            );
+          })}
+          {memorySeries.map((series) => (
+            <g key={series.key}>
+              <polyline className={`resource-chart-line ${series.key}`} points={polyline(series.values, memoryMaximum)} />
+              {series.values.map((value, index) => (
+                <circle
+                  key={index}
+                  className={`resource-chart-point ${series.key}`}
+                  cx={x(index)}
+                  cy={y(value, memoryMaximum)}
+                  r="2.5"
+                >
+                  <title>{`${series.label} · ${new Date(liveSamples[index].sampledAt).toLocaleString()}: ${formatMemory(value)}`}</title>
+                </circle>
+              ))}
+            </g>
+          ))}
+        </svg>
+        <div className="resource-chart-legend">
+          {memorySeries.map((series) => (
+            <span className={series.key} key={series.key}>
+              <i />{series.label}<small>{series.current}</small>
+            </span>
+          ))}
+        </div>
+        {memoryLimit && (
+          <p className="resource-chart-note">
+            The runtime-reported memory budget may reflect host or container limits; it is not a measure of free memory.
+          </p>
+        )}
       </div>
     </div>
   );
@@ -2552,69 +3090,162 @@ function Timeline({ jobs, onSelect }: { jobs: DashboardJob[]; onSelect: (name: s
   );
 }
 
-function Hotspots({ jobs }: { jobs: DashboardJob[] }) {
-  const jobsByName = new Map(jobs.map((job) => [job.name, job]));
-  const waitingDescendants = (job: DashboardJob): number => {
-    const visited = new Set([job.name]);
-    const queue = [job.name];
-    let waiting = 0;
-    while (queue.length > 0) {
-      const parentName = queue.shift()!;
-      for (const candidate of jobs) {
-        if (visited.has(candidate.name) || !candidate.dependsOn.includes(parentName)) continue;
-        visited.add(candidate.name);
-        queue.push(candidate.name);
-        const hasIncompleteParent = candidate.dependsOn.some((dependency) =>
-          !jobsByName.get(dependency)?.isComplete,
+function Hotspots({ hotspots }: { hotspots: BlockingHotspot[] }) {
+  if (!hotspots.length) {
+    return <div className="inline-empty">No upstream steps are currently blocked behind active downstream work.</div>;
+  }
+  const visible = hotspots.slice(0, 7);
+  const maximum = Math.max(1, ...visible.map((item) => item.ancestorSeconds));
+  return (
+    <div className="hotspot-list">
+      {visible.map(({ job, blockedAncestors, ancestorSeconds }) => {
+        const impact = `${blockedAncestors > 0
+          ? `${number.format(blockedAncestors)} upstream steps blocked now`
+          : "No upstream steps blocked now"} · ${rateNumber.format(ancestorSeconds)} blocked-step-seconds over 60s`;
+        return (
+          <div className="hotspot-row" key={job.name} title={`${job.name}: ${impact}`}>
+            <div><strong>{job.name}</strong><small>{impact}</small></div>
+            <i aria-label={`${impact}; downstream blocker ${job.name}`}>
+              <b style={{ width: `${Math.max(4, (ancestorSeconds / maximum) * 100)}%` }} />
+            </i>
+          </div>
         );
-        if (!candidate.isComplete &&
-            candidate.batchesWithErrors === 0 &&
-            candidate.pendingBatches === 0 &&
-            candidate.inFlightBatches === 0 &&
-            (candidate.pendingDependencyEvents > 0 || hasIncompleteParent)) {
-          waiting++;
-        }
-      }
-    }
-    return waiting;
-  };
-  const active = jobs
-    .filter((job) =>
-      !job.isComplete &&
-      job.batchesWithErrors === 0 &&
-      !isBlockedByDownstream(job, jobs) &&
-      (job.pendingBatches > 0 || job.inFlightBatches > 0),
-    )
-    .map((job) => {
-      const rate = job.rowsPerSecondSamples?.at(-1)?.rowsPerSecond ?? job.rowsPerSecond;
-      const waiting = waitingDescendants(job);
-      const pressure = job.pendingBatches * 4 + waiting * 3 + (job.inFlightBatches > 0 ? 1 : 0);
-      const score = pressure / Math.max(rate ?? 1, 1);
-      return { job, rate, waiting, score };
-    })
-    .toSorted((left, right) =>
-      right.score - left.score ||
-      right.job.pendingBatches - left.job.pendingBatches ||
-      right.waiting - left.waiting ||
-      (left.rate ?? Number.POSITIVE_INFINITY) - (right.rate ?? Number.POSITIVE_INFINITY),
-    )
-    .slice(0, 7);
-  if (!active.length) return <div className="inline-empty">No active throughput bottlenecks.</div>;
-  const maximum = Math.max(1, ...active.map((item) => item.score));
-  return <div className="hotspot-list">{active.map(({ job, rate, waiting, score }) => {
-    const impact = [
-      job.pendingBatches > 0 ? `${number.format(job.pendingBatches)} queued` : "",
-      waiting > 0 ? `${number.format(waiting)} downstream waiting` : "",
-      job.inFlightBatches > 0 ? `${number.format(job.inFlightBatches)} active` : "",
-      rate === null ? "sampling throughput" : `${rateNumber.format(rate)} rows/s`,
-    ].filter(Boolean).join(" · ");
-    return (
-      <div className="hotspot-row" key={job.name} title={`${job.name}: ${impact}`}>
-        <div><strong>{job.name}</strong><small>{impact}</small></div>
-        <i aria-label={`Relative blocking impact ${number.format(score)}`}><b style={{ width: `${Math.max(4, (score / maximum) * 100)}%` }} /></i>
+      })}
+    </div>
+  );
+}
+
+function SchedulerCapacityChart({
+  run,
+  samples,
+  blockingStepName,
+}: {
+  run: RunSummary;
+  samples: SchedulerSample[];
+  blockingStepName: string | null;
+}) {
+  const limits = run.configuration?.schedulerLimits;
+  if (!limits) {
+    return <div className="inline-empty">Scheduler limits were not captured for this run.</div>;
+  }
+  const now = Date.now();
+  const liveSamples = samples
+    .filter((sample) => sample.runId === run.runId && sample.sampledAt >= now - 3 * 60_000)
+    .toSorted((left, right) => left.sampledAt - right.sampledAt);
+  const latest = liveSamples.at(-1);
+  if (!latest) {
+    return <div className="inline-empty">Waiting for the first live scheduler sample.</div>;
+  }
+  const busiestStep = Object.entries(latest.outstandingByStep)
+    .toSorted((left, right) => right[1] - left[1])[0];
+  const stepName = blockingStepName ?? (busiestStep?.[1] > 0 ? busiestStep[0] : null);
+  const chartWidth = 640;
+  const chartHeight = 144;
+  const left = 30;
+  const right = 8;
+  const top = 8;
+  const bottom = 22;
+  const maximum = Math.max(
+    1,
+    limits.maxQueuedBatches,
+    limits.maxDegreeOfParallelism,
+    limits.maxQueuedBatchesPerStep,
+    ...liveSamples.map((sample) => sample.outstandingBatches),
+    ...liveSamples.map((sample) => sample.inFlightBatches),
+    ...(stepName ? liveSamples.map((sample) => sample.outstandingByStep[stepName] ?? 0) : []),
+  );
+  const x = (index: number) => liveSamples.length === 1
+    ? chartWidth - right
+    : left + index * (chartWidth - left - right) / (liveSamples.length - 1);
+  const y = (value: number) => chartHeight - bottom -
+    Math.max(0, value) / maximum * (chartHeight - top - bottom);
+  const formatPolyline = (values: number[]) => values
+    .map((value, index) => `${x(index)},${y(value)}`)
+    .join(" ");
+  const series = [
+    {
+      key: "outstanding",
+      label: "Outstanding batches",
+      values: liveSamples.map((sample) => sample.outstandingBatches),
+      limit: limits.maxQueuedBatches,
+    },
+    {
+      key: "workers",
+      label: "In-flight batches",
+      values: liveSamples.map((sample) => sample.inFlightBatches),
+      limit: limits.maxDegreeOfParallelism,
+    },
+    ...(stepName ? [{
+      key: "step",
+      label: `${stepName} outstanding`,
+      values: liveSamples.map((sample) => sample.outstandingByStep[stepName] ?? 0),
+      limit: limits.maxQueuedBatchesPerStep,
+    }] : []),
+  ];
+
+  return (
+    <div className="scheduler-capacity-chart">
+      <svg
+        viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+        role="img"
+        aria-label="Persisted queue and in-flight batch counts compared with scheduler limits"
+      >
+        {[0, 0.5, 1].map((fraction) => {
+          const value = Math.round(maximum * fraction);
+          const gridY = y(value);
+          return (
+            <g key={fraction}>
+              <line className="scheduler-capacity-grid" x1={left} y1={gridY} x2={chartWidth - right} y2={gridY} />
+              <text className="scheduler-capacity-axis" x={left - 5} y={gridY + 3} textAnchor="end">{value}</text>
+            </g>
+          );
+        })}
+        {series.map((item) => (
+          <g key={item.key}>
+            <line
+              className={`scheduler-capacity-limit ${item.key}`}
+              x1={left}
+              y1={y(item.limit)}
+              x2={chartWidth - right}
+              y2={y(item.limit)}
+            >
+              <title>{`${item.label} limit: ${number.format(item.limit)} batches`}</title>
+            </line>
+            <polyline className={`scheduler-capacity-line ${item.key}`} points={formatPolyline(item.values)} />
+            {item.values.map((value, index) => (
+              <circle
+                className={`scheduler-capacity-point ${item.key}`}
+                key={`${item.key}-${index}`}
+                cx={x(index)}
+                cy={y(value)}
+                r="2.7"
+              >
+                <title>{`${item.label}: ${number.format(value)} batches at ${new Date(liveSamples[index].sampledAt).toLocaleString()}`}</title>
+              </circle>
+            ))}
+          </g>
+        ))}
+        <text className="scheduler-capacity-axis" x={left} y={chartHeight - 4}>
+          {new Date(liveSamples[0].sampledAt).toLocaleTimeString()}
+        </text>
+        <text className="scheduler-capacity-axis" x={chartWidth - right} y={chartHeight - 4} textAnchor="end">
+          {new Date(latest.sampledAt).toLocaleTimeString()}
+        </text>
+      </svg>
+      <div className="scheduler-capacity-legend">
+        {series.map((item) => (
+          <span className={`scheduler-capacity-label ${item.key}`} key={item.key}>
+            <i />
+            {item.label}
+            <small>Current {number.format(item.values.at(-1) ?? 0)} / limit {number.format(item.limit)}</small>
+          </span>
+        ))}
       </div>
-    );
-  })}</div>;
+      <small className="scheduler-capacity-note">
+        Samples are collected every three seconds while this dashboard is open. Counts include persisted pending and in-flight batches, not producer reservations.
+      </small>
+    </div>
+  );
 }
 
 function JobInspector({

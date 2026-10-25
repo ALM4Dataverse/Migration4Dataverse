@@ -59,6 +59,8 @@ public sealed class MigrationStepDefinition
     public Func<StoredBatch, IDisposable?, CancellationToken, Task<MigrationBatchResult>>?
         ExecuteBatchWithExecutionLeaseAsync { get; init; }
 
+    public double DispatchWeight { get; init; } = 1;
+
     public long? ExpectedRecordCount { get; init; }
 
     public Func<CancellationToken, Task<long>>? ResolveExpectedRecordCountAsync { get; init; }

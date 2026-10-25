@@ -1246,7 +1246,8 @@ public sealed partial class SqliteMigrationStore
                        WHERE dependency.RunId = batch.RunId
                          AND dependency.EventId = batch.BatchId
                          AND dependency.State = 'Completed'
-                   ) THEN 0 ELSE 1 END) AS Priority
+                   ) THEN 0 ELSE 1 END) AS Priority,
+                   COUNT(*) AS PendingBatchCount
             FROM Batches AS batch
             WHERE batch.RunId = $runId
               AND (
@@ -1263,7 +1264,10 @@ public sealed partial class SqliteMigrationStore
         var candidates = new List<PendingBatchStepCandidate>();
         while (reader.Read())
         {
-            candidates.Add(new PendingBatchStepCandidate(reader.GetString(0), reader.GetInt32(1)));
+            candidates.Add(new PendingBatchStepCandidate(
+                reader.GetString(0),
+                reader.GetInt32(1),
+                reader.GetInt64(2)));
         }
 
         return candidates;
@@ -1533,7 +1537,7 @@ public sealed partial class SqliteMigrationStore
 
         var now = nowUtc ?? DateTimeOffset.UtcNow;
         using var connection = OpenConnection();
-        using var transaction = connection.BeginTransaction();
+        using var transaction = connection.BeginTransaction(deferred: false);
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
@@ -1607,7 +1611,7 @@ public sealed partial class SqliteMigrationStore
 
         var now = nowUtc ?? DateTimeOffset.UtcNow;
         using var connection = OpenConnection();
-        using var transaction = connection.BeginTransaction();
+        using var transaction = connection.BeginTransaction(deferred: false);
         var batch = FindBatchById(connection, transaction, batchId)
             ?? throw new KeyNotFoundException($"Batch '{batchId}' was not found.");
         using var command = connection.CreateCommand();
@@ -1695,7 +1699,7 @@ public sealed partial class SqliteMigrationStore
 
         var now = FormatUtc(nowUtc ?? DateTimeOffset.UtcNow);
         using var connection = OpenConnection();
-        using var transaction = connection.BeginTransaction();
+        using var transaction = connection.BeginTransaction(deferred: false);
 
         var batch = FindBatchById(connection, transaction, batchId)
             ?? throw new KeyNotFoundException($"Batch '{batchId}' was not found.");
@@ -1772,6 +1776,36 @@ public sealed partial class SqliteMigrationStore
             ?? new MigrationStepCheckpoint(runId, tableName, -1, null, null);
     }
 
+    public MigrationStepCheckpoint GetStepSourceCheckpoint(string runId, string stepId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
+        using var connection = OpenConnection();
+        var checkpoint = ReadCheckpoint(connection, null, runId, stepId)
+            ?? new MigrationStepCheckpoint(runId, stepId, -1, null, null);
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT Sequence, CursorAfterJson
+            FROM Batches
+            WHERE RunId = $runId AND StepId = $stepId
+            ORDER BY Sequence DESC
+            LIMIT 1;
+            """;
+        AddParameter(command, "$runId", runId);
+        AddParameter(command, "$stepId", stepId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            return checkpoint;
+        }
+
+        return checkpoint with
+        {
+            LastEnqueuedSequence = reader.GetInt64(0),
+            LastEnqueuedCursorJson = reader.IsDBNull(1) ? null : reader.GetString(1)
+        };
+    }
+
     public IReadOnlyList<StoredDependencyEvent> GetPendingDependencyEvents(
         string runId,
         int limit = 100,
@@ -1842,7 +1876,7 @@ public sealed partial class SqliteMigrationStore
 
         var now = FormatUtc(nowUtc ?? DateTimeOffset.UtcNow);
         using var connection = OpenConnection();
-        using var transaction = connection.BeginTransaction();
+        using var transaction = connection.BeginTransaction(deferred: false);
 
         string parentBatchId;
         string childTable;
@@ -2060,7 +2094,7 @@ public sealed partial class SqliteMigrationStore
             throw new InvalidOperationException(
                 $"Database '{DatabasePath}' contains tables but no applied migration records. Create a fresh database.");
         }
-        if (appliedMigrations.Keys.Any(version => version > 10))
+        if (appliedMigrations.Keys.Any(version => version > 14))
         {
             throw new InvalidOperationException(
                 $"Database '{DatabasePath}' has a schema migration newer than this engine supports.");
@@ -2120,6 +2154,36 @@ public sealed partial class SqliteMigrationStore
             throw new InvalidOperationException(
                 $"Database '{DatabasePath}' has an unknown schema migration at version 9.");
         }
+        if (appliedMigrations.TryGetValue(10, out var joinInputKeyIndexName) &&
+            !string.Equals(joinInputKeyIndexName, "010-streaming-join-key-index", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an unknown schema migration at version 10.");
+        }
+        if (appliedMigrations.TryGetValue(11, out var debugSnapshotRetentionIndexName) &&
+            !string.Equals(debugSnapshotRetentionIndexName, "011-debug-snapshot-retention-index", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an unknown schema migration at version 11.");
+        }
+        if (appliedMigrations.TryGetValue(12, out var dataverseTargetTuningName) &&
+            !string.Equals(dataverseTargetTuningName, "012-dataverse-target-tuning-profiles", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an unknown schema migration at version 12.");
+        }
+        if (appliedMigrations.TryGetValue(13, out var pipelineTuningName) &&
+            !string.Equals(pipelineTuningName, "013-pipeline-aware-tuning-profiles", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an unknown schema migration at version 13.");
+        }
+        if (appliedMigrations.TryGetValue(14, out var connectionTuningName) &&
+            !string.Equals(connectionTuningName, "014-connection-scoped-tuning-profiles", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an unknown schema migration at version 14.");
+        }
         if (appliedMigrations.ContainsKey(2) && !appliedMigrations.ContainsKey(1))
         {
             throw new InvalidOperationException(
@@ -2146,6 +2210,31 @@ public sealed partial class SqliteMigrationStore
                 $"Database '{DatabasePath}' has an incomplete schema migration history.");
         }
         if (appliedMigrations.ContainsKey(9) && !appliedMigrations.ContainsKey(8))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an incomplete schema migration history.");
+        }
+        if (appliedMigrations.ContainsKey(10) && !appliedMigrations.ContainsKey(9))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an incomplete schema migration history.");
+        }
+        if (appliedMigrations.ContainsKey(11) && !appliedMigrations.ContainsKey(10))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an incomplete schema migration history.");
+        }
+        if (appliedMigrations.ContainsKey(12) && !appliedMigrations.ContainsKey(11))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an incomplete schema migration history.");
+        }
+        if (appliedMigrations.ContainsKey(13) && !appliedMigrations.ContainsKey(12))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an incomplete schema migration history.");
+        }
+        if (appliedMigrations.ContainsKey(14) && !appliedMigrations.ContainsKey(13))
         {
             throw new InvalidOperationException(
                 $"Database '{DatabasePath}' has an incomplete schema migration history.");
@@ -2565,6 +2654,68 @@ public sealed partial class SqliteMigrationStore
                 """);
             UpdateMigrationAppliedUtc(connection, joinInputKeyIndexTransaction, 10);
             joinInputKeyIndexTransaction.Commit();
+        }
+
+        if (!appliedMigrations.ContainsKey(11))
+        {
+            using var debugSnapshotRetentionIndexTransaction = connection.BeginTransaction();
+            ExecuteNonQuery(connection, debugSnapshotRetentionIndexTransaction, """
+                CREATE INDEX IX_DebugSnapshots_Run_Captured
+                    ON DebugSnapshots (RunId, CapturedUtc);
+
+                INSERT INTO SchemaMigrations (Version, Name, AppliedUtc)
+                VALUES (11, '011-debug-snapshot-retention-index', 'initializing');
+                """);
+            UpdateMigrationAppliedUtc(connection, debugSnapshotRetentionIndexTransaction, 11);
+            debugSnapshotRetentionIndexTransaction.Commit();
+        }
+
+        if (!appliedMigrations.ContainsKey(12))
+        {
+            using var dataverseTargetTuningTransaction = connection.BeginTransaction();
+            ExecuteNonQuery(connection, dataverseTargetTuningTransaction, """
+                CREATE TABLE DataverseTargetTuningProfiles (
+                    StepId TEXT NOT NULL PRIMARY KEY,
+                    BatchSize INTEGER NULL CHECK (BatchSize IS NULL OR BatchSize > 0),
+                    MaxConcurrency INTEGER NULL CHECK (MaxConcurrency IS NULL OR MaxConcurrency > 0),
+                    UpdatedUtc TEXT NOT NULL,
+                    CHECK (BatchSize IS NOT NULL OR MaxConcurrency IS NOT NULL)
+                );
+
+                INSERT INTO SchemaMigrations (Version, Name, AppliedUtc)
+                VALUES (12, '012-dataverse-target-tuning-profiles', 'initializing');
+                """);
+            UpdateMigrationAppliedUtc(connection, dataverseTargetTuningTransaction, 12);
+            dataverseTargetTuningTransaction.Commit();
+        }
+
+        if (!appliedMigrations.ContainsKey(13))
+        {
+            using var pipelineTuningTransaction = connection.BeginTransaction();
+            ExecuteNonQuery(connection, pipelineTuningTransaction, """
+                ALTER TABLE DataverseTargetTuningProfiles
+                    ADD COLUMN AlgorithmVersion INTEGER NOT NULL DEFAULT 1
+                    CHECK (AlgorithmVersion > 0);
+
+                INSERT INTO SchemaMigrations (Version, Name, AppliedUtc)
+                VALUES (13, '013-pipeline-aware-tuning-profiles', 'initializing');
+                """);
+            UpdateMigrationAppliedUtc(connection, pipelineTuningTransaction, 13);
+            pipelineTuningTransaction.Commit();
+        }
+
+        if (!appliedMigrations.ContainsKey(14))
+        {
+            using var connectionTuningTransaction = connection.BeginTransaction();
+            ExecuteNonQuery(connection, connectionTuningTransaction, """
+                ALTER TABLE DataverseTargetTuningProfiles
+                    ADD COLUMN ConnectionId TEXT NULL;
+
+                INSERT INTO SchemaMigrations (Version, Name, AppliedUtc)
+                VALUES (14, '014-connection-scoped-tuning-profiles', 'initializing');
+                """);
+            UpdateMigrationAppliedUtc(connection, connectionTuningTransaction, 14);
+            connectionTuningTransaction.Commit();
         }
     }
 

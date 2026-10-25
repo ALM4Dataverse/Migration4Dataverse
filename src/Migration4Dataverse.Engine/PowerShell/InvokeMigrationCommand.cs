@@ -52,6 +52,9 @@ public sealed class InvokeMigrationCommand : PSCmdlet
     public int MaxAttempts { get; set; } = 5;
 
     [Parameter]
+    public SwitchParameter DataverseNoRetryDiagnosticMode { get; set; }
+
+    [Parameter]
     public string[] ModulesToImport { get; set; } = Array.Empty<string>();
 
     [Parameter]
@@ -88,10 +91,16 @@ public sealed class InvokeMigrationCommand : PSCmdlet
             MaxDegreeOfParallelism = MaxDegreeOfParallelism,
             MaxQueuedBatches = MaxQueuedBatches,
             MaxQueuedBatchesPerStep = MaxQueuedBatchesPerStep,
-            MaxAttempts = MaxAttempts,
+            MaxAttempts = DataverseNoRetryDiagnosticMode.IsPresent ? 1 : MaxAttempts,
             CaptureDebugData = EnableDebugCapture.IsPresent,
             DebugCaptureRetentionDays = DebugCaptureRetentionDays
         };
+        if (DataverseNoRetryDiagnosticMode.IsPresent)
+        {
+            WriteWarning(
+                "Dataverse no-retry diagnostic mode is enabled. Dataverse and scheduler retries are disabled, " +
+                "so transient failures can fail the migration.");
+        }
 
         var store = new SqliteMigrationStore(DatabasePath);
         var scheduler = new DependencyScheduler(store);
@@ -107,8 +116,15 @@ public sealed class InvokeMigrationCommand : PSCmdlet
             BatchSize,
             EnableDebugCapture.IsPresent,
             store,
-            MaxDegreeOfParallelism);
-        var configurationJson = MigrationConfigurationSnapshot.CreateJson(Steps, Connections);
+            MaxDegreeOfParallelism,
+            DataverseNoRetryDiagnosticMode.IsPresent);
+        var configurationJson = MigrationConfigurationSnapshot.CreateJson(
+            Steps,
+            Connections,
+            new MigrationSchedulerLimits(
+                MaxDegreeOfParallelism,
+                MaxQueuedBatches,
+                MaxQueuedBatchesPerStep));
         var connectionInstancesJson = MigrationConfigurationSnapshot.AppendConnectionInstanceSnapshot(
             null,
             MigrationConfigurationSnapshot.CaptureConnectionInstances(Connections, "Started"));
@@ -136,9 +152,10 @@ public sealed class InvokeMigrationCommand : PSCmdlet
             }
 
             var result = execution.GetAwaiter().GetResult();
-            foreach (var tuner in stepSet.TargetTuners)
+            stepSet.PersistTuningProfiles();
+            foreach (var controller in stepSet.TargetControllers)
             {
-                WriteVerbose(tuner.GetSummary());
+                WriteVerbose(controller.GetSummary());
             }
             WriteProgress(new ProgressRecord(
                 1,

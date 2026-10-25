@@ -6,6 +6,22 @@ namespace Migration4Dataverse.Engine.Tests.Storage;
 public sealed class SqliteJobStoreTests
 {
     [Fact]
+    public void PendingBatchCandidatesIncludePerStepReadyBacklog()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        store.CreateRun("candidate-run", "candidate-run", "hash-1");
+        store.EnqueueBatch("candidate-run", "HighImpact", 0, "high-0", null, "{}", nowUtc: DateTimeOffset.UtcNow);
+        store.EnqueueBatch("candidate-run", "HighImpact", 1, "high-1", null, "{}", nowUtc: DateTimeOffset.UtcNow);
+        store.EnqueueBatch("candidate-run", "LowerImpact", 0, "low-0", null, "{}", nowUtc: DateTimeOffset.UtcNow);
+
+        var candidates = store.GetPendingBatchStepCandidates("candidate-run");
+
+        Assert.Equal(2, Assert.Single(candidates, candidate => candidate.StepId == "HighImpact").PendingBatchCount);
+        Assert.Equal(1, Assert.Single(candidates, candidate => candidate.StepId == "LowerImpact").PendingBatchCount);
+    }
+
+    [Fact]
     public void CheckpointAdvancesOnlyAcrossContiguousCompletedBatchesAndOutboxSurvivesRestart()
     {
         using var database = new TemporaryDatabase();
@@ -58,6 +74,91 @@ public sealed class SqliteJobStoreTests
 
         reopenedStore.CompleteDependencyEvent(runId, storedEvent.EventId, now.AddSeconds(3));
         Assert.Empty(reopenedStore.GetPendingDependencyEvents(runId));
+    }
+
+    [Fact]
+    public async Task ConcurrentBatchCompletionsSerializeReadModifyWriteTransactions()
+    {
+        using var database = new TemporaryDatabase();
+        const string runId = "concurrent-completion-run";
+        const int batchCount = 32;
+        var store = new SqliteMigrationStore(database.Path);
+        store.CreateRun(
+            runId,
+            "concurrent-completion-test",
+            "hash",
+            pipelineJson: """[{"Id":"Work","Inputs":[],"HasSource":true,"Type":"source"}]""");
+
+        var batches = new List<StoredBatch>();
+        for (var index = 0; index < batchCount; index++)
+        {
+            var batchId = $"concurrent-batch-{index}";
+            store.EnqueueBatch(
+                runId,
+                "Work",
+                index,
+                batchId,
+                null,
+                """{"Records":[{"id":1}]}""");
+            var batch = store.TryLeaseNextBatch(
+                runId,
+                $"worker-{index}",
+                TimeSpan.FromMinutes(1));
+            Assert.NotNull(batch);
+            batches.Add(batch);
+        }
+
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completions = batches.Select((batch, index) => Task.Run(async () =>
+        {
+            await start.Task;
+            store.CompleteBatch(
+                batch.BatchId,
+                $"worker-{index}",
+                """{"Succeeded":1,"Failed":0}""",
+                hasErrors: false);
+        })).ToArray();
+        start.SetResult();
+
+        await Task.WhenAll(completions);
+
+        Assert.Equal(batchCount, store.GetDashboardRun(runId).SucceededBatches);
+    }
+
+    [Fact]
+    public async Task ConcurrentBatchLeasesSerializeBeforeSelectingBatches()
+    {
+        using var database = new TemporaryDatabase();
+        const string runId = "concurrent-lease-run";
+        const int batchCount = 64;
+        var store = new SqliteMigrationStore(database.Path);
+        store.CreateRun(runId, "concurrent-lease-test", "hash");
+        for (var index = 0; index < batchCount; index++)
+        {
+            store.EnqueueBatch(
+                runId,
+                "Work",
+                index,
+                $"concurrent-lease-batch-{index}",
+                null,
+                """{"Records":[{"id":1}]}""");
+        }
+
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var leases = Enumerable.Range(0, batchCount).Select(index => Task.Run(async () =>
+        {
+            await start.Task;
+            return store.TryLeaseNextBatch(
+                runId,
+                $"worker-{index}",
+                TimeSpan.FromMinutes(1));
+        })).ToArray();
+        start.SetResult();
+
+        var leasedBatches = await Task.WhenAll(leases);
+
+        Assert.All(leasedBatches, batch => Assert.NotNull(batch));
+        Assert.Equal(batchCount, leasedBatches.Select(batch => batch!.BatchId).Distinct().Count());
     }
 
     [Fact]
@@ -398,6 +499,18 @@ public sealed class SqliteJobStoreTests
             Assert.True(migrationReader.Read());
             Assert.Equal(10, migrationReader.GetInt32(0));
             Assert.Equal("010-streaming-join-key-index", migrationReader.GetString(1));
+            Assert.True(migrationReader.Read());
+            Assert.Equal(11, migrationReader.GetInt32(0));
+            Assert.Equal("011-debug-snapshot-retention-index", migrationReader.GetString(1));
+            Assert.True(migrationReader.Read());
+            Assert.Equal(12, migrationReader.GetInt32(0));
+            Assert.Equal("012-dataverse-target-tuning-profiles", migrationReader.GetString(1));
+            Assert.True(migrationReader.Read());
+            Assert.Equal(13, migrationReader.GetInt32(0));
+            Assert.Equal("013-pipeline-aware-tuning-profiles", migrationReader.GetString(1));
+            Assert.True(migrationReader.Read());
+            Assert.Equal(14, migrationReader.GetInt32(0));
+            Assert.Equal("014-connection-scoped-tuning-profiles", migrationReader.GetString(1));
             Assert.False(migrationReader.Read());
         }
 
@@ -451,6 +564,152 @@ public sealed class SqliteJobStoreTests
             WHERE type = 'table' AND name = 'BatchParentReferences';
             """;
         Assert.Equal("BatchParentReferences", verificationCommand.ExecuteScalar()?.ToString());
+        verificationCommand.CommandText = """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name = 'DataverseTargetTuningProfiles';
+            """;
+        Assert.Equal("DataverseTargetTuningProfiles", verificationCommand.ExecuteScalar()?.ToString());
+        verificationCommand.CommandText = """
+            EXPLAIN QUERY PLAN
+            DELETE FROM DebugSnapshots
+            WHERE RunId = $runId
+              AND CapturedUtc < (
+                SELECT strftime(
+                    '%Y-%m-%dT%H:%M:%f+00:00',
+                    'now',
+                    '-' || DebugCaptureRetentionDays || ' days')
+                FROM Runs
+                WHERE RunId = $runId
+              );
+            """;
+        verificationCommand.Parameters.AddWithValue("$runId", "target-id-run");
+        using (var planReader = verificationCommand.ExecuteReader())
+        {
+            var planDetails = new List<string>();
+            while (planReader.Read())
+            {
+                planDetails.Add(planReader.GetString(3));
+            }
+
+            Assert.Contains(
+                planDetails,
+                detail => detail.Contains("IX_DebugSnapshots_Run_Captured", StringComparison.Ordinal) &&
+                          detail.Contains("CapturedUtc<?", StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
+    public void VersionTenDatabaseGetsDebugSnapshotRetentionIndex()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        store.CreateRun("pre-upgrade-run", "test-run", "hash-1");
+
+        using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = database.Path
+        }.ToString()))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                DROP TABLE DataverseTargetTuningProfiles;
+                DELETE FROM SchemaMigrations WHERE Version = 14;
+                DELETE FROM SchemaMigrations WHERE Version = 13;
+                DELETE FROM SchemaMigrations WHERE Version = 12;
+                DROP INDEX IX_DebugSnapshots_Run_Captured;
+                DELETE FROM SchemaMigrations WHERE Version = 11;
+                """;
+            command.ExecuteNonQuery();
+        }
+
+        var upgradedStore = new SqliteMigrationStore(database.Path);
+        upgradedStore.CreateRun("post-upgrade-run", "test-run", "hash-1");
+
+        using var verificationConnection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = database.Path
+        }.ToString());
+        verificationConnection.Open();
+        using var verificationCommand = verificationConnection.CreateCommand();
+        verificationCommand.CommandText = """
+            SELECT Name FROM SchemaMigrations WHERE Version = 11;
+            """;
+        Assert.Equal(
+            "011-debug-snapshot-retention-index",
+            verificationCommand.ExecuteScalar()?.ToString());
+        verificationCommand.CommandText = """
+            SELECT name FROM sqlite_master
+            WHERE type = 'index' AND name = 'IX_DebugSnapshots_Run_Captured';
+            """;
+        Assert.Equal(
+            "IX_DebugSnapshots_Run_Captured",
+            verificationCommand.ExecuteScalar()?.ToString());
+        verificationCommand.CommandText = """
+            SELECT Name FROM SchemaMigrations WHERE Version = 12;
+            """;
+        Assert.Equal(
+            "012-dataverse-target-tuning-profiles",
+            verificationCommand.ExecuteScalar()?.ToString());
+        verificationCommand.CommandText = """
+            SELECT Name FROM SchemaMigrations WHERE Version = 13;
+            """;
+        Assert.Equal(
+            "013-pipeline-aware-tuning-profiles",
+            verificationCommand.ExecuteScalar()?.ToString());
+        verificationCommand.CommandText = """
+            SELECT Name FROM SchemaMigrations WHERE Version = 14;
+            """;
+        Assert.Equal(
+            "014-connection-scoped-tuning-profiles",
+            verificationCommand.ExecuteScalar()?.ToString());
+        verificationCommand.CommandText = """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name = 'DataverseTargetTuningProfiles';
+            """;
+        Assert.Equal(
+            "DataverseTargetTuningProfiles",
+            verificationCommand.ExecuteScalar()?.ToString());
+        verificationCommand.CommandText = """
+            SELECT AlgorithmVersion FROM DataverseTargetTuningProfiles LIMIT 1;
+            """;
+        Assert.Null(verificationCommand.ExecuteScalar());
+    }
+
+    [Fact]
+    public void DataverseTargetTuningProfilesCanBeUpdatedAndCleared()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+
+        Assert.Null(store.GetDataverseTargetTuningProfile("AccountsTarget"));
+        store.SaveDataverseTargetTuningProfile("AccountsTarget", 250, 8);
+        var profile = store.GetDataverseTargetTuningProfile("AccountsTarget");
+        Assert.NotNull(profile);
+        Assert.Equal(250, profile.BatchSize);
+        Assert.Equal(8, profile.MaxConcurrency);
+        Assert.Equal(1, profile.AlgorithmVersion);
+
+        store.SaveDataverseTargetTuningProfile(
+            "AccountsTarget",
+            null,
+            4,
+            algorithmVersion: 2,
+            connectionId: "crm");
+        profile = store.GetDataverseTargetTuningProfile("AccountsTarget");
+        Assert.Equal(250, profile?.BatchSize);
+        Assert.Equal(4, profile?.MaxConcurrency);
+        Assert.Equal(2, profile?.AlgorithmVersion);
+        Assert.Equal("crm", profile?.ConnectionId);
+
+        store.SaveDataverseTargetTuningProfile("ContactsTarget", 100, null);
+        Assert.Equal(1, store.ClearDataverseTargetTuningProfile("AccountsTarget"));
+        Assert.Null(store.GetDataverseTargetTuningProfile("AccountsTarget"));
+        Assert.Equal(0, store.ClearDataverseTargetTuningProfile("AccountsTarget"));
+        Assert.Equal(1, store.ClearDataverseTargetTuningProfiles());
+        Assert.Null(store.GetDataverseTargetTuningProfile("ContactsTarget"));
+        Assert.Throws<ArgumentException>(() =>
+            store.SaveDataverseTargetTuningProfile("InvalidTarget", null, null));
     }
 
     [Fact]

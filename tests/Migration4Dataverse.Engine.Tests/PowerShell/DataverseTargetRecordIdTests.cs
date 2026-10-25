@@ -100,7 +100,7 @@ public sealed class DataverseTargetParentRecordTests
         var createGraph = graphFactory.GetMethod("CreateGraph", BindingFlags.Public | BindingFlags.Static)!;
         var stepSet = (IDisposable)createGraph.Invoke(
             null,
-            [steps, connections, executor, 1, true, store, 32])!;
+            [steps, connections, executor, 1, true, store, 32, false])!;
 
         try
         {
@@ -139,7 +139,9 @@ public sealed class DataverseTargetParentRecordTests
                 string.Join(";", accountTargetBatches.Select(batch => batch.OutcomesJson)));
             Assert.True(accountTarget.SpecialistInfo.Value.GetProperty("BatchSizeAuto").GetBoolean());
             Assert.False(accountTarget.SpecialistInfo.Value.GetProperty("ConcurrencyAuto").GetBoolean());
-            Assert.Equal("fixed", accountTarget.SpecialistInfo.Value.GetProperty("ConcurrencyState").GetString());
+            Assert.Equal(
+                "fixed step limit",
+                accountTarget.SpecialistInfo.Value.GetProperty("ConcurrencyState").GetString());
 
             Assert.Empty(store.ReadJoinInputRecordPage(
                 runId, "JoinContacts", "ContactsSource", 0, 0, 10));

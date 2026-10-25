@@ -61,8 +61,8 @@ internal sealed class IndexedStreamingJoinBatchSource
         MigrationStepCheckpoint checkpoint,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var cursor = checkpoint.LastCompletedSequence >= 0
-            ? JsonSerializer.Deserialize<JoinCursor>(checkpoint.CursorJson
+        var cursor = checkpoint.ResumeSequence >= 0
+            ? JsonSerializer.Deserialize<JoinCursor>(checkpoint.ResumeCursorJson
                 ?? throw new InvalidDataException(
                     $"Join step '{_joinStepId}' checkpoint is missing its input cursor."))
                 ?? throw new InvalidDataException($"Join step '{_joinStepId}' has an invalid input cursor.")

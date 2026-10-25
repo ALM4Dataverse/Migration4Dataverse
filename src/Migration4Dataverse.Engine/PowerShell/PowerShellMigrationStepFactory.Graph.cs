@@ -51,7 +51,8 @@ internal static partial class PowerShellMigrationStepFactory
         int defaultBatchSize,
         bool captureDebugData = false,
         SqliteMigrationStore? store = null,
-        int maxTargetConcurrency = 32)
+        int maxTargetConcurrency = 32,
+        bool disableDataverseRetriesForDiagnostics = false)
     {
         ArgumentNullException.ThrowIfNull(stepObjects);
         ArgumentNullException.ThrowIfNull(connections);
@@ -68,6 +69,7 @@ internal static partial class PowerShellMigrationStepFactory
         }
         ValidateGraph(inputs);
         ValidateDatabaseSourceConnections(inputs);
+        var dispatchWeights = CalculatePipelineDispatchWeights(inputs);
         foreach (var databaseTarget in inputs.Where(input =>
                      input.Type == "target" && input.TargetType is "sqlite" or "duckdb"))
         {
@@ -144,10 +146,64 @@ internal static partial class PowerShellMigrationStepFactory
 
         var readerFactory = new PowerShellHierarchyRecordReaderFactory(executor, customSources, dataverseSources);
         var semaphores = new Dictionary<string, (SemaphoreSlim Semaphore, int Capacity)>(StringComparer.Ordinal);
-        var targetTuners = new List<AdaptiveDataverseTargetTuner>();
         var definitions = new List<MigrationStepDefinition>(inputs.Length);
+        var throughputMeter = new PipelineThroughputMeter();
+        var batchTuningCoordinator = new PipelineBatchTuningCoordinator();
+        var targetControllers = new List<PipelineAdaptiveDataverseConnectionController>();
+        var targetControllersByConnection = new Dictionary<string, PipelineAdaptiveDataverseConnectionController>(
+            StringComparer.OrdinalIgnoreCase);
         try
         {
+            foreach (var targetGroup in inputs
+                         .Where(input => input.Type == "target" && input.TargetType == "dataverse")
+                         .GroupBy(input => input.TargetConnectionId!, StringComparer.OrdinalIgnoreCase))
+            {
+                var targetConnection = targetGroup.First().TargetConnection
+                    ?? throw new InvalidOperationException(
+                        $"Dataverse connection '{targetGroup.Key}' resolved to null.");
+                var controller = new PipelineAdaptiveDataverseConnectionController(
+                    targetGroup.Key,
+                    targetConnection,
+                    maxTargetConcurrency,
+                    throughputMeter,
+                    batchTuningCoordinator,
+                    disableDataverseRetriesForDiagnostics);
+                targetControllers.Add(controller);
+                targetControllersByConnection.Add(targetGroup.Key, controller);
+                foreach (var input in targetGroup)
+                {
+                    var tuningProfile = store?.GetDataverseTargetTuningProfile(input.Id);
+                    Action<int?, int?>? persistTunedValues = store is null
+                        ? null
+                        : (batchSize, maxConcurrency) =>
+                            store.SaveDataverseTargetTuningProfile(
+                                input.Id,
+                                batchSize,
+                                maxConcurrency ?? (input.TargetConcurrencyAuto
+                                    ? controller.CurrentConcurrencyBudget
+                                    : null),
+                                algorithmVersion: 2,
+                                connectionId: targetGroup.Key);
+                    controller.RegisterTarget(
+                        input.Id,
+                        Math.Min(input.BatchSize, 1000),
+                        input.TargetBatchSizeAuto,
+                        input.TargetConcurrencyAuto,
+                        input.BatchSize,
+                        input.TargetMaxConcurrency,
+                        tuningProfile?.BatchSize,
+                        tuningProfile is { AlgorithmVersion: 2 } &&
+                        string.Equals(
+                            tuningProfile.ConnectionId,
+                            targetGroup.Key,
+                            StringComparison.OrdinalIgnoreCase)
+                            ? tuningProfile.MaxConcurrency
+                            : null,
+                        persistTunedValues);
+                }
+                controller.CompleteRegistration();
+            }
+
             foreach (var input in inputs)
             {
                 Func<MigrationStepCheckpoint, CancellationToken, IAsyncEnumerable<MigrationWorkBatch>>? sourceReader = null;
@@ -207,21 +263,9 @@ internal static partial class PowerShellMigrationStepFactory
                 }
 
                 var targetSemaphore = GetGraphTargetSemaphore(input, semaphores);
-                AdaptiveDataverseTargetTuner? targetTuner = null;
-                if (input.Type == "target" && input.TargetType == "dataverse")
-                {
-                    targetTuner = new AdaptiveDataverseTargetTuner(
-                        Math.Min(input.BatchSize, 1000),
-                        maxTargetConcurrency,
-                        input.TargetBatchSizeAuto,
-                        input.TargetConcurrencyAuto,
-                        input.BatchSize,
-                        input.TargetMaxConcurrency)
-                    {
-                        StepId = input.Id
-                    };
-                    targetTuners.Add(targetTuner);
-                }
+                var targetController = input.Type == "target" && input.TargetType == "dataverse"
+                    ? targetControllersByConnection[input.TargetConnectionId!]
+                    : null;
                 var childContexts = consumers.TryGetValue(input.Id, out var childSteps)
                     ? childSteps.Where(child =>
                             child.Type != "join" &&
@@ -249,7 +293,9 @@ internal static partial class PowerShellMigrationStepFactory
                     ["TargetOptionsJson"] = input.TargetOptionsJson ?? "{}",
                     ["TargetCallbackText"] = input.TargetCustom?.CallbackText ?? string.Empty,
                     ["TargetSemaphore"] = targetSemaphore,
-                    ["TargetTuner"] = targetTuner,
+                    ["TargetController"] = targetController,
+                    ["PipelineThroughputMeter"] = throughputMeter,
+                    ["DisableDataverseRetriesForDiagnostics"] = disableDataverseRetriesForDiagnostics,
                     ["TransformType"] = input.TransformType ?? string.Empty,
                     ["TransformConnectionId"] = input.TransformConnectionId ?? string.Empty,
                     ["TransformSql"] = input.TransformSql ?? string.Empty,
@@ -292,8 +338,8 @@ internal static partial class PowerShellMigrationStepFactory
                                 invocationContext
                             ];
                         });
-                Func<IDisposable?>? tryAcquireExecutionLease = targetTuner is not null
-                    ? () => targetTuner.TryAcquire()
+                Func<IDisposable?>? tryAcquireExecutionLease = targetController is not null
+                    ? () => targetController.TryAcquire(input.Id)
                     : targetSemaphore is not null
                         ? () => targetSemaphore.Wait(0)
                             ? new SemaphoreExecutionLease(targetSemaphore)
@@ -321,7 +367,8 @@ internal static partial class PowerShellMigrationStepFactory
                     SourceKeyProperty = sourceKeyParents.Contains(input.Id) ? input.SourceKey : null,
                     StepCompletionCoordinator = stepCompletionCoordinator,
                     TryAcquireExecutionLease = tryAcquireExecutionLease,
-                    ExecuteBatchWithExecutionLeaseAsync = handlerWithLease
+                    ExecuteBatchWithExecutionLeaseAsync = handlerWithLease,
+                    DispatchWeight = dispatchWeights[input.Id]
                 });
             }
         }
@@ -331,14 +378,18 @@ internal static partial class PowerShellMigrationStepFactory
             {
                 semaphore.Dispose();
             }
-            targetTuners.Clear();
+            foreach (var controller in targetControllers)
+            {
+                controller.Dispose();
+            }
             throw;
         }
 
         return new MigrationStepSet(
             definitions,
             semaphores.Values.Select(value => value.Semaphore).ToArray(),
-            targetTuners);
+            targetControllers,
+            throughputMeter);
     }
 
     private static GraphStepInput ParseGraphStep(
@@ -1336,6 +1387,51 @@ internal static partial class PowerShellMigrationStepFactory
         return (value, false);
     }
 
+    private static IReadOnlyDictionary<string, double> CalculatePipelineDispatchWeights(
+        IReadOnlyList<GraphStepInput> inputs)
+    {
+        var parentsByStep = inputs.ToDictionary(
+            step => step.Id,
+            step => step.Inputs
+                .Concat(step.CompletionDependencies)
+                .Concat(step.RowDependencies.Select(dependency => dependency.Job))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray(),
+            StringComparer.Ordinal);
+        var weights = inputs.ToDictionary(step => step.Id, _ => 1d, StringComparer.Ordinal);
+
+        foreach (var target in inputs.Where(step => step.Type == "target"))
+        {
+            var ancestorDistances = new Dictionary<string, int>(StringComparer.Ordinal);
+            var pending = new Queue<(string StepId, int Distance)>();
+            pending.Enqueue((target.Id, 0));
+            while (pending.TryDequeue(out var current))
+            {
+                foreach (var parentId in parentsByStep[current.StepId])
+                {
+                    var distance = current.Distance + 1;
+                    if (ancestorDistances.TryGetValue(parentId, out var previousDistance) &&
+                        previousDistance <= distance)
+                    {
+                        continue;
+                    }
+
+                    ancestorDistances[parentId] = distance;
+                    pending.Enqueue((parentId, distance));
+                }
+            }
+
+            var targetImportance = 1 + Math.Log2(ancestorDistances.Count + 1);
+            weights[target.Id] += targetImportance;
+            foreach (var (ancestorId, distance) in ancestorDistances)
+            {
+                weights[ancestorId] += targetImportance / (distance + 1);
+            }
+        }
+
+        return weights;
+    }
+
     private sealed record GraphStepInput(
         string Id,
         string Type,
@@ -1397,7 +1493,7 @@ internal static partial class PowerShellMigrationStepFactory
         object? connection,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var cursor = checkpoint.CursorJson;
+        var cursor = checkpoint.ResumeCursorJson;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();

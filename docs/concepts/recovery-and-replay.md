@@ -6,7 +6,7 @@ The SQLite store persists run identity, batches, outcomes, checkpoints, leases, 
 
 A run is bound to its `RunName` and `StepHash`. By default, the cmdlet computes the step hash from normalized step definitions and module names. Changing a script, connection ID, path, or other hashed step data can make the run incompatible. If supplying `StepHash` explicitly, the caller owns this compatibility decision.
 
-Root sources receive their last contiguous completed sequence and cursor checkpoint. They must resume deterministically and reproduce any already-persisted batch identities with the same payload and cursor. Custom typed sources restart their page cursor at the beginning on enumeration and are replayed through the last completed root key, so their records must be stable, replayable, and ordered by the source key.
+Root readers receive the last contiguous completed checkpoint (`LastCompletedSequence` and `CursorJson`) and the latest durable source position (`ResumeSequence` and `ResumeCursorJson`). They continue after that latest enqueued batch; pending and in-flight batches are replayed from their stored SQLite payloads rather than reconstructed. Custom typed sources may restart their page cursor at the beginning on enumeration and replay records through the last durable source key, so their records must be stable, replayable, and ordered by the source key.
 
 ## At-least-once external effects
 

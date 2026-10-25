@@ -1,6 +1,6 @@
 # Dataverse Integration Replacement: Initial Plan
 
-**Status:** The C# engine, embedded PowerShell SDK, and SQLite are implemented. `Invoke-Migration` runs a top-level DAG of Source, Transform, Filter, Append, Target, and callback steps through the C# dependency scheduler. Connector definitions and script blocks are inline on their respective steps; `Inputs` declares graph edges. The dashboard, opt-in row capture, and recursive lineage tracing are implemented. Stream-wide Merge/Sort are currently available only through the separate data-flow API; production Dataverse hardening remains.
+**Status:** The C# engine, embedded PowerShell SDK, and SQLite are implemented. `Invoke-Migration` runs a top-level DAG of Source, Transform, Filter, Append, Target, and callback steps through the C# dependency scheduler. Connector definitions and script blocks are inline on their respective steps; `Inputs` declares graph edges. The dashboard, opt-in row capture, and recursive lineage tracing are implemented. Dataverse auto tuning now includes pipeline-weighted fair dispatch, globally measured per-target batch experiments, a shared adaptive concurrency budget per connection, and optional retry/throttle telemetry. Stream-wide Merge/Sort are currently available only through the separate data-flow API; production Dataverse hardening remains.
 **Public repository:** [rnwood/Migration4Dataverse](https://github.com/rnwood/Migration4Dataverse)
 
 ## Goal
