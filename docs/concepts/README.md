@@ -1,8 +1,10 @@
-# Concepts
+# Migration concepts
 
-- [Dependencies](./dependencies.md) — step inputs, fan-out, Append, and callback multi-parent prerequisites.
-- [Batching and backpressure](./batching.md) — source batches, queues, workers, and target serialization.
-- [Recovery and replay](./recovery-and-replay.md) — run identity, checkpoints, retries, leases, and idempotent writes.
-- [Connections and callbacks](./connections-and-callbacks.md) — connection ownership, runspaces, callback rules, and custom connector behavior.
+Read these guides after the [step configuration reference](../configuration.md), or use them to answer a specific operational question:
 
-The [step configuration reference](../configuration.md) defines the public migration graph shape.
+- [Dependencies](./dependencies.md) — when rows flow, when steps wait, and how keyed source relationships and joins behave.
+- [Batching and backpressure](./batching.md) — batch sizes, queue limits, and concurrency.
+- [Recovery and replay](./recovery-and-replay.md) — checkpoints, resume compatibility, leases, and idempotent writes.
+- [Connections and callbacks](./connections-and-callbacks.md) — runtime connection ownership and embedded PowerShell callback rules.
+
+For Dataverse-specific command options, these guides link to the upstream `Rnwood.Dataverse.Data.PowerShell` documentation.

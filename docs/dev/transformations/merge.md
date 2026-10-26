@@ -1,4 +1,4 @@
-# Merge
+# Merge (internal pipeline)
 
 `merge` streams exactly two inputs into one ordered output. Each input must already be sorted by the same configured keys and directions. Merge compares one record from each side at a time; when keys are equal, the left input is emitted first.
 

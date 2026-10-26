@@ -1,11 +1,17 @@
 # Dependencies
 
-Migration steps form a directed acyclic graph. `Inputs` declares row-flow edges: a producer can have multiple consumers, and each emitted dependency payload is routed to the declared child step. Declaring multiple inputs does not implicitly join their rows; use keyed `Inputs` for row-linked source records or a `join` step to combine rows. `DependsOn` is reserved for additional whole-step completion barriers.
+Migration steps form a directed acyclic graph. `Inputs` defines row flow: it says which step produces the rows a step consumes. A producer can have multiple consumers, and each consumer receives its own bounded work.
+
+> [!NOTE]
+> Listing multiple `Inputs` does not join rows by itself. Use keyed inputs for a source-to-source relationship, a `join` step to combine rows, or `DependsOn` when a step only needs to wait for another step to finish.
+
+## Fan-out
+
+A source can feed more than one step. Each consumer runs as its own branch:
 
 ```powershell
 $steps = @(
     @{
-        # Reads account rows once and makes them available to two independent consumers.
         Id = 'AccountsSource'
         Type = 'source'
         Inputs = @()
@@ -17,7 +23,6 @@ $steps = @(
         }
     }
     @{
-        # Trims account names for the main account output.
         Id = 'NormalizeAccounts'
         Type = 'transform'
         Inputs = @('AccountsSource')
@@ -27,7 +32,6 @@ $steps = @(
         }
     }
     @{
-        # Writes an audit copy directly from the source without waiting for normalization.
         Id = 'AccountAudit'
         Type = 'target'
         Inputs = @('AccountsSource')
@@ -40,15 +44,14 @@ $steps = @(
 )
 ```
 
-`NormalizeAccounts` and `AccountAudit` are independent consumers of the same source. The producer's successful batch releases a bounded batch for each declared consumer.
+`NormalizeAccounts` and `AccountAudit` can process batches as `AccountsSource` produces them. They do not wait for one another.
 
-## Whole-step completion dependencies
+## Completion-only dependencies
 
-`Inputs` declares row-flow edges and implicitly declares those dependencies. Use `DependsOn` with one or more step IDs on a source-driven step only for an additional completion barrier that is not already an input. Point to the parent's terminal Target when the source or join must wait for all parent rows to be written:
+Use `DependsOn` on a source or join when it must wait for another step to finish but must not consume that step's rows. For example, a Contacts source can wait until Accounts have been written:
 
 ```powershell
 @{
-    # Reads contacts only after the account target has completed.
     Id = 'ContactsSource'
     Type = 'source'
     Inputs = @()
@@ -62,15 +65,14 @@ $steps = @(
 }
 ```
 
-Multiple IDs are an all-of barrier. The dependent source or join begins only after each referenced step has completed; a failed or cancelled parent fails the run without starting the reader. `DependsOn` does not carry rows. Do not repeat an `Inputs` step in `DependsOn`.
+Multiple IDs form an all-of barrier. If a required step fails or is cancelled, the dependent reader does not start. Do not repeat an `Inputs` step in `DependsOn`; an input already declares both row flow and its dependency.
 
-## Row-linked source dependencies
+## Keyed source relationships
 
-Use a keyed `Inputs` entry when child source rows refer to a parent source. The entry names both sides of the relationship: `Child` is the child property and `Parent` is the parent's configured `Source.Key`. `RowsPerParent` is optional: use a positive number to require a fixed number of children for every parent, or omit it (equivalent to `0`) for variable child counts, including parents with no children:
+Use an object in a source's `Inputs` array when its rows refer to rows from parent **source** steps. `Child` names the field in the child row; `Parent` names the parent's configured `Source.Key`. `RowsPerParent` is optional and requires a fixed child count when set to a positive value.
 
 ```powershell
 @{
-    # Reads order lines and links each row to its parent order by key.
     Id = 'OrderLinesSource'
     Type = 'source'
     Inputs = @(
@@ -89,7 +91,7 @@ Use a keyed `Inputs` entry when child source rows refer to a parent source. The 
 }
 ```
 
-Use multiple keyed entries when a child row can refer to more than one parent source:
+A source can have several keyed parent inputs:
 
 ```powershell
 Inputs = @(
@@ -98,17 +100,19 @@ Inputs = @(
 )
 ```
 
-Each `Job` must identify a source step. The engine indexes each parent's source keys to their batches, then releases a child batch when the batches for that row's non-null parent keys are available. A child row with a JSON `null` key has no relationship to that parent: it is retained and adds no prerequisite for that parent. If every parent key is null, the row has no row-linked batch prerequisites. Any non-null key that does not match a row in its named parent source fails the migration instead of being dropped. Missing or blank key fields are invalid; use an explicit `null` for an absent relationship. Whole-step completion dependencies remain separate and only gate release when explicitly specified.
+The engine indexes parent source keys and stages linked child rows so they can be released as their parents become available. Child rows do not need to arrive grouped or sorted by parent key. A row-linked source can itself be a parent for another step.
 
-The engine stages each row-linked source in a temporary SQLite database so it can release null-containing rows without waiting for unrelated parent rows and order linked rows deterministically. Child source files do not need to be pre-sorted or grouped, and a row-linked source can itself be a parent for further dependencies. Root source records remain strictly ordered by `Source.Key`. Parent source keys must be non-empty and unique within their source step. A positive `RowsPerParent` applies independently to each relationship and requires exactly that many child rows for every parent row; null relationships do not count toward that parent's child count. Omit it (or set it to `0`) for variable child counts, including zero. Completion dependencies gate all child rows until the referenced steps finish; use a parent Target when child lookups must not race parent writes. The staging file is bounded-memory and is removed when source enumeration ends.
+> [!IMPORTANT]
+> Use an explicit JSON `null` to represent an absent child relationship. Missing or blank child-key fields are invalid. A non-null key with no matching parent row fails the migration rather than being silently dropped.
 
-## Joining written parent records
+Null relationships are retained without waiting for that parent and do not count toward `RowsPerParent`. A positive `RowsPerParent` is checked independently for each relationship and each parent row. Omit it, or set it to `0`, for a variable number of child rows, including none. Parent source keys must be non-empty and unique.
 
-Use a `join` step to combine two row streams: the child/left input first and the parent/right input second. Each input declares its `Job` and output alias in `As`; the second declares the key mapping. The child row and parent record are emitted as properties of one nested row; a following Transform still consumes exactly one input row:
+## Joining parent records
+
+Use a `join` step to combine a child row with a matching parent row. It has exactly two ordered inputs: the left/child stream first and the right/parent stream second. Each input names its step with `Job` and a nested output alias with `As`; the parent input also defines one or more ordered key pairs.
 
 ```powershell
 @{
-    # Joins opportunities to written account rows, retaining those without a match.
     Id = 'JoinOpportunities'
     Type = 'join'
     Inputs = @(
@@ -118,51 +122,40 @@ Use a `join` step to combine two row streams: the child/left input first and the
             As = 'Account'
             Keys = @(
                 @{ Child = 'account_id'; Parent = 'new_salesforceid' }
-                @{ Child = 'account_region'; Parent = 'region_code' }
             )
         }
     )
     JoinType = 'left'
 }
-
-@{
-    # Maps the joined opportunity and account into a target lookup reference.
-    Id = 'MapOpportunities'
-    Type = 'transform'
-    Inputs = @('JoinOpportunities')
-    Script = {
-        param($row)
-        @{
-            account_lookup = if ($null -ne $row.Account) {
-                @{
-                    TableName = 'account'
-                    Id = [string]$row.Account.Id
-                }
-            }
-        }
-    }
-}
 ```
 
-The first input is the left/child stream; the second is the right/parent stream. `Keys` contains ordered `{ Child, Parent }` pairs and supports composite keys. If the parent input is a Dataverse Target, its `Parent` columns must exactly match an ordered `MatchOn` group. Each matched `$row.<As>` record includes all mapped Target columns and the final Dataverse GUID in `Id`. Chain two-input joins to add more parent lookups; a later join may use dotted key paths such as `Opportunity.id` into a nested joined row.
+The following Transform receives one nested row; the child and parent are available as `$row.Opportunity` and `$row.Account`. A Dataverse Target parent includes its mapped columns and final Dataverse `Id`. A Source parent includes its selected columns and configured `Id`.
 
-`JoinType` is required. `inner` drops a child row with no parent match; `left` retains it and sets the parent alias to `$null`. Null or blank child key components never match; left joins retain those rows immediately, while inner joins filter them. Join inputs are staged and indexed in SQLite as each completed batch arrives. `JoinOrder` defaults to `ready`, which emits available matches without waiting behind an earlier child whose parent has not arrived; later child rows can therefore be emitted first. Deferred rows are resolved when a parent arrives or the parent step completes. Set `JoinOrder = 'stable'` to preserve left-input order; an earlier unresolved key can then hold up later matches. Neither side needs to be sorted by the join key. Staging is retained after failures for recovery and removed after successful completion.
+| Setting | Behavior |
+|---|---|
+| `JoinType = 'inner'` | Drop child rows that have no parent match. |
+| `JoinType = 'left'` | Keep unmatched child rows and set the parent alias to `$null`. |
+| `JoinOrder = 'ready'` | Default. Emit a match as soon as its parent row is available; later child rows can be emitted before an earlier unresolved row. |
+| `JoinOrder = 'stable'` | Preserve left-input order; an earlier unresolved key can hold up later matches. |
+
+Keys can contain multiple ordered pairs for composite matches. Target parent keys must match one complete ordered `Options.MatchOn` group. Source parent keys must exist and be unique. Null or blank key components never match; inputs do not need to be pre-sorted. Joins can be chained to add further lookups, including dotted paths into an earlier nested row.
 
 ## Append
 
-`append` takes two or more input step IDs and emits their rows as a union-all stream. It does not match records by key. Each parent stream must be capable of producing the same row shape expected by downstream steps.
+An `append` step takes two or more input IDs and concatenates their rows in the declared order. It preserves duplicates and does not match records by key.
 
 ```powershell
 @{
-    # Combines domestic and international customer streams without matching rows.
     Id = 'AllCustomers'
     Type = 'append'
     Inputs = @('DomesticCustomers', 'InternationalCustomers')
 }
 ```
 
+Each input should provide the row fields expected by downstream steps. For the complete node contract, see [step configuration](../configuration.md).
+
 ## Callback multi-parent prerequisites
 
-Callback steps can declare multiple input IDs. The producing handler returns `MigrationDependencyOutput` values, and `RequiredBatchIds` identifies any additional parent batches that must succeed before a child batch is released. The callback creates or interprets the payload; the scheduler does not infer record joins from the `Inputs` list.
+Callback steps can declare multiple `Inputs`. Their handler returns `MigrationDependencyOutput` values, and `RequiredBatchIds` lists the parent batches that must succeed before a child batch is released. This is an explicit batch prerequisite; the scheduler does not inspect or join records in callback payloads. See [callback nodes](../configuration.md#callback-nodes).
 
-Stream-wide `Merge` and `Sort` are supported by the standalone data-flow API but are not yet implemented as `Invoke-Migration` step types. The migration graph rejects them before starting a run. See [migration step configuration](../configuration.md) and the [data-flow transformation reference](../transformations/README.md).
+`sort` and `merge` are not supported `Invoke-Migration` step types. The migration graph rejects them during configuration validation.

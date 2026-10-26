@@ -1,4 +1,4 @@
-# Append / Union All
+# Append / Union All (internal pipeline)
 
 `append` concatenates two or more input streams in their declared order. The aliases `union-all`, `union_all`, and `union all` are also accepted. This is Union All behavior: it preserves duplicate rows and does not sort or deduplicate.
 

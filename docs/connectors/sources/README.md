@@ -1,17 +1,19 @@
 # Source connectors
 
-Source steps can read from these built-in connectors:
+Choose a connector based on where the rows come from:
 
-| Type | What it reads | Reference |
+| Type | Reads from | Guide |
 |---|---|---|
-| `jsonl` | UTF-8 JSON Lines objects | [JSON Lines](./jsonl.md) |
-| `csv` | CSV records with configurable parsing and conversion | [CSV](./csv.md) |
-| `parquet` | Parquet rows, one bounded row group at a time | [Parquet](./parquet.md) |
-| `sqlite` | Query results streamed from a SQLite database | [SQLite](./sqlite.md) |
-| `duckdb` | Query results streamed from a DuckDB database | [DuckDB](./duckdb.md) |
-| `dataverse` | Dataverse rows via Simple, FetchXML, or Sql4Cds queries | [Dataverse](./dataverse.md) |
-| `custom` | Paged PowerShell callback results | [Custom](./custom.md) |
+| `csv` | A delimited text file | [CSV](./csv.md) |
+| `jsonl` | A UTF-8 JSON Lines file | [JSON Lines](./jsonl.md) |
+| `parquet` | A Parquet file | [Parquet](./parquet.md) |
+| `sqlite` | A SQL query over a SQLite connection | [SQLite](./sqlite.md) |
+| `duckdb` | A SQL query over a DuckDB connection | [DuckDB](./duckdb.md) |
+| `dataverse` | A Simple, FetchXML, or SQL4CDS query | [Dataverse](./dataverse.md) |
+| `custom` | A paged PowerShell callback | [Custom](./custom.md) |
 
-Every source also uses the common `ConnectionId`, `Path` (file connectors), `Key`, `Id`, and optional `ExpectedRecordCount` properties documented in [step configuration](../../configuration.md#source-properties).
+Every source requires `ConnectionId` and a stable `Key`. `Path` is required for file sources. `Id` is optional; use it when a source field should be carried as the row's target-record ID. `ExpectedRecordCount` is also optional. See [common source properties](../../configuration.md#source-properties).
 
-File connectors use a `System.IO.DirectoryInfo` connection and resolve the source `Path` below that root. SQLite and DuckDB use named ADO.NET connections and a SQL query in `Options.Query`. Source records must be JSON objects/dictionaries. `Key` identifies records for stable source ordering and resume; `Id` names the source value converted to the target `Id` GUID.
+File connectors use a `System.IO.DirectoryInfo` connection root. SQLite and DuckDB use ADO.NET connections and a query in `Options.Query`. Source rows must be JSON-compatible objects.
+
+For Dataverse cmdlet options beyond the migration adapter's requirements, see the upstream [`Get-DataverseRecord` reference](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Get-DataverseRecord.md), [`Invoke-DataverseSql` reference](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Invoke-DataverseSql.md), and [querying concept](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/core-concepts/querying.md).

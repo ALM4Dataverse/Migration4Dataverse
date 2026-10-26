@@ -1,17 +1,19 @@
 # Target connectors
 
-Target steps support these connectors:
+Choose a target based on where the migrated rows should go:
 
-| Type | Write behavior | Reference |
+| Type | Writes to | Guide |
 |---|---|---|
-| `dataverse` | Creates, updates, upserts, or deletes mapped records through `Rnwood.Dataverse.Data.PowerShell` | [Dataverse](./dataverse.md) |
-| `jsonl` | Writes an atomic JSON Lines file per batch | [JSON Lines](./jsonl.md) |
-| `csv` | Writes a CSV file per batch using configured output columns | [CSV](./csv.md) |
-| `parquet` | Writes a Parquet file per batch using an explicit schema | [Parquet](./parquet.md) |
-| `sqlite` | Inserts records into a SQLite table, creating or validating its schema | [SQLite](./sqlite.md) |
-| `duckdb` | Inserts records into a DuckDB table, creating or validating its schema | [DuckDB](./duckdb.md) |
-| `custom` | Calls a PowerShell callback once per batch | [Custom](./custom.md) |
+| `dataverse` | Dataverse tables through `Rnwood.Dataverse.Data.PowerShell` | [Dataverse](./dataverse.md) |
+| `csv` | A CSV file for each batch | [CSV](./csv.md) |
+| `jsonl` | An atomic JSON Lines file for each batch | [JSON Lines](./jsonl.md) |
+| `parquet` | A Parquet file for each batch | [Parquet](./parquet.md) |
+| `sqlite` | A SQLite table | [SQLite](./sqlite.md) |
+| `duckdb` | A DuckDB table | [DuckDB](./duckdb.md) |
+| `custom` | A PowerShell callback | [Custom](./custom.md) |
 
-Every target uses `ConnectionId`; file targets also require `Path`. Dataverse requires `Table`. `Operation` is optional and defaults to `Upsert` for Dataverse or `Write` for the other targets. Target `BatchSize` overrides the invocation default; Dataverse targets default to `auto` tuning. See [target properties](../../configuration.md#target-properties).
+Every target requires `ConnectionId`. File targets also require `Path`; database and Dataverse targets require `Table`. `Operation` defaults to `Upsert` for Dataverse and `Write` for the other connectors. A target-level `BatchSize` overrides the invocation default. See [common target properties](../../configuration.md#target-properties).
 
-Dataverse and custom writes are serialized per target connection, subject to the custom target's configured concurrency. SQLite and DuckDB targets create a missing table by default, or validate a caller-supplied schema against an existing table. Database writes and batch replay markers commit transactionally. Built-in file targets use atomic per-batch files with replay checks.
+Dataverse targets on one connection share an adaptive concurrency budget; custom callbacks use their configured `MaxConcurrency`. SQLite and DuckDB can create a missing table or validate a supplied schema. Database writes commit with a batch replay marker, while file writers use atomic per-batch output.
+
+For complete Dataverse write options, see upstream [`Set-DataverseRecord`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Set-DataverseRecord.md), [`Remove-DataverseRecord`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Remove-DataverseRecord.md), and [creating and updating](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/core-concepts/creating-updating.md).

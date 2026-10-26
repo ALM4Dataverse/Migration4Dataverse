@@ -1,6 +1,11 @@
-# Data-flow transformations
+# Internal data-flow transformations
 
-The data-flow pipeline is separate from the top-level migration step graph used by `Invoke-Migration`. PowerShell consumers define the pipeline as a hashtable and put each Transform or Filter script block directly in that node's `Script` property. The engine extracts those blocks internally; the configuration does not need to be converted to JSON or paired with a separate script map.
+This reference describes the engine's separate data-flow pipeline. It is not part of the supported `Invoke-Migration` step contract.
+
+> [!IMPORTANT]
+> The C# transformation types and this pipeline are internal implementation details, not a supported public C# API. For the PowerShell steps supported by `Invoke-Migration`, see [migration step configuration](../../configuration.md).
+
+PowerShell callers of this internal pipeline define it as a hashtable and put each Transform or Filter script block directly in that node's `Script` property. The engine extracts those blocks internally; the configuration does not need to be converted to JSON or paired with a separate script map.
 
 ## PowerShell configuration
 
@@ -110,4 +115,4 @@ String values use ordinal comparison. Date and datetime sort values must be JSON
 - [Transform](./transform.md) — apply an inline PowerShell script that can emit zero or more row objects.
 - [Filter](./filter.md) — retain or discard each input row using inline PowerShell truthiness.
 
-Graph fan-out (multiple consumers), joins, grouping, and other SSIS transformations are not implemented as pipeline nodes. See [architecture](../dev/architecture.md) for execution boundaries.
+Graph fan-out (multiple consumers), joins, grouping, and other SSIS transformations are not implemented as pipeline nodes. See [architecture](../architecture.md) for execution boundaries.

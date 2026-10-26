@@ -1,6 +1,9 @@
-# Architecture and internal flows
+# Internal architecture and developer guide
 
 This guide describes the current implementation, not a promise of complete KingswaySoft parity or a production-ready generic migration product. See the [feature plan](../../PLAN.md) for current scope and outstanding work.
+
+> [!IMPORTANT]
+> The C# types and scheduler contracts described here are internal implementation details, not a supported public API.
 
 ## System boundaries
 
@@ -45,7 +48,7 @@ flowchart LR
     customTarget["Custom target callback"]
     output["Per-step, per-run batch files"]
     pipeline["Separate data-flow pipeline"]
-    caller["C# API caller"]
+    caller["Internal C# host or test"]
     dashboard["React / React Flow dashboard"]
     browser["Local browser"]
 
@@ -141,11 +144,11 @@ Database-backed migration Transform nodes are per-row: SQLite invokes its PowerS
 
 [`DataFlowPipelineDefinition`](../../src/Migration4Dataverse.Engine/Transformations/DataFlowPipelineDefinition.cs) validates a named acyclic graph, and [`DataFlowPipeline`](../../src/Migration4Dataverse.Engine/Transformations/DataFlowPipeline.cs) executes it pull-first. PowerShell consumers author configuration as hashtables and place scripts inline in each Transform or Filter node's `Script` property; the pipeline API extracts them into its internal node-ID map. Append/Union All and Merge stream records; Merge keeps one-row lookahead per side and validates the configured ordering. Transform can emit zero or more JSON objects per input row, while Filter uses script output truthiness to keep or discard the original row. Sort is stable and external: it writes bounded sorted runs and performs pairwise merge passes under the configured memory, row, record-size, and spill limits.
 
-The migration graph supports multiple consumers and Source, Append/Union All, Join, Target, Transform, Filter, and callback nodes. Stream-wide Sort and Merge remain available in the separate data-flow API only; graph Join is a separate keyed row-combination step and does not redefine Merge. See the [transformation reference](../transformations/README.md) for its schema and operator details.
+The migration graph supports multiple consumers and Source, Append/Union All, Join, Target, Transform, Filter, and callback nodes. Stream-wide Sort and Merge belong to the separate internal data-flow pipeline; graph Join is a separate keyed row-combination step and does not redefine Merge. See the [internal transformation reference](./transformations/README.md) for its schema and operator details.
 
 ## Scheduler contracts
 
-The public C# contracts are in the [scheduling source folder](../../src/Migration4Dataverse.Engine/Scheduling/):
+The internal scheduler contracts are in the [scheduling source folder](../../src/Migration4Dataverse.Engine/Scheduling/):
 
 - A `MigrationStepDefinition` has a unique ID, node type, declared input step IDs, an optional source callback, and a batch handler. A reader may identify a root source or a streaming Join reader.
 - Join is the only source-driven step allowed to consume non-source inputs. It reads persisted input rows incrementally and may emit matches before the producers finish. Its default `JoinOrder = 'ready'` defers unavailable child keys and emits later ready matches without preserving left-input order; `JoinOrder = 'stable'` preserves that order and can wait behind an unavailable key. Unmatched keys resolve when the parent finishes. Other source-driven steps continue to require source-driven inputs.

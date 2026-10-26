@@ -1,46 +1,47 @@
 # Migration step configuration
 
-`Invoke-Migration` accepts native PowerShell hashtables or other PowerShell objects in `-Steps`; native hashtables are sufficient and are used in these examples. Configuration is not a standalone JSON file. A migration is a top-level directed acyclic graph whose edges are declared with `Inputs`. Source and Target connector definitions are inline on their respective nodes. Transform and Filter script blocks are also inline. Runtime connection objects are supplied separately through `-Connections` and are never stored as part of a step definition.
+`Invoke-Migration -Steps` accepts PowerShell objects; native hashtables are the simplest way to define a migration. The definitions are not a standalone JSON or SSIS package. A migration is a directed acyclic graph whose nodes read, transform, route, or write rows.
+
+> [!NOTE]
+> Put live connection objects in `-Connections`, not in the step definitions. This keeps credentials and runtime objects separate from the configuration used for run history and resume checks.
+
+## A small migration
 
 ```powershell
 $steps = @(
     @{
-        # Reads account records from the input files.
-        Id = 'CustomersSource'
+        Id = 'AccountsSource'
         Type = 'source'
         Inputs = @()
         Source = @{
             Type = 'csv'
             ConnectionId = 'files'
-            Path = 'customers.csv'
+            Path = 'accounts.csv'
             Key = 'SourceId'
-            Id = 'DataverseId'
-            Options = @{
-                ColumnTypes = @{ DataverseId = 'guid' }
+        }
+    }
+    @{
+        Id = 'MapAccounts'
+        Type = 'transform'
+        Inputs = @('AccountsSource')
+        Script = {
+            param($row)
+            @{
+                new_sourceid = [string]$row.SourceId
+                name = ([string]$row.Name).Trim()
             }
         }
     }
     @{
-        # Maps each account row to the Dataverse field shape.
-        Id = 'CustomerFields'
-        Type = 'transform'
-        Inputs = @('CustomersSource')
-        Script = {
-            param($row)
-            @{ name = [string]$row.Name }
-        }
-    }
-    @{
-        # Upserts the mapped account rows into Dataverse.
-        Id = 'CustomersTarget'
+        Id = 'AccountsTarget'
         Type = 'target'
-        Inputs = @('CustomerFields')
+        Inputs = @('MapAccounts')
         Target = @{
             Type = 'dataverse'
             ConnectionId = 'crm'
             Table = 'account'
             Operation = 'Upsert'
-            BatchSize = 100
+            Options = @{ MatchOn = ,@('new_sourceid') }
         }
     }
 )
@@ -51,117 +52,93 @@ $connections = @{
 }
 
 Invoke-Migration -DatabasePath './migration.sqlite3' `
-    -RunName 'Customer load' -Steps $steps -Connections $connections
+    -RunName 'Account import' -Steps $steps -Connections $connections
 ```
 
 ## Node contract
 
-Every node has a unique, non-empty `Id`, a `Type`, and an `Inputs` array. Ordinary inputs may be step IDs; keyed source and join inputs are objects with a `Job` step ID and explicit `Keys` pairs. Multiple consumers can reference the same node. A graph must have a root reader, must be acyclic, and every node must contribute to a Target or terminal callback step.
+Each node has a unique `Id`, a `Type`, and an `Inputs` array. `Inputs` names the node or nodes that provide rows; it does not automatically join multiple inputs. A graph must be acyclic, contain a root source or root callback, and route its work to a target or terminal callback.
 
-| Type | Inputs | Additional properties |
-|---|---:|---|
-| `source` | None for a root source, or one or more keyed parent sources | `Source` connector definition; optional `DependsOn` completion barriers. Each keyed input names both `Child` and `Parent` columns in `Keys`. |
-| `join` | Exactly two ordered inputs: left/child first, right/parent second | `JoinType` (`inner` or `left`); optional `JoinOrder` (`ready` or `stable`, default `ready`); each input declares `Job` and `As`, and the second also declares ordered `Keys` pairs of `{ Child, Parent }`. Emits one nested row for downstream steps. |
-| `transform` | Exactly one | Inline `Script` that emits zero or more dictionaries or custom objects for each row; optional database `Transform` configuration supports SQLite scripts and DuckDB statements. |
-| `filter` | Exactly one | Inline `Script` whose output truthiness decides whether the original row passes unchanged. |
-| `append` | Two or more | Pass-through union of the input streams. |
-| `target` | Exactly one | `Target` connector definition. Target rows may only feed Join relationships. |
-| `callback` | Root or one or more | `ExecuteBatch`; root callbacks also require `ReadBatches`, while dependent callbacks must not declare it. |
+| Type | Inputs | Additional configuration |
+|---|---|---|
+| `source` | None for a root reader, or keyed source inputs | `Source`; optionally `DependsOn` for completion-only barriers. |
+| `transform` | Exactly one | Inline `Script`, or a supported database-backed `Transform`. |
+| `filter` | Exactly one | Inline `Script`; truthy output retains the row. |
+| `append` | Two or more | Concatenates the input streams without matching or deduplicating rows. |
+| `join` | Exactly two, ordered child/left then parent/right | `JoinType`, aliases, and ordered key pairs. |
+| `target` | Exactly one | `Target`. A target can feed a `join`, not an ordinary transform. |
+| `callback` | Root or one or more | Root callbacks also define `ReadBatches`; every callback defines `ExecuteBatch`. |
 
-`sort` and `merge` are available in the standalone data-flow API but are not yet supported as nodes in `Invoke-Migration`; they require stream-wide scheduling rather than per-batch execution. An unsupported node type is rejected before the run starts.
+Every referenced step ID must exist. A node may have multiple consumers. `sort` and `merge` are not supported `Invoke-Migration` step types and are rejected during configuration validation.
 
-### Source dependencies
+## Source dependencies
 
-`Inputs` declares row flow and implicitly declares those input dependencies. `DependsOn` is reserved for additional completion-only barriers on source-driven source and join steps; it accepts only step IDs and does not transfer rows:
-
-- A source input object with `Job` and `Keys` defines a row-linked source relationship. `Keys` must contain exactly one `{ Child, Parent }` pair; `Parent` must name the parent's configured `Source.Key`. `RowsPerParent` is optional and belongs to that input object.
-- Multiple keyed source inputs are supported. An explicit JSON `null` child key means that relationship is absent; the row is retained and emitted before rows with all parent keys present. A non-null key with no matching parent row fails the source. The child-key field must exist; missing or blank values are invalid.
-- Row-linked child rows are staged in a temporary SQLite database and released in deterministic order; child files need not be grouped or sorted. Parent `Source.Key` values must be non-empty and unique. A positive `RowsPerParent` applies independently to that relationship and requires exactly that many children for every parent row; null relationships do not count. Omit it (or set it to `0`) for variable counts, including zero.
-- Do not repeat an input step ID in `DependsOn`. Use a completion barrier only for a separate step whose completion is required before the source or join starts.
-
-See the [dependency guide](./concepts/dependencies.md) for examples and constraints.
-
-### Transform and Filter semantics
-
-- A **Transform** script receives one input row as `$row` and may emit zero or more dictionaries or custom objects. No output drops the row; multiple outputs create multiple records.
-- A **Join** is a distinct graph step; it does not change the standalone data-flow `Merge` operator. It has exactly two inputs in order: a left/child stream, then a right/parent stream. Each input object has `Job` and `As`; the second also has one or more ordered `Keys` pairs of `{ Child, Parent }`. Keys may be dotted paths into a nested joined row. If the second input is a Dataverse Target, its `Parent` columns must match one ordered `Target.Options.MatchOn` group. A Source can also provide parent rows; its key fields must be present and unique. Joins can be chained to add further parent lookups.
-- `JoinType` is required. `inner` drops a child row with no parent match; `left` preserves it and sets the parent alias to `$null`. Null or blank child key components never match; `left` preserves those rows and `inner` filters them. Parent Target records contain mapped columns and the final Dataverse `Id`; Source records contain the selected source columns and configured `Id`. A downstream Transform receives one nested row as `$row`, for example `$row.Account.Id`.
-- Join rows are indexed in SQLite as input batches complete. The default `JoinOrder = 'ready'` emits available matches without waiting behind an earlier child whose parent has not arrived; later child rows can therefore be emitted first. Deferred rows are resolved when a parent arrives or the parent step completes. Set `JoinOrder = 'stable'` to preserve left-input order, which can delay later matches behind an earlier unresolved key. A null key does not wait. Inputs do not need to be sorted by join keys. Staging is retained for recovery after failure and cleared after successful completion.
-- A **Filter** script uses PowerShell output truthiness. A truthy result passes the original row unchanged; no output or a falsey result drops it.
-- For each Transform output, the engine preserves the input `Id` unless the script supplies an `Id` itself. Source connector property `Source.Id` initializes `Id` when present.
-- Script blocks execute as source text in engine-owned PowerShell runspaces; caller closure state is not captured.
-- A connected Transform declares a `Transform` map with `Type` set to `sqlite`, `duckdb`, or `dataverse` and a `ConnectionId`. Its PowerShell `Script` receives `($row, $connection)` and can use the live connection. SQLite and Dataverse scripts run once per input row; a Dataverse script can invoke `Invoke-DataverseSql` for SQL4CDS operations. DuckDB can instead declare `Transform.Sql` and `Transform.Parameters`; the prepared statement runs once per row, with positional `?` parameters mapped to row fields in the order of the `Parameters` hashtable. A statement that returns rows transforms to those rows; a statement without a result set preserves the input row.
-- Database Transform scripts and prepared statements are per-row only. Per-batch and whole-dataset database transforms are not currently supported.
-
-### Source properties
-
-| Property | Required | Description |
-|---|---:|---|
-| `Type` | Yes | `jsonl`, `csv`, `parquet`, `sqlite`, `duckdb`, `dataverse`, or `custom`. |
-| `ConnectionId` | Yes | Key in `-Connections`. File sources require a `System.IO.DirectoryInfo`; SQLite/DuckDB use `Microsoft.Data.Sqlite.SqliteConnection` or `DuckDB.NET.Data.DuckDBConnection`; Dataverse and custom sources use caller-provided connection objects. |
-| `Path` | File sources | Relative path below the source directory connection. Required for JSONL, CSV, and Parquet; omitted for databases and Dataverse. Custom sources may use it as a callback argument. |
-| `Key` | Yes | Source field used for deterministic batch checkpointing. Root-source values must be non-empty, unique, and strictly increasing in ordinal order; Dataverse sources compare keys case-insensitively to match platform ordering. Row-linked child keys must be non-empty and unique within each non-null parent relationship; the engine stages and orders those rows, so their input need not be grouped by the parent key. A source used as a keyed parent must have non-empty, unique key values. |
-| `Id` | No | Source property copied to the record's `Id` field when present. |
-| `ExpectedRecordCount` | No | Optional explicit expected row count. A positive value supplies the progress total and is checked against the source rows when enumeration completes. It takes precedence over automatic providers. Otherwise, SQLite and DuckDB derive counts by wrapping `Options.Query`, Simple and FetchXML Dataverse sources use `Get-DataverseRecord -RecordCount`, custom sources can use `Custom.CountCallback`, and Parquet sources use file metadata. |
-| `Options` | No | Dataverse query or connector-specific options. SQLite and DuckDB require a `Query` returning rows; an optional `CountQuery` overrides the automatic count derived from `Query`. See [SQLite sources](./connectors/sources/sqlite.md) and [DuckDB sources](./connectors/sources/duckdb.md). |
-| `Custom` | Custom only | Custom callback definition; see [custom sources](./connectors/sources/custom.md). |
-
-### Target properties
-
-| Property | Required | Description |
-|---|---:|---|
-| `Type` | Yes | `dataverse`, `jsonl`, `csv`, `parquet`, `sqlite`, `duckdb`, or `custom`. |
-| `ConnectionId` | Yes | Key in `-Connections`; Dataverse expects a module connection, file targets a `System.IO.DirectoryInfo`, SQLite/DuckDB require their ADO.NET connection, and custom targets accept any non-null object. |
-| `Path` | File targets | Relative path below the target directory connection; required for JSONL, CSV, and Parquet. |
-| `Table` | Dataverse and database targets | Dataverse logical table name or SQLite/DuckDB output table (optionally schema-qualified). |
-| `Operation` | No | `Upsert` (default), `Create`, `Update`, `Delete`, or `CreateOrUpdateIfNeeded` for Dataverse; `Write` for file, database, and custom targets. |
-| `BatchSize` | No | Positive override for the invocation's `-BatchSize`; Dataverse also accepts `auto` (the default) to tune up to the invocation batch size. |
-| `MaxConcurrency` | Dataverse only | Positive per-target cap or `auto` (default). Auto mode shares one adaptive concurrency budget among Dataverse targets using the same connection, bounded by `-MaxDegreeOfParallelism`; batch-size experiments are serialized across the pipeline and measured against total target output throughput. |
-| `Options` | No | Connector-specific options. Database targets default to creating a missing table from the first non-empty batch; `Schema` can declare column types up front and `CreateTable = $false` requires a pre-created table. Existing table columns and types are validated. See [SQLite targets](./connectors/targets/sqlite.md) and [DuckDB targets](./connectors/targets/duckdb.md). Dataverse options include `MatchOn` and `LookupColumns`; CSV or Parquet settings are described in the [CSV](./connectors/targets/csv.md) and [Parquet](./connectors/targets/parquet.md) references. |
-| `Custom` | Custom only | Custom callback definition; see [custom targets](./connectors/targets/custom.md). |
-
-For a Dataverse lookup, prefer an inline reference such as `@{ TableName = 'account'; KeyAttributes = @{ accountnumber = 'A-123' } }` in the Transform output; this sends the alternate key without a source read or Join to retrieve the record. `Set-DataverseRecord -NoLookup` is enabled by default; set `Options.NoLookup = $false` to allow lookup queries. `Options.BypassBusinessLogicExecution` and `Options.BypassBusinessLogicExecutionStepIds` forward custom logic bypass choices to `Set-DataverseRecord`; bypassing logic may alter data integrity behavior. `Options.LookupColumns` remains available for legacy scalar foreign keys. Direct references to known Dataverse records may also use a `{ TableName, Id }` reference. See [Dataverse targets](./connectors/targets/dataverse.md) for examples.
-
-## Callback nodes
-
-Callback nodes expose the scheduler's batch contracts for integrations that need custom batch generation or handling.
+`Inputs` declares row flow. Use a keyed source input when a source row refers to one or more parent **source** rows. Use a `join` node to combine a child stream with a source or Dataverse target stream. Use `DependsOn` only when a source or join must wait for another step to finish without receiving its rows.
 
 ```powershell
-$steps = @(
+Inputs = @(
     @{
-        # Reads resumable batches from the external source.
-        Id = 'ReadExternalData'
-        Type = 'callback'
-        Inputs = @()
-        SourceConnectionId = 'source'
-        ReadBatches = {
-            param($Checkpoint, $Connection, $Cursor)
-            # Return at most one MigrationWorkBatch.
-        }
-        ExecuteBatch = {
-            param($Batch, $SourceConnection, $TargetConnection)
-            # Return exactly one MigrationBatchResult.
-        }
-    }
-    @{
-        # Processes each batch produced by the reader.
-        Id = 'ProcessExternalData'
-        Type = 'callback'
-        Inputs = @('ReadExternalData')
-        ExecuteBatch = {
-            param($Batch)
-            # Return exactly one MigrationBatchResult.
-        }
+        Job = 'OrdersSource'
+        Keys = @{ Child = 'OrderId'; Parent = 'OrderId' }
+        RowsPerParent = 2
     }
 )
 ```
 
-`ReadBatches` is used only on a root callback and receives a `MigrationStepCheckpoint`, resolved source connection, and cursor (`$null` for the first page). It may emit zero or one `MigrationWorkBatch`; every non-final batch must advance its non-empty `CursorAfterJson`, and the final batch sets `IsLast`.
+The full rules for null keys, unmatched parents, fixed child counts, join ordering, and completion barriers are in the [dependency guide](./concepts/dependencies.md).
 
-`ExecuteBatch` receives a leased `StoredBatch` and any resolved source and target connections. It emits exactly one `MigrationBatchResult`. `MigrationDependencyOutput` can route payloads to declared child step IDs and specify `RequiredBatchIds` for explicit multi-parent batch prerequisites. These prerequisites gate release; they do not implicitly join records. See the [dependency guide](./concepts/dependencies.md).
+## Transform and Filter semantics
+
+- A Transform script receives one input row as `$row` and may emit zero, one, or multiple record objects. No output drops the row; multiple outputs expand it.
+- Unless the script supplies an `Id`, each Transform output keeps the input `Id`. A source `Id` property initializes that value when present.
+- A Filter script uses PowerShell output truthiness. A truthy result passes the original row unchanged; no output or a falsey result drops it.
+- Scripts run as source text in engine-owned runspaces. They do not capture variables from the caller's interactive scope.
+
+A connected Transform can use a `Transform` map whose `Type` is `sqlite`, `duckdb`, or `dataverse` and whose `ConnectionId` names the connection. Its PowerShell script receives `($row, $connection)` and runs once per row. DuckDB can instead use a prepared `Transform.Sql` statement with ordered `Transform.Parameters`; the statement's result rows become Transform output, while a statement without a result set passes through the input row. Per-batch and whole-dataset database transforms are not supported.
+
+## Source properties
+
+Every source has a `Source` hashtable. See the [source connector index](./connectors/sources/README.md) for connector-specific settings.
+
+| Property | Required | Description |
+|---|---:|---|
+| `Type` | Yes | `jsonl`, `csv`, `parquet`, `sqlite`, `duckdb`, `dataverse`, or `custom`. |
+| `ConnectionId` | Yes | Key in `-Connections`. File connectors expect a `System.IO.DirectoryInfo`; database connectors use an ADO.NET connection. |
+| `Path` | File sources | Path relative to the source directory. Database and Dataverse sources omit it. |
+| `Key` | Yes | Stable field used to order and checkpoint source rows. Root source keys must be non-empty, unique, and strictly increasing. Dataverse uses case-insensitive ordinal order. |
+| `Id` | No | Source field copied to the row's `Id`, commonly the target record GUID. |
+| `ExpectedRecordCount` | No | Positive expected row count. It takes precedence over a connector's count provider and is checked when reading completes. |
+| `Options` | No | Connector-specific options. See the linked source guide. |
+| `Custom` | Custom source | Callback definition; see [custom sources](./connectors/sources/custom.md). |
+
+For row-linked child sources, rows are staged and ordered by their parent relationships; the source file itself need not be sorted by those parent keys. Parent source keys must be unique. See [recovery and replay](./concepts/recovery-and-replay.md) for stable-source requirements.
+
+## Target properties
+
+Every target has a `Target` hashtable. See the [target connector index](./connectors/targets/README.md) for connector-specific settings.
+
+| Property | Required | Description |
+|---|---:|---|
+| `Type` | Yes | `dataverse`, `jsonl`, `csv`, `parquet`, `sqlite`, `duckdb`, or `custom`. |
+| `ConnectionId` | Yes | Key in `-Connections`. File targets expect a `System.IO.DirectoryInfo`; database targets use an ADO.NET connection. |
+| `Path` | File targets | Output path relative to the target directory. |
+| `Table` | Dataverse and database targets | Dataverse logical table or database table name. |
+| `Operation` | No | Defaults to `Upsert` for Dataverse and `Write` for other targets. |
+| `BatchSize` | No | Positive override for `Invoke-Migration -BatchSize`; Dataverse also accepts `auto`. |
+| `MaxConcurrency` | Dataverse only | Positive per-target limit or `auto`; the default is `auto`. |
+| `Options` | No | Connector-specific settings, such as database schemas or Dataverse matching keys. |
+| `Custom` | Custom target | Callback definition; see [custom targets](./connectors/targets/custom.md). |
+
+## Callback nodes
+
+Callbacks expose the batch protocol for integrations that need a custom source reader or batch handler. A root callback defines `ReadBatches`; a dependent callback defines one or more `Inputs` and only `ExecuteBatch`.
+
+`ReadBatches` receives a `MigrationStepCheckpoint`, the resolved source connection, and a cursor. It returns at most one `MigrationWorkBatch` per call. Non-final batches must advance `CursorAfterJson`; the final batch sets `IsLast`. `ExecuteBatch` receives a leased `StoredBatch` and emits exactly one `MigrationBatchResult`.
+
+A callback can return `MigrationDependencyOutput` values with `RequiredBatchIds` to wait for additional parent batches. This creates an explicit batch prerequisite; it does not join records. See the [dependency guide](./concepts/dependencies.md#callback-multi-parent-prerequisites).
 
 ## Connection map and history
 
-Connection IDs resolve against the `-Connections` dictionary. Reusing an ID shares the runtime object. The caller owns connection lifetime and credential security. Source and target file paths resolve beneath their corresponding `DirectoryInfo` roots.
+Connection IDs resolve against the `-Connections` map. Reusing an ID shares the same runtime object. The caller owns connection creation, credentials, lifetime, and disposal. File paths are resolved below their `DirectoryInfo` connection roots.
 
-The engine stores a sanitized snapshot of the step graph and connection properties for run history and configuration previews. Live connection instances are recorded separately with sensitive values redacted. See [`Get-MigrationRun`](./cmdlets/get-migration-run.md) and the [dashboard guide](./cmdlets/migration-dashboard.md).
+The store records a sanitized snapshot of the graph and safe connection properties for run history and configuration previews. Redaction is best-effort; do not put credentials or secrets in step definitions. See [`Get-MigrationRun`](./cmdlets/get-migration-run.md), the [dashboard guide](./cmdlets/migration-dashboard.md), and [connections and callbacks](./concepts/connections-and-callbacks.md).

@@ -32,7 +32,10 @@ $dashboard = Start-MigrationDashboard -DatabasePath './state/migration.sqlite3' 
 
 The dashboard opens the database through its single-process owner. It may run in a separate PowerShell process from migration clients; when no owner is already running, the dashboard process becomes the implicit owner. To keep the owner independent of a dashboard or migration client, start [`Start-MigrationDatabaseServer`](./migration-database-server.md) in a dedicated process. Multiple distinct run IDs can share the database through that owner. Keep the owner alive until the dashboard and all migration clients have finished.
 
-The default URL is `http://127.0.0.1:5180`. `-Url` may select another HTTP loopback address/port; non-loopback URLs are rejected. Remote access, HTTPS termination, authentication, and multi-user authorization are not implemented. Run the dashboard only in a trusted local session, and protect the SQLite file using operating-system access controls.
+The default URL is `http://127.0.0.1:5180`. `-Url` may select another HTTP loopback address/port; non-loopback URLs are rejected. Remote access, HTTPS termination, authentication, and multi-user authorization are not implemented.
+
+> [!WARNING]
+> The dashboard has no authentication. Run it only in a trusted local session, and protect the SQLite file with operating-system access controls.
 
 ## Dashboard views
 

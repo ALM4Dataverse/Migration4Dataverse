@@ -1,4 +1,4 @@
-# Filter
+# Filter (internal pipeline)
 
 The `filter` node runs a PowerShell script for each input row. It requires exactly one input and has no node-specific options.
 

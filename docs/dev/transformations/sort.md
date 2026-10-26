@@ -1,4 +1,4 @@
-# Sort
+# Sort (internal pipeline)
 
 `sort` performs a stable sort using one or more typed keys. It must consume the input before returning ordered rows, and uses bounded in-memory runs plus temporary spill files rather than retaining the entire data set in memory.
 

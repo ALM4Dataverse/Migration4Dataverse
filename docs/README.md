@@ -1,30 +1,41 @@
 # Documentation
 
-This documentation describes the supported public cmdlets, step configuration, engine concepts, transformations, and connectors.
+Choose the section that matches what you are doing. The PowerShell guides describe the supported migration workflow; the developer guides describe repository internals.
 
-## Public API
+## PowerShell users
 
-- [Cmdlets and functions](./cmdlets/README.md) — reference for every exported PowerShell command, including [`New-MigrationDatabaseConnection`](./cmdlets/new-migration-database-connection.md), [`Get-MigrationRun`](./cmdlets/get-migration-run.md), [`Clear-MigrationTargetTuning`](./cmdlets/clear-migration-target-tuning.md), the [database owner](./cmdlets/migration-database-server.md), and the [migration dashboard](./cmdlets/migration-dashboard.md).
-- [Migration step configuration](./configuration.md) — source, transform, filter, append, target, and callback step shapes.
-- [Concepts](./concepts/README.md) — dependencies, batching, recovery, replay safety, and runtime connections.
+Start with the [repository README](../README.md) to build the module and run an example.
 
-## Transformations
+### Define a migration
 
-- [Transformation API](./transformations/README.md) — pipeline definition and common behavior.
-- [Append / Union All](./transformations/append.md)
-- [Merge](./transformations/merge.md)
-- [Sort](./transformations/sort.md)
-- [Transform](./transformations/transform.md)
-- [Filter](./transformations/filter.md)
+- [Step configuration](./configuration.md) — supported step types, common properties, connections, and callback shapes.
+- [Dependencies](./concepts/dependencies.md) — row flow, keyed source relationships, joins, and completion barriers.
+- [Recovery and replay](./concepts/recovery-and-replay.md) — run IDs, checkpoints, retries, and side-effect safety.
+- [Connections and callbacks](./concepts/connections-and-callbacks.md) — connection ownership and PowerShell callback rules.
 
-## Connectors
+### Choose connectors
 
-- [Source connectors](./connectors/sources/README.md) — [Dataverse](./connectors/sources/dataverse.md), [JSON Lines](./connectors/sources/jsonl.md), [CSV](./connectors/sources/csv.md), [Parquet](./connectors/sources/parquet.md), [SQLite](./connectors/sources/sqlite.md), [DuckDB](./connectors/sources/duckdb.md), and [custom PowerShell](./connectors/sources/custom.md).
-- [Target connectors](./connectors/targets/README.md) — [Dataverse](./connectors/targets/dataverse.md), [JSON Lines](./connectors/targets/jsonl.md), [CSV](./connectors/targets/csv.md), [Parquet](./connectors/targets/parquet.md), [SQLite](./connectors/targets/sqlite.md), [DuckDB](./connectors/targets/duckdb.md), and [custom PowerShell](./connectors/targets/custom.md).
+- [Source connectors](./connectors/sources/README.md) — CSV, JSON Lines, Parquet, SQLite, DuckDB, Dataverse, and custom readers.
+- [Target connectors](./connectors/targets/README.md) — file, database, Dataverse, and custom writers.
+- [Dataverse source](./connectors/sources/dataverse.md) and [Dataverse target](./connectors/targets/dataverse.md) — Migration4Dataverse-specific behavior and links to the upstream command references.
 
-## Developer documentation
+### Run and monitor
 
-- [Developer documentation index](./dev/README.md) — engine internals and contributor-oriented guides.
-- [Engine overview and development](./dev/engine-overview.md) — C# scheduler usage, transformations, build/test instructions, and current limitations.
-- [Architecture and internal flows](./dev/architecture.md) — scheduler lifecycle, SQLite persistence/recovery, and internal component boundaries.
-- [Feature plan](../PLAN.md) — current implementation status and remaining work.
+- [Cmdlets and functions](./cmdlets/README.md) — command index.
+- [Invoke-Migration](./cmdlets/invoke-migration.md) — run, resume, preview, and debug capture.
+- [Migration dashboard](./cmdlets/migration-dashboard.md) — local monitoring and row inspection.
+- [Batching and backpressure](./concepts/batching.md) — queue limits and concurrency behavior.
+- [PowerShell reference](./reference.md) — supported migration contract, organized by topic.
+
+> [!NOTE]
+> Dataverse query, write, authentication, and connection options belong to `Rnwood.Dataverse.Data.PowerShell`. The connector guides link to its cmdlet references and concepts instead of duplicating their full option lists.
+
+## Developers and contributors
+
+The C# engine is an internal implementation, not a supported public C# API. These guides are for people changing or testing this repository:
+
+- [Developer documentation](./dev/README.md) — entry point for implementation material.
+- [Engine overview](./dev/engine-overview.md) — internal scheduler, development, and test workflow.
+- [Architecture](./dev/architecture.md) — persistence, scheduling, recovery, and component boundaries.
+- [Internal data-flow transformations](./dev/transformations/README.md) — the separate engine transformation pipeline, not `Invoke-Migration` step types.
+- [Feature plan](../PLAN.md) — implementation status and remaining work.

@@ -1,10 +1,14 @@
 # Developer documentation
 
-This section explains the implementation boundaries and durable execution model for contributors.
+This section is for contributors working on the repository implementation.
 
-- [Engine overview and development](./engine-overview.md) — C# scheduler usage, transformations, build/test instructions, and current limitations.
-- [Architecture and internal flows](./architecture.md) — component boundaries, the per-database owner service, scheduler lifecycle, SQLite state/recovery, and Mermaid diagrams.
-- [Public reference](../reference.md) — index for cmdlets, configuration, concepts, connectors, and transformations.
+> [!IMPORTANT]
+> The C# engine and its scheduler and transformation types are internal implementation details. They are not a supported public C# API, and their contracts may change.
+
+- [Engine overview and development](./engine-overview.md) — internal scheduler behavior, build/test instructions, and project limits.
+- [Architecture and internal flows](./architecture.md) — component boundaries, SQLite ownership, scheduling, persistence, and recovery.
+- [Internal data-flow transformations](./transformations/README.md) — the separate engine pipeline and its operators.
+- [PowerShell reference](../reference.md) — supported cmdlets, step configuration, concepts, and connectors.
 - [Feature plan](../../PLAN.md) — implementation status and remaining work.
 
-When changing engine behavior, persistence, retry or recovery semantics, step definitions, connectors, connector options, or transformations, update the relevant architecture and public reference documentation in the same change. Repository-level maintenance guidance is in [AGENTS.md](../../AGENTS.md).
+When engine behavior, persistence, retries, recovery, step definitions, connectors, connector options, or transformations change, update the related developer guide and PowerShell reference. Repository maintenance guidance is in [AGENTS.md](../../AGENTS.md).

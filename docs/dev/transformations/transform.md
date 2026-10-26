@@ -53,4 +53,4 @@ DuckDB transforms can use the same connection-aware PowerShell `Script` contract
 
 A Dataverse Transform uses `Transform = @{ Type = 'dataverse'; ConnectionId = 'crm' }`. Its `Script` receives `($row, $connection)` and can invoke `Invoke-DataverseSql -Connection $connection -Sql ... -Parameters ...` for SQL4CDS queries or updates. SQL4CDS is executed by the module; the Transform script determines which values are emitted downstream.
 
-Connected transforms currently run per row; whole-dataset and per-batch transform scopes are deferred. The connector requirements and full option tables are in [migration step configuration](../configuration.md#transform-and-filter-semantics).
+Connected transforms currently run per row; whole-dataset and per-batch transform scopes are deferred. The connector requirements and supported migration-step semantics are in [migration step configuration](../../configuration.md#transform-and-filter-semantics).

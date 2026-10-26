@@ -1,31 +1,62 @@
-# Public reference
+# PowerShell reference
 
-The detailed documentation is organized by public surface:
+This page indexes the supported PowerShell migration contract. Use the linked pages for full command, connector, and callback details.
 
-- [Cmdlets and functions](./cmdlets/README.md)
-- [Run history and dashboard](./cmdlets/get-migration-run.md): `Get-MigrationRun`, configuration previews, and stored run metadata.
-- [`Clear-MigrationTargetTuning`](./cmdlets/clear-migration-target-tuning.md): remove persisted Dataverse tuning profiles by step ID or clear all profiles in a database.
-- [`New-MigrationDatabaseConnection`](./cmdlets/new-migration-database-connection.md): create SQLite or DuckDB ADO.NET connections without manually loading provider assemblies.
-- [`Start-MigrationDatabaseServer`](./cmdlets/migration-database-server.md): explicitly host the local SQLite owner for multiple PowerShell processes.
-- [Migration step configuration](./configuration.md)
-- [Concepts](./concepts/README.md)
-- [Transformations](./transformations/README.md)
+> [!NOTE]
+> The C# engine is an internal implementation detail. This reference does not define a supported public C# API.
+
+## Migration graph
+
+[`Invoke-Migration`](./cmdlets/invoke-migration.md) runs a directed acyclic graph of PowerShell step definitions. The supported step types are:
+
+| Step type | Purpose |
+|---|---|
+| `source` | Read rows from a built-in or custom connector. |
+| `transform` | Map each input row with a PowerShell script or supported database-backed transform. |
+| `filter` | Keep or discard each input row. |
+| `append` | Concatenate two or more row streams without deduplicating. |
+| `join` | Match a child stream to a keyed source or Dataverse target stream. |
+| `target` | Write mapped rows to a built-in or custom connector. |
+| `callback` | Read or process batches using the custom batch contract. |
+
+Start with [step configuration](./configuration.md). For keyed dependencies, joins, and completion-only dependencies, see [dependencies](./concepts/dependencies.md).
+
+## PowerShell commands
+
+- [Cmdlets and functions](./cmdlets/README.md) — exported command index.
+- [`Invoke-Migration`](./cmdlets/invoke-migration.md) — run options, module loading, previews, and resume behavior.
+- [`Get-MigrationRun`](./cmdlets/get-migration-run.md) — list or inspect saved runs.
+- [Migration dashboard](./cmdlets/migration-dashboard.md) — view run history, progress, and optional row lineage.
+- [`Start-MigrationDatabaseServer`](./cmdlets/migration-database-server.md) — keep a local database owner available to multiple PowerShell processes.
+- [`New-MigrationDatabaseConnection`](./cmdlets/new-migration-database-connection.md) — create SQLite or DuckDB ADO.NET connections.
+- [`Clear-MigrationTargetTuning`](./cmdlets/clear-migration-target-tuning.md) — clear saved Dataverse tuning profiles.
+
+The lower-level store functions are listed in the [cmdlet index](./cmdlets/README.md); ordinary migrations do not need to call them directly.
+
+## Connectors and options
+
 - [Source connectors](./connectors/sources/README.md)
 - [Target connectors](./connectors/targets/README.md)
-- [Architecture](./dev/architecture.md)
+- [Custom source callbacks](./connectors/sources/custom.md)
+- [Custom target callbacks](./connectors/targets/custom.md)
+- [Connections and callback execution](./concepts/connections-and-callbacks.md)
 
-This reference describes the implemented engine contract. `Invoke-Migration` accepts native PowerShell hashtables or other PowerShell objects for step definitions; examples use hashtables. It does not claim full KingswaySoft or SSIS compatibility.
+For Dataverse, these pages describe the Migration4Dataverse adapter only:
 
-Each migration database has one process owner, started implicitly by the first module caller or explicitly with `Start-MigrationDatabaseServer`. Separate callers route store operations through same-user local IPC; schedulers, workers, connections, and callbacks remain caller-side. Multiple run IDs can use the same database, while per-run leases prevent duplicate schedulers for a single run. `Invoke-Migration -WhatIf` executes source readers and transforms, captures planned target rows, and skips target writes and generic batch callbacks; arbitrary caller-authored source-reader/transform code can still have side effects.
+- [Dataverse source](./connectors/sources/dataverse.md)
+- [Dataverse target](./connectors/targets/dataverse.md)
 
-`Invoke-Migration -ScriptsToLoad` and `-SharedScripts` provide run-wide helper function definitions to every PowerShell-backed source, transform, and callback invocation. Scripts are evaluated in each invocation's runspace, and their contents participate in the generated resume hash. `-RequiredModules` imports module specifications with version constraints into the runspace pool and fails before scheduling when a requirement cannot be satisfied. `New-MigrationDatabaseConnection` creates the built-in SQLite and DuckDB connection types used in named connection maps.
+The complete upstream cmdlet and concept references are maintained by [`Rnwood.Dataverse.Data.PowerShell`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell):
 
-Source readers receive a `MigrationStepCheckpoint` with `LastCompletedSequence` and `CursorJson` for the last contiguous completed batch, and `ResumeSequence` and `ResumeCursorJson` for the latest durably enqueued batch. Readers should continue after the resume position; pending and in-flight batches are replayed from SQLite using their stored payloads.
+- [Get-DataverseRecord](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Get-DataverseRecord.md) and [querying](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/core-concepts/querying.md)
+- [Set-DataverseRecord](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Set-DataverseRecord.md), [Remove-DataverseRecord](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Remove-DataverseRecord.md), and [creating and updating](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/core-concepts/creating-updating.md)
+- [Invoke-DataverseSql](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Invoke-DataverseSql.md)
+- [`Get-DataverseConnection`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Get-DataverseConnection.md), [connections](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/core-concepts/connections.md), and [authentication](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/getting-started/authentication.md)
 
-`Inputs` declares row-flow dependencies. A source can name one or more keyed parent-source inputs using explicit `{ Child, Parent }` column pairs; a JSON null child key means that relationship is absent and the row is retained without waiting for that parent. Unmatched non-null keys fail the run. `RowsPerParent` can enforce a fixed child count independently for each parent relationship. Row-linked child records are staged in temporary SQLite storage and do not need to be pre-sorted. `DependsOn` is completion-only and accepts step IDs. A `join` node combines exactly two ordered inputs using explicit aliases and ordered single- or composite-key pairs; its parent may be a Source or a Dataverse Target. Target parent keys must match an ordered `Options.MatchOn` group; Source parent keys must be present and unique. Joins can be chained for additional lookups, including dotted paths into nested joined rows. They require an explicit `inner` or `left` type. Join rows are indexed in SQLite as batches complete; `JoinOrder` defaults to `ready`, emitting available matches even when an earlier child row is waiting for its parent, so outputs may be reordered. Set `JoinOrder = 'stable'` to preserve left-input order; this can delay later matches behind an earlier unresolved key. Null keys never match, and neither side must be sorted by join key. A Source using `DependsOn` can instead reread completed Dataverse parent rows before downstream work begins, trading extra reads for whole-step sequencing. Root sources must be ordered by `Key`; Dataverse sources compare keys case-insensitively in ordinal order to match platform collation. Simple Dataverse queries apply key ordering when `OrderBy` is omitted; SQL and custom readers must provide an explicit stable order. SQLite and DuckDB sources execute caller-supplied ordered queries through their ADO.NET connections. SQLite and DuckDB targets auto-create output tables by default or can validate explicit schemas; writes are transactional and replay-safe. Dataverse Targets support `Upsert`, `Create`, `Update`, `Delete`, and `CreateOrUpdateIfNeeded`; `NoLookup` is enabled by default for `Set-DataverseRecord` (set `Options.NoLookup = $false` to allow lookup queries), and `BypassBusinessLogicExecution` / `BypassBusinessLogicExecutionStepIds` control supported plugin/business-logic bypasses (module 3.3.0 or later). Legacy `LookupColumns` resolves scalar lookup keys without a migration read/Join. Per-target batch-size experiments are scored against whole-pipeline successful output throughput alongside a shared adaptive concurrency budget per connection. A Dataverse-connected Transform receives its live connection and can call `Invoke-DataverseSql` for SQL4CDS. Custom Target callbacks can execute operations such as custom APIs. The scheduler uses graph-impact weights and current ready backlog to favor work with more pipeline impact while preserving weighted fairness. Retry and throttle signals are observed when connection logging supports them; retries remain enabled normally, with `-DataverseNoRetryDiagnosticMode` available for diagnostics. Tuning profiles are versioned, persisted in the run database, and reused subject to connection identity and current limits; use `Clear-MigrationTargetTuning` to clear profiles. See [migration dependencies](./concepts/dependencies.md), [step configuration](./configuration.md), [SQLite connectors](./connectors/sources/sqlite.md), [DuckDB connectors](./connectors/sources/duckdb.md), and the [Dataverse target](./connectors/targets/dataverse.md).
+## Operational behavior
 
-Progress is measured per step from queued standard `Records` batches. SQLite and DuckDB derive counts by wrapping their source `Options.Query` (an explicit `Options.CountQuery` may override this); Simple and FetchXML Dataverse sources use `Get-DataverseRecord -RecordCount`; custom PowerShell sources may provide a `Custom.CountCallback`; and Parquet sources use file metadata. These provide totals without streaming records to count them. Other sources may set `ExpectedRecordCount` explicitly or leave the total unknown until rows flow. A positive explicit `ExpectedRecordCount` takes precedence over a provider and, like a resolved provider count, is checked against the source rows when enumeration completes. Transform and Filter steps may emit zero, one, or multiple rows, and inner Joins may filter inputs, so downstream totals are based on their actual materialized input batches. A target's percentage is available only after all of its inputs are finalized and its batches are countable. Custom payloads without a `Records` array remain uncounted. Run-level target totals sum target-write work across targets, not unique logical source rows.
+- [Batching and backpressure](./concepts/batching.md) explains queue bounds and worker concurrency.
+- [Recovery and replay](./concepts/recovery-and-replay.md) explains checkpoints, run compatibility, retries, and at-least-once external effects.
+- [Dashboard](./cmdlets/migration-dashboard.md) explains progress estimates, debug snapshots, lineage, and local access.
 
-CSV sources detect the input file's `LF`, `CRLF`, or `CR` record separator automatically; the CSV `NewLine` option controls output formatting.
-
-When debug capture is enabled, custom callback stages can map output rows to inputs in the current batch with `MigrationDebugStage.ParentRecordIndices` or to rows in distinct dependency batches with `MigrationDebugStage.ParentRecordReferences`. `StoredBatch.ParentBatchIds` exposes those direct parent batches to callbacks. See the [dashboard guide](./cmdlets/migration-dashboard.md) for lineage behavior and retention details.
+`Invoke-Migration -WhatIf` reads and transforms rows but skips target writes and callback batch handlers. Caller-authored readers and transforms can still have side effects. Debug capture and previews store row data in the migration database; protect that file and review the retention settings.

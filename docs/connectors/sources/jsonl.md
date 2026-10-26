@@ -10,7 +10,7 @@ The `jsonl` source reads UTF-8 JSON Lines incrementally: each non-empty line is 
 | `ConnectionId` | Yes | ID whose runtime value is a `System.IO.DirectoryInfo` directory. |
 | `Path` | Yes | File path relative to the connection directory. |
 | `Key` | Yes | Source property used as the row key for routing and resume ordering. |
-| `Id` | Yes | Source property containing the target record GUID. |
+| `Id` | No | Optional source property copied to the row's `Id`, commonly the target record GUID. |
 | `ExpectedRecordCount` | No | Positive expected number of records; `0` (default) disables the row-count check. |
 | `Options` | No | No JSONL-specific options are currently defined. |
 

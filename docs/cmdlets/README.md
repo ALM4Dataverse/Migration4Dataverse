@@ -1,18 +1,25 @@
-# Cmdlets and functions
+# PowerShell cmdlets and functions
 
-The PowerShell module exports five binary cmdlets and five module functions:
+Use `Invoke-Migration` to run a migration. The remaining commands inspect runs, start the dashboard or database owner, manage tuning, or expose lower-level store operations.
+
+## Run and manage migrations
 
 | Command | Kind | Reference |
 |---|---|---|
 | `Invoke-Migration` | Binary cmdlet | [Invoke-Migration](./invoke-migration.md) |
-| `New-MigrationDatabaseConnection` | Binary cmdlet | [New-MigrationDatabaseConnection](./new-migration-database-connection.md) |
 | `Get-MigrationRun` | Binary cmdlet | [Get-MigrationRun](./get-migration-run.md) |
 | `Clear-MigrationTargetTuning` | Binary cmdlet | [Clear-MigrationTargetTuning](./clear-migration-target-tuning.md) |
+| `New-MigrationDatabaseConnection` | Binary cmdlet | [New-MigrationDatabaseConnection](./new-migration-database-connection.md) |
 | `Start-MigrationDatabaseServer` | Binary cmdlet | [Start-MigrationDatabaseServer](./migration-database-server.md) |
-| `New-MigrationJobStore` | Function | [New-MigrationJobStore](./new-migration-job-store.md) |
-| `Complete-MigrationBatch` | Function | [Complete-MigrationBatch](./complete-migration-batch.md) |
-| `Set-MigrationRunStatus` | Function | [Set-MigrationRunStatus](./set-migration-run-status.md) |
 | `Start-MigrationDashboard` | Function | [Migration dashboard](./migration-dashboard.md) |
 | `Stop-MigrationDashboard` | Function | [Migration dashboard](./migration-dashboard.md) |
 
-`Invoke-Migration` is the generic orchestrator for typed connector steps or callback steps. `New-MigrationDatabaseConnection` creates generic SQLite or DuckDB connections without requiring caller scripts to load provider assemblies. `Get-MigrationRun` lists or inspects persisted execution history. `Clear-MigrationTargetTuning` removes cached Dataverse auto-tuning values. `Start-MigrationDatabaseServer` hosts the per-database SQLite owner for clients in other processes. The functions expose dashboard and lower-level store operations.
+## Lower-level store functions
+
+These functions are exported for integrations that work directly with the migration store. `Invoke-Migration` manages the store itself, so ordinary migrations do not need these commands.
+
+| Command | Reference |
+|---|---|
+| `New-MigrationJobStore` | [New-MigrationJobStore](./new-migration-job-store.md) |
+| `Complete-MigrationBatch` | [Complete-MigrationBatch](./complete-migration-batch.md) |
+| `Set-MigrationRunStatus` | [Set-MigrationRunStatus](./set-migration-run-status.md) |

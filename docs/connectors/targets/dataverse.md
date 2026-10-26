@@ -1,20 +1,21 @@
 # Dataverse target
 
-The `dataverse` target writes mapped records through `Rnwood.Dataverse.Data.PowerShell`. There is no built-in Dataverse source connector.
+The `dataverse` target writes mapped rows through `Rnwood.Dataverse.Data.PowerShell`. The upstream module performs the Dataverse operations; this guide covers the migration adapter's supported operations, extra options, and tuning behavior.
 
-## Configuration
+> [!NOTE]
+> For the full set of write parameters and their semantics, see upstream [`Set-DataverseRecord`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Set-DataverseRecord.md), [`Remove-DataverseRecord`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Remove-DataverseRecord.md), and the [creating and updating concept](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/core-concepts/creating-updating.md).
+
+## Configure a target
 
 | Property | Required | Description |
 |---|---:|---|
 | `Type` | Yes | `dataverse`. |
-| `ConnectionId` | Yes | Key in `-Connections` whose value is a connection supported by `Rnwood.Dataverse.Data.PowerShell`. |
+| `ConnectionId` | Yes | ID in `-Connections` for a connection supported by the upstream module. |
 | `Table` | Yes | Dataverse logical table name. |
 | `Operation` | No | `Upsert` (default), `Create`, `Update`, `Delete`, or `CreateOrUpdateIfNeeded`. |
-| `BatchSize` | No | Positive batch size or `auto` (default). Auto tuning is capped at the invocation batch size and the connector limit of 1,000. |
-| `MaxConcurrency` | No | Positive per-target cap or `auto` (default). Auto mode shares an adaptive concurrency budget across all Dataverse targets using the same connection and is capped by `Invoke-Migration -MaxDegreeOfParallelism`. |
-| `Options` | No | `MatchOn` selects matching key groups for update, create/update-if-needed, and delete operations; it also identifies target parent keys for Joins. Upsert uses the alternate-key values in the mapped record. `NoLookup` is enabled by default for `Set-DataverseRecord` writes; set it to `$false` to allow lookup queries. `BypassBusinessLogicExecution` and `BypassBusinessLogicExecutionStepIds` forward plugin/business-logic bypass choices. |
-
-## Example
+| `BatchSize` | No | Positive batch size or `auto` (default). Automatic tuning is capped by the invocation batch size and the connector limit of 1,000. |
+| `MaxConcurrency` | No | Positive per-target limit or `auto` (default). Targets using the same connection share an adaptive concurrency budget. |
+| `Options` | No | Matching keys, lookup behavior, or supported write options forwarded to the upstream module. |
 
 ```powershell
 Target = @{
@@ -30,7 +31,23 @@ Target = @{
 }
 ```
 
-The Dataverse examples require `Rnwood.Dataverse.Data.PowerShell` 3.3.0 or later. Upstream Transform steps produce target fields; the engine initializes each record's `Id` from the GUID-valued source field named by `Source.Id`, unless a Transform output explicitly supplies `Id`. `Set-DataverseRecord -NoLookup` is used by default, avoiding per-record lookup resolution where mappings use explicit references. Set `NoLookup = $false` in target `Options` to disable this default. A lookup can be assigned directly with a table name and alternate-key attributes:
+The adapter loads `Rnwood.Dataverse.Data.PowerShell` when a typed Dataverse target is used. The caller creates, authenticates, and owns the connection. The repository's Dataverse examples require module version 3.3.0 or later. See upstream [`Get-DataverseConnection`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Get-DataverseConnection.md), [connections](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/core-concepts/connections.md), and [authentication](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/getting-started/authentication.md).
+
+## Operations and matching
+
+| Operation | Adapter behavior |
+|---|---|
+| `Upsert` | Without `MatchOn`, uses `Set-DataverseRecord -Upsert`. With `MatchOn`, uses the module's keyed create/update path and skips unchanged updates. |
+| `Create` | Uses `Set-DataverseRecord -CreateOnly`. `MatchOn` is not supported. |
+| `Update` | Uses `Set-DataverseRecord -NoCreate`. |
+| `Delete` | Uses `Remove-DataverseRecord`. Rows must include `Id` or the target must define `Options.MatchOn`. |
+| `CreateOrUpdateIfNeeded` | Uses the module's create/update path and can skip unchanged updates. Supports `MatchOn` and `LookupColumns`. |
+
+`MatchOn` is an ordered list of one or more alternate-key groups. Each group names fields present in the mapped rows. Upsert uses the mapped alternate-key values; joins that use a Dataverse target as their parent must match one complete ordered group. See [dependencies](../../concepts/dependencies.md#joining-parent-records) for join configuration.
+
+## Lookup values
+
+For new mappings, emit an explicit Dataverse reference instead of a scalar lookup value:
 
 ```powershell
 parentcustomerid = @{
@@ -39,88 +56,19 @@ parentcustomerid = @{
 }
 ```
 
-This sends the alternate key to Dataverse without a migration-side lookup query. For older mappings, `LookupColumns` accepts a scalar foreign-key value and resolves it using the configured key field.
+A known record can also be referenced by `{ TableName, Id }`. The adapter enables `Set-DataverseRecord -NoLookup` by default to avoid lookup queries; set `Options.NoLookup = $false` when query-based lookup resolution is required. `Options.LookupColumns` remains available for legacy mappings that contain scalar foreign keys.
 
-`BypassBusinessLogicExecution` accepts `CustomSync` and/or `CustomAsync` to bypass those categories of custom business logic. `BypassBusinessLogicExecutionStepIds` accepts an array of plugin step GUIDs to bypass specific steps. Both options are forwarded only to `Set-DataverseRecord` operations; Delete uses `Remove-DataverseRecord` and rejects them. Bypassing business logic can change data validation and side effects, so use it only when that behavior is intended.
+## Business-logic bypass
 
-For example, a target may opt into a specific bypass policy:
+`Options.BypassBusinessLogicExecution` and `Options.BypassBusinessLogicExecutionStepIds` are forwarded to `Set-DataverseRecord` when supplied. No bypass is enabled by default. These options are not accepted for `Delete`.
 
-```powershell
-Options = @{
-    BypassBusinessLogicExecution = @('CustomAsync')
-    BypassBusinessLogicExecutionStepIds = @([guid]'11111111-2222-3333-4444-555555555555')
-}
-```
+> [!WARNING]
+> Bypassing plug-ins or other business logic can change validation and side effects in the target organization. Use it only when that change is intentional. See the upstream [`Set-DataverseRecord` reference](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Set-DataverseRecord.md) for the supported values.
 
-No bypass is enabled by default. These settings can be combined with `MatchOn` and `NoLookup`.
+## Automatic tuning and retries
 
-`Upsert` with `Options.MatchOn` uses the module's keyed create/update path; it queries existing values and skips unchanged updates. Without `MatchOn`, it uses `Set-DataverseRecord -Upsert`. `Create` uses `Set-DataverseRecord -CreateOnly`; `Update` uses `-NoCreate`; `Delete` uses `Remove-DataverseRecord`. Delete inputs must include `Id` or configure `Options.MatchOn`. Create does not accept `MatchOn`.
+With `BatchSize = 'auto'`, candidate batch sizes are tested serially across the pipeline and scored by successful Dataverse target throughput. With `MaxConcurrency = 'auto'`, targets on the same connection share one adaptive budget capped by `Invoke-Migration -MaxDegreeOfParallelism`. Observed retry or throttle signals can reduce that budget.
 
-`CreateOrUpdateIfNeeded` uses `Set-DataverseRecord`'s create/update path. With `MatchOn`, the module queries existing values and skips updates when the mapped values are unchanged. This is useful for tables where a direct upsert is slower. It supports `MatchOn` and `LookupColumns`.
+Tuning profiles are persisted in the migration database and reused when compatible with the current targets and limits. Use [`Clear-MigrationTargetTuning`](../../cmdlets/clear-migration-target-tuning.md) to clear a target profile or all profiles.
 
-For older scalar lookup mappings, `LookupColumns` can resolve foreign keys without a separate migration Source/Join that rereads the parent table:
-
-```powershell
-Target = @{
-    Type = 'dataverse'
-    ConnectionId = 'crm'
-    Table = 'contact'
-    Operation = 'Upsert'
-    Options = @{
-        MatchOn = ,@('new_salesforceid')
-        LookupColumns = @{
-            parentcustomerid = 'new_salesforceid'
-        }
-    }
-}
-```
-
-The Transform output should set `parentcustomerid` to the source parent's `new_salesforceid` value. The Dataverse module uses the configured lookup key to resolve those scalar values. Prefer inline `KeyAttributes` lookup references for new mappings; direct references to known Dataverse records can continue to use a `{ TableName, Id }` object.
-
-To make a written parent record available to a mapping Transform, add a Join before the Transform. The Join retains the child row under its `As` alias and exposes each matched parent under the relationship alias:
-
-```powershell
-@(
-    @{
-        # Joins contacts to the written account rows while retaining unmatched contacts.
-        Id = 'JoinContacts'
-        Type = 'join'
-        Inputs = @(
-            @{ Job = 'ContactsSource'; As = 'Contact' }
-            @{
-                Job = 'AccountsTarget'
-                As = 'Account'
-                Keys = @(
-                    @{ Child = 'account_id'; Parent = 'new_salesforceid' }
-                )
-            }
-        )
-        JoinType = 'left'
-    }
-    @{
-        # Maps each contact and assigns its matched Dataverse account reference.
-        Id = 'MapContacts'
-        Type = 'transform'
-        Inputs = @('JoinContacts')
-        Script = {
-            param($row)
-            @{
-                parentcustomerid = if ($null -ne $row.Account) {
-                    @{
-                        TableName = 'account'
-                        Id = [string]$row.Account.Id
-                    }
-                }
-            }
-        }
-    }
-)
-```
-
-Each Join has exactly two ordered inputs: the left/child row stream and the right/parent stream. Each input declares its step ID in `Job` and a nested-row alias in `As`; the parent input also declares `Keys`, pairing child fields with parent fields. `Keys` may contain multiple ordered pairs for a composite key. For a Target parent, the keys must match one ordered `Options.MatchOn` group; a Source parent must provide the key fields with unique values. Chain two-input joins to add further parent lookups; later keys can use dotted paths into the left input's nested row. `JoinType` is required: `inner` drops rows with no match; `left` keeps them and exposes the unmatched alias as `$null`. `JoinOrder` defaults to `ready`: matches stream as soon as their parent rows become available, even if an earlier child is waiting, so output rows may be reordered. Set `JoinOrder = 'stable'` to preserve left-input order; an earlier unresolved key can delay later rows. Null or blank keys never match. Inputs need not be pre-sorted, and temporary staging is cleaned after success but retained for recovery after failure. A following Transform accepts only `$row`, with the nested parent accessible as `$row.Account`; Target parents include mapped fields and the final GUID in `Id`, while Source parents include selected columns and their configured `Id`. Direct references to existing Dataverse records use a `{ TableName, Id }` object with a GUID. `MatchOn` selects alternate-key upserts and is not combined with `Set-DataverseRecord -Upsert`.
-
-Batch size and concurrency default to `auto`; setting either to a positive integer fixes that setting. Auto batch-size tuning remains per target, but the engine serializes candidate experiments across the pipeline and compares each candidate using total successful Dataverse target rows per second, not that target's isolated rate. Each candidate is measured over completed batches; batch-size candidates are capped by the invocation's `BatchSize` and the connector limit of 1,000. Auto concurrency instead uses one adaptive budget per Dataverse connection, shared by all auto-concurrency targets on that connection and capped by `-MaxDegreeOfParallelism` (maximum 32). It starts from `RecommendedDegreesOfParallelism` when the connection exposes it, or a conservative default, and increases only when the connection is saturated and whole-pipeline throughput improves. Retry and throttle signals are counted from connection logs; observed throttling reduces the shared budget. If retry telemetry is unavailable, the controller does not increase concurrency automatically.
-
-When an auto-tuned value is available, it is persisted in the migration SQLite database and reused by later runs. Batch sizes are keyed by target step `Id`; shared concurrency profiles are versioned and tied to the connection ID, and are reused only when the auto-concurrency targets on that connection have compatible profiles. Current invocation limits cap reused values. Use `Clear-MigrationTargetTuning -DatabasePath ... -StepId ...` to clear one profile, or `-All` to clear every profile in the database. Each `Set-DataverseRecord` invocation uses internal parallelism one. The normal retry policy remains enabled and retries are visible in dashboard telemetry when connection logs expose them. For diagnosis only, `Invoke-Migration -DataverseNoRetryDiagnosticMode` disables Dataverse connection retries, cmdlet retries, and scheduler retries for the run; this can cause transient failures to fail immediately. The connection's retry and log-collection settings are restored when the run ends. The caller owns connection creation, authentication, lifetime, and disposal.
-
-When downstream Joins require parent records, target outputs (including final IDs) are staged in the migration database until the Join completes. A completion-gated Dataverse Source can instead reread a completed Target from Dataverse and provide the parent rows, avoiding streamed Target outputs at the cost of additional reads. Protect the database file accordingly. Review alternate-key and target-side behavior for the Dataverse table being migrated. Custom APIs can be called from a custom Target callback using its supplied connection; SQL4CDS is also available from a Dataverse-connected Transform script through `Invoke-DataverseSql`.
+Retries are enabled by default. `Invoke-Migration -DataverseNoRetryDiagnosticMode` disables the Dataverse connection, cmdlet, and scheduler retry layers for a diagnostic run. It can cause transient errors to fail immediately; see [`Invoke-Migration`](../../cmdlets/invoke-migration.md).

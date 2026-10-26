@@ -1,10 +1,13 @@
-# Engine overview and development
+# Internal engine overview and development
 
-This guide describes the reusable C# engine and development workflow.
+This guide describes the repository's implementation and contributor workflow.
+
+> [!IMPORTANT]
+> The C# engine types shown here are internal implementation details, not a supported public API.
 
 ## Current implementation
 
-The engine includes an embedded PowerShell runspace executor, a SQLite-backed batch-DAG scheduler, and a generic binary `Invoke-Migration` cmdlet. A migration is a DAG of top-level steps: Source, Transform, Filter, Append, Target, and callback steps. Steps reference their input IDs using `Inputs`; connector definitions and scripts are part of their step configuration. The cmdlet supports JSONL, CSV, Parquet, SQLite, DuckDB, custom, and Dataverse source and target connectors. SQLite and DuckDB targets create missing tables by default or validate caller-supplied schemas; their batch writes are transactional and replay-safe.
+The implementation includes an embedded PowerShell runspace executor, a SQLite-backed batch-DAG scheduler, and a binary `Invoke-Migration` cmdlet. Its migration graph supports Source, Join, Transform, Filter, Append, Target, and callback steps. Steps reference inputs by ID; connector definitions and scripts are part of their configuration. Built-in connectors cover JSON Lines, CSV, Parquet, SQLite, DuckDB, Dataverse, and custom PowerShell callbacks. SQLite and DuckDB targets create missing tables by default or validate caller-supplied schemas; their batch writes are transactional and replay-safe.
 
 The SQLite store retains run/step/batch monitoring metadata, sanitized configuration properties, and start/completion connection snapshots for compatible runs. An engine-hosted, loopback-only React dashboard uses Fluent UI 9 theme tokens, native controls, and React Flow to visualize the dependency graph, preview supplied configuration without execution, and inspect progress, outcomes, batch timings, and failures. `Get-MigrationRun` lists or retrieves persisted run history. `Invoke-Migration -EnableDebugCapture` additionally records row snapshots; the dashboard lets users search each step's inputs and outputs and highlight selected rows' bidirectional lineage with configurable retention. See the [dashboard guide](../cmdlets/migration-dashboard.md) and run the synthetic demo in `examples/dashboard`.
 
@@ -53,9 +56,11 @@ For internal component boundaries, scheduler lifecycles, SQLite state transition
 
 ## Streaming data-flow transformations
 
-The engine also exposes a separate named data-flow DAG with streaming Append/Union All and sorted Merge nodes, stable external-memory Sort, and standalone Transform and Filter nodes. This data-flow API is distinct from the top-level migration step graph; only supported migration graph types may be used with `Invoke-Migration`. Contracts and limits are documented in the [transformation reference](../transformations/README.md) and [step configuration](../configuration.md).
+The implementation also contains a separate named data-flow DAG with streaming Append/Union All and sorted Merge nodes, stable external-memory Sort, and standalone Transform and Filter nodes. It is distinct from the `Invoke-Migration` graph and is not part of its supported step contract. See the [internal transformation reference](./transformations/README.md) and [step configuration](../configuration.md).
 
 ## Build and test
+
+Building the engine also builds the embedded dashboard frontend, so install Node.js and npm as well as the .NET 10 SDK.
 
 Build and run the test suite with:
 
@@ -67,6 +72,6 @@ The tests cover JSONL/CSV/Parquet/SQLite/DuckDB/custom connectors, per-row datab
 
 ## Project status
 
-The C# engine includes the batch-DAG scheduler, a binary `Invoke-Migration` cmdlet for typed and callback-based migration steps, built-in file, SQLite, DuckDB, Dataverse, and custom connectors, and a separate streaming transformation DAG. Dataverse auto tuning measures batch-size experiments against whole-pipeline throughput and shares adaptive concurrency per connection, using available retry/throttle telemetry; this is not a guarantee against service-protection limits. Normal retries remain enabled, with an opt-in no-retry diagnostic mode. It is not yet connected to a pool of separately authenticated Dataverse identities. The transformation API supports Append/Union All, sorted Merge, external Sort, and script-backed Transform and Filter nodes; the migration graph currently supports Source, Transform, Filter, Append, Target, and callback steps. Database-backed migration transforms are per-row only; per-batch and whole-dataset modes remain deferred. The project also lacks end-to-end recovery reconciliation and full KingswaySoft/SSIS feature parity.
+The implementation includes the batch-DAG scheduler, a binary `Invoke-Migration` cmdlet, built-in connectors, and the separate streaming transformation pipeline. Dataverse auto tuning measures batch-size experiments against whole-pipeline throughput and shares adaptive concurrency per connection, using available retry/throttle telemetry; it does not guarantee protection from service limits. Normal retries remain enabled, with an opt-in no-retry diagnostic mode. The runtime does not use a pool of separately authenticated Dataverse identities. Migration graph database transforms run per row; per-batch and whole-dataset scopes remain deferred. The project also lacks end-to-end recovery reconciliation and full KingswaySoft/SSIS feature parity.
 
 See the [feature plan](../../PLAN.md) for the feature inventory, decisions, validated behavior, and remaining work.

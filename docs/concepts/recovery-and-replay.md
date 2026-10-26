@@ -2,9 +2,9 @@
 
 The SQLite store persists run identity, batches, outcomes, checkpoints, leases, and dependency events. Reuse the same `RunId` to resume a run after cancellation or interruption.
 
-Only one active scheduler run may own a SQLite database at a time, including when separate processes attempt to start different run IDs. The database-wide lease expires after its owner stops renewing it; expired batch leases remain independently protected until they expire. Historical and completed runs can share the database. Use separate database files for parallel runs.
+Each database has one local owner process for Migration4Dataverse store access. Multiple distinct run IDs can execute concurrently through that owner; a per-run lease prevents two schedulers from owning the same run ID. If separate PowerShell processes share a database, start [`Start-MigrationDatabaseServer`](../cmdlets/migration-database-server.md) in a dedicated process first.
 
-SQLite writes from concurrent engine components are serialized per database within the process. WAL allows readers to continue alongside a writer; writes from other processes still use SQLite's normal locking and timeout behavior. Host the dashboard in the run-owning process when monitoring an active run.
+SQLite writes are serialized through the owner, while readers can continue alongside a writer using WAL. A run lease and its batch leases are independent: a scheduler must renew its run lease, and expired batch work can be reclaimed only after its prior batch lease is no longer valid.
 
 ## Resume compatibility
 
@@ -15,6 +15,9 @@ Root readers receive the last contiguous completed checkpoint (`LastCompletedSeq
 ## At-least-once external effects
 
 A worker can complete an external write and fail before its SQLite completion transaction commits. Expired leases and retries may therefore execute the same batch again. The scheduler provides durable recovery, not exactly-once external side effects.
+
+> [!WARNING]
+> Design external writes to be idempotent or provide a reconciliation strategy. SQLite cannot atomically commit a transaction with a remote Dataverse write or custom callback side effect.
 
 - Use upsert or another idempotent write operation where possible.
 - Custom targets must deduplicate or safely overwrite by stable batch identity.
