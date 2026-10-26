@@ -7,10 +7,10 @@ $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'
 $moduleManifest = Join-Path $repositoryRoot 'src/Migration4Dataverse.PowerShell/Migration4Dataverse.PowerShell.psd1'
 Import-Module -Name $moduleManifest -Force -ErrorAction Stop
 
-$source = [Microsoft.Data.Sqlite.SqliteConnection]::new(
-    "Data Source=$(Join-Path $dataDirectory 'source.sqlite')")
-$transform = [Microsoft.Data.Sqlite.SqliteConnection]::new(
-    "Data Source=$(Join-Path $dataDirectory 'transform.sqlite')")
+$source = New-MigrationDatabaseConnection -Provider SQLite -ConnectionString `
+    "Data Source=$(Join-Path $dataDirectory 'source.sqlite')"
+$transform = New-MigrationDatabaseConnection -Provider SQLite -ConnectionString `
+    "Data Source=$(Join-Path $dataDirectory 'transform.sqlite')"
 try {
     $source.Open()
     $command = $source.CreateCommand()

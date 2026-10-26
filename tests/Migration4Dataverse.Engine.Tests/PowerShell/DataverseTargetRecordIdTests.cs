@@ -100,7 +100,7 @@ public sealed class DataverseTargetParentRecordTests
         var createGraph = graphFactory.GetMethod("CreateGraph", BindingFlags.Public | BindingFlags.Static)!;
         var stepSet = (IDisposable)createGraph.Invoke(
             null,
-            [steps, connections, executor, 1, true, store, 32, false])!;
+            [steps, connections, executor, 1, true, store, 32, false, false])!;
 
         try
         {

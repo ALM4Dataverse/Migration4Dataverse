@@ -4,20 +4,8 @@
 **Public repository:** [rnwood/Migration4Dataverse](https://github.com/rnwood/Migration4Dataverse)
 
 Short term todos
-- [x] Dataverse target - Use the new alternate key support on lookup columns, adapting the examples where possible to remove fetching those records for lookup.
-- [x] Dataverse target - create, update, delete, custom API through the existing custom Target callback, and SQL4CDS (via invoke-dataversesql, including for transformations)
-- [x] Dataverse target - For tables that are super slow to upsert, allow create/update-if-needed mode based on what the PS module can do to query for the record first and skip where it already exists with same values. Use this for opportunity in the examples.
-- Upgrade the Dataverse PS module and use the -nolookups option to encourage mappings that don't need a query for each record
-- Expose the skip plugins/custom business logic steps options from set-dataverserecordcord
-- [x] Fix progress indication globally and across the non-source tasks, and fix ETA
-- [x] Allow rows to be opened using model-driven app URL
-- Preview/whatif mode
-
 - Prepare for distribution, publishing on PowerShell gallery and ensuring it check any modules our connectors depend on are present at >= required version
-- SQLite and duckdb examples are ugly because they have to load assemblies etc. Fold this into the framework.
 - Benchmark
-- Graph still flickers every 3 seconds on refresh
-- Allow re-usable powershell functions across transformations (and everywhere else PS is allowed), including making sure required modules are loaded.
 
 ## Goal
 

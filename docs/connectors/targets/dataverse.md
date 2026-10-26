@@ -12,7 +12,7 @@ The `dataverse` target writes mapped records through `Rnwood.Dataverse.Data.Powe
 | `Operation` | No | `Upsert` (default), `Create`, `Update`, `Delete`, or `CreateOrUpdateIfNeeded`. |
 | `BatchSize` | No | Positive batch size or `auto` (default). Auto tuning is capped at the invocation batch size and the connector limit of 1,000. |
 | `MaxConcurrency` | No | Positive per-target cap or `auto` (default). Auto mode shares an adaptive concurrency budget across all Dataverse targets using the same connection and is capped by `Invoke-Migration -MaxDegreeOfParallelism`. |
-| `Options` | No | `MatchOn` selects matching key groups for update, create/update-if-needed, and delete operations; it also identifies target parent keys for Joins. Upsert uses the alternate-key values in the mapped record. `LookupColumns` maps lookup columns to the key field used to resolve scalar lookup values. |
+| `Options` | No | `MatchOn` selects matching key groups for update, create/update-if-needed, and delete operations; it also identifies target parent keys for Joins. Upsert uses the alternate-key values in the mapped record. `NoLookup` is enabled by default for `Set-DataverseRecord` writes; set it to `$false` to allow lookup queries. `BypassBusinessLogicExecution` and `BypassBusinessLogicExecutionStepIds` forward plugin/business-logic bypass choices. |
 
 ## Example
 
@@ -30,13 +30,35 @@ Target = @{
 }
 ```
 
-Upstream Transform steps produce target fields; the engine initializes each record's `Id` from the GUID-valued source field named by `Source.Id`, unless a Transform output explicitly supplies `Id`. For scalar lookups configured with `LookupColumns`, provide the foreign-key value; the connector resolves it using the referenced table's configured key field.
+The Dataverse examples require `Rnwood.Dataverse.Data.PowerShell` 3.3.0 or later. Upstream Transform steps produce target fields; the engine initializes each record's `Id` from the GUID-valued source field named by `Source.Id`, unless a Transform output explicitly supplies `Id`. `Set-DataverseRecord -NoLookup` is used by default, avoiding per-record lookup resolution where mappings use explicit references. Set `NoLookup = $false` in target `Options` to disable this default. A lookup can be assigned directly with a table name and alternate-key attributes:
+
+```powershell
+parentcustomerid = @{
+    TableName = 'account'
+    KeyAttributes = @{ accountnumber = 'A-123' }
+}
+```
+
+This sends the alternate key to Dataverse without a migration-side lookup query. For older mappings, `LookupColumns` accepts a scalar foreign-key value and resolves it using the configured key field.
+
+`BypassBusinessLogicExecution` accepts `CustomSync` and/or `CustomAsync` to bypass those categories of custom business logic. `BypassBusinessLogicExecutionStepIds` accepts an array of plugin step GUIDs to bypass specific steps. Both options are forwarded only to `Set-DataverseRecord` operations; Delete uses `Remove-DataverseRecord` and rejects them. Bypassing business logic can change data validation and side effects, so use it only when that behavior is intended.
+
+For example, a target may opt into a specific bypass policy:
+
+```powershell
+Options = @{
+    BypassBusinessLogicExecution = @('CustomAsync')
+    BypassBusinessLogicExecutionStepIds = @([guid]'11111111-2222-3333-4444-555555555555')
+}
+```
+
+No bypass is enabled by default. These settings can be combined with `MatchOn` and `NoLookup`.
 
 `Upsert` with `Options.MatchOn` uses the module's keyed create/update path; it queries existing values and skips unchanged updates. Without `MatchOn`, it uses `Set-DataverseRecord -Upsert`. `Create` uses `Set-DataverseRecord -CreateOnly`; `Update` uses `-NoCreate`; `Delete` uses `Remove-DataverseRecord`. Delete inputs must include `Id` or configure `Options.MatchOn`. Create does not accept `MatchOn`.
 
 `CreateOrUpdateIfNeeded` uses `Set-DataverseRecord`'s create/update path. With `MatchOn`, the module queries existing values and skips updates when the mapped values are unchanged. This is useful for tables where a direct upsert is slower. It supports `MatchOn` and `LookupColumns`.
 
-Use `LookupColumns` to resolve scalar foreign keys without a separate migration Source/Join that rereads the parent table:
+For older scalar lookup mappings, `LookupColumns` can resolve foreign keys without a separate migration Source/Join that rereads the parent table:
 
 ```powershell
 Target = @{
@@ -53,7 +75,7 @@ Target = @{
 }
 ```
 
-The Transform output should set `parentcustomerid` to the source parent's `new_salesforceid` value. The Dataverse module uses the configured lookup key to resolve those scalar values. Direct references to known records can continue to use `{ TableName, Id }`.
+The Transform output should set `parentcustomerid` to the source parent's `new_salesforceid` value. The Dataverse module uses the configured lookup key to resolve those scalar values. Prefer inline `KeyAttributes` lookup references for new mappings; direct references to known Dataverse records can continue to use a `{ TableName, Id }` object.
 
 To make a written parent record available to a mapping Transform, add a Join before the Transform. The Join retains the child row under its `As` alias and exposes each matched parent under the relationship alias:
 

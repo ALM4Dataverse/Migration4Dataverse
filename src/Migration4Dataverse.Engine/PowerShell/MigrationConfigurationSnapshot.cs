@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Security;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using ModuleSpecification = Microsoft.PowerShell.Commands.ModuleSpecification;
 using Migration4Dataverse.Engine.Storage;
 
 namespace Migration4Dataverse.Engine.PowerShell;
@@ -27,7 +28,13 @@ public static class MigrationConfigurationSnapshot
     public static string CreateJson(
         PSObject[] steps,
         IDictionary connections,
-        MigrationSchedulerLimits? schedulerLimits = null)
+        MigrationSchedulerLimits? schedulerLimits = null,
+        bool isWhatIf = false,
+        IEnumerable<string>? modulesToImport = null,
+        IEnumerable<ModuleSpecification>? requiredModules = null,
+        IEnumerable<PSModuleInfo>? resolvedRequiredModules = null,
+        IEnumerable<(string Path, string Content)>? helperFiles = null,
+        IEnumerable<string>? sharedScripts = null)
     {
         ArgumentNullException.ThrowIfNull(steps);
         ArgumentNullException.ThrowIfNull(connections);
@@ -62,7 +69,14 @@ public static class MigrationConfigurationSnapshot
         var configuration = new JsonObject
         {
             ["steps"] = stepNodes,
-            ["connections"] = connectionNodes
+            ["connections"] = connectionNodes,
+            ["isWhatIf"] = isWhatIf,
+            ["powerShell"] = CreatePowerShellConfiguration(
+                modulesToImport,
+                requiredModules,
+                resolvedRequiredModules,
+                helperFiles,
+                sharedScripts)
         };
         if (schedulerLimits is not null)
         {
@@ -74,6 +88,80 @@ public static class MigrationConfigurationSnapshot
             };
         }
         return configuration.ToJsonString();
+    }
+
+    private static JsonObject CreatePowerShellConfiguration(
+        IEnumerable<string>? modulesToImport,
+        IEnumerable<ModuleSpecification>? requiredModules,
+        IEnumerable<PSModuleInfo>? resolvedRequiredModules,
+        IEnumerable<(string Path, string Content)>? helperFiles,
+        IEnumerable<string>? sharedScripts)
+    {
+        var modules = new JsonArray();
+        foreach (var module in (modulesToImport ?? Array.Empty<string>())
+                     .OrderBy(module => module, StringComparer.OrdinalIgnoreCase))
+        {
+            modules.Add(module);
+        }
+
+        var required = new JsonArray();
+        foreach (var module in (requiredModules ?? Array.Empty<ModuleSpecification>())
+                     .OrderBy(module => module.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            required.Add(new JsonObject
+            {
+                ["name"] = module.Name,
+                ["moduleVersion"] = module.Version?.ToString(),
+                ["maximumVersion"] = module.MaximumVersion?.ToString(),
+                ["requiredVersion"] = module.RequiredVersion?.ToString(),
+                ["guid"] = module.Guid?.ToString("D")
+            });
+        }
+
+        var resolved = new JsonArray();
+        foreach (var module in (resolvedRequiredModules ?? Array.Empty<PSModuleInfo>())
+                     .OrderBy(module => module.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            resolved.Add(new JsonObject
+            {
+                ["name"] = module.Name,
+                ["version"] = module.Version.ToString(),
+                ["guid"] = module.Guid.ToString("D")
+            });
+        }
+
+        var scripts = new JsonArray();
+        foreach (var helper in helperFiles ?? Array.Empty<(string Path, string Content)>())
+        {
+            scripts.Add(new JsonObject
+            {
+                ["path"] = helper.Path,
+                ["sha256"] = GetScriptHash(helper.Content)
+            });
+        }
+        foreach (var script in sharedScripts ?? Array.Empty<string>())
+        {
+            scripts.Add(new JsonObject
+            {
+                ["source"] = "inline",
+                ["sha256"] = GetScriptHash(script)
+            });
+        }
+
+        return new JsonObject
+        {
+            ["modulesToImport"] = modules,
+            ["requiredModules"] = required,
+            ["resolvedRequiredModules"] = resolved,
+            ["sharedScripts"] = scripts
+        };
+    }
+
+    private static string GetScriptHash(string script)
+    {
+        return Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(script)))
+            .ToLowerInvariant();
     }
 
     public static string CaptureConnectionInstances(IDictionary connections, string phase)

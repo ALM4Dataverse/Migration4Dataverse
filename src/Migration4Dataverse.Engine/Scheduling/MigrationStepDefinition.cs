@@ -141,6 +141,8 @@ public sealed record DependencySchedulerResult(
     DateTimeOffset StartedUtc,
     DateTimeOffset CompletedUtc)
 {
+    public bool IsWhatIf { get; init; }
+
     public long TargetRowsProcessed { get; init; }
 
     public long TargetRowsSucceeded { get; init; }

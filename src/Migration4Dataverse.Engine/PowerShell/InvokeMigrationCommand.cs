@@ -1,5 +1,6 @@
 using System.Management.Automation;
 using System.Collections;
+using Microsoft.PowerShell.Commands;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -58,11 +59,23 @@ public sealed class InvokeMigrationCommand : PSCmdlet
     public string[] ModulesToImport { get; set; } = Array.Empty<string>();
 
     [Parameter]
+    public ModuleSpecification[] RequiredModules { get; set; } = Array.Empty<ModuleSpecification>();
+
+    [Parameter]
+    public string[] ScriptsToLoad { get; set; } = Array.Empty<string>();
+
+    [Parameter]
+    public ScriptBlock[] SharedScripts { get; set; } = Array.Empty<ScriptBlock>();
+
+    [Parameter]
     [ValidateRange(1, 1000)]
     public int BatchSize { get; set; } = 100;
 
     [Parameter]
     public SwitchParameter EnableDebugCapture { get; set; }
+
+    [Parameter]
+    public SwitchParameter WhatIf { get; set; }
 
     [Parameter]
     [ValidateRange(1, 3650)]
@@ -75,24 +88,31 @@ public sealed class InvokeMigrationCommand : PSCmdlet
             throw new ArgumentException(
                 "Every migration step must declare a node Type and Id. Use Source, Transform, Filter, Append, Target, or callback nodes.");
         }
-        var effectiveRunId = string.IsNullOrWhiteSpace(RunId) ? Guid.NewGuid().ToString("N") : RunId;
-        var effectiveStepHash = string.IsNullOrWhiteSpace(StepHash)
-            ? ComputeStepHash(Steps, ModulesToImport)
-            : StepHash;
-        var databaseDirectory = Path.GetDirectoryName(Path.GetFullPath(DatabasePath));
-        if (string.IsNullOrWhiteSpace(databaseDirectory))
+        var scriptsToLoad = ScriptsToLoad
+            ?? throw new ArgumentNullException(nameof(ScriptsToLoad));
+        var sharedScriptBlocks = SharedScripts
+            ?? throw new ArgumentNullException(nameof(SharedScripts));
+        var modulesToImport = ModulesToImport
+            ?? throw new ArgumentNullException(nameof(ModulesToImport));
+        var helperFiles = scriptsToLoad.Select(path =>
         {
-            throw new ArgumentException("The database path must have a parent directory.", nameof(DatabasePath));
-        }
-
-        Directory.CreateDirectory(databaseDirectory);
+            ArgumentException.ThrowIfNullOrWhiteSpace(path);
+            var fullPath = Path.GetFullPath(path);
+            return (Path: fullPath, Content: File.ReadAllText(fullPath));
+        }).ToArray();
+        var sharedScripts = sharedScriptBlocks
+            .Select(script => script?.ToString()
+                ?? throw new ArgumentException("SharedScripts cannot contain null entries.", nameof(SharedScripts)))
+            .ToArray();
+        var requiredModules = RequiredModules
+            ?? throw new ArgumentNullException(nameof(RequiredModules));
         var schedulerOptions = new DependencySchedulerOptions
         {
             MaxDegreeOfParallelism = MaxDegreeOfParallelism,
             MaxQueuedBatches = MaxQueuedBatches,
             MaxQueuedBatchesPerStep = MaxQueuedBatchesPerStep,
             MaxAttempts = DataverseNoRetryDiagnosticMode.IsPresent ? 1 : MaxAttempts,
-            CaptureDebugData = EnableDebugCapture.IsPresent,
+            CaptureDebugData = EnableDebugCapture.IsPresent || WhatIf.IsPresent,
             DebugCaptureRetentionDays = DebugCaptureRetentionDays
         };
         if (DataverseNoRetryDiagnosticMode.IsPresent)
@@ -101,30 +121,64 @@ public sealed class InvokeMigrationCommand : PSCmdlet
                 "Dataverse no-retry diagnostic mode is enabled. Dataverse and scheduler retries are disabled, " +
                 "so transient failures can fail the migration.");
         }
+        if (WhatIf.IsPresent)
+        {
+            WriteWarning(
+                "WhatIf preview executes sources and transforms, captures planned target rows, and skips target writes " +
+                "and batch callbacks. Caller-authored source readers and transform scripts may still have side effects.");
+        }
 
-        var store = MigrationStoreFactory.Open(DatabasePath);
-        var scheduler = new DependencyScheduler(store);
-        var modules = ModulesToImport
+        var modules = modulesToImport
             .Concat(PowerShellMigrationStepFactory.GetRequiredModulesForGraph(Steps))
             .Append(typeof(InvokeMigrationCommand).Assembly.Location)
             .Distinct(StringComparer.OrdinalIgnoreCase);
-        using var executor = new PowerShellScriptExecutor(MaxDegreeOfParallelism, modules);
+        using var executor = new PowerShellScriptExecutor(
+            MaxDegreeOfParallelism,
+            modules,
+            helperFiles.Select(file => file.Content).Concat(sharedScripts),
+            requiredModules);
+        var effectiveRunId = string.IsNullOrWhiteSpace(RunId) ? Guid.NewGuid().ToString("N") : RunId;
+        var stepHash = string.IsNullOrWhiteSpace(StepHash)
+            ? ComputeStepHash(
+                Steps,
+                modulesToImport,
+                requiredModules,
+                executor.ResolvedRequiredModules,
+                helperFiles,
+                sharedScripts)
+            : StepHash;
+        var effectiveStepHash = WhatIf.IsPresent ? $"{stepHash}:whatif-preview-v1" : stepHash;
+        var databaseDirectory = Path.GetDirectoryName(Path.GetFullPath(DatabasePath));
+        if (string.IsNullOrWhiteSpace(databaseDirectory))
+        {
+            throw new ArgumentException("The database path must have a parent directory.", nameof(DatabasePath));
+        }
+        Directory.CreateDirectory(databaseDirectory);
+        var store = MigrationStoreFactory.Open(DatabasePath);
+        var scheduler = new DependencyScheduler(store);
         using var stepSet = PowerShellMigrationStepFactory.CreateGraph(
             Steps,
             Connections,
             executor,
             BatchSize,
-            EnableDebugCapture.IsPresent,
+            EnableDebugCapture.IsPresent || WhatIf.IsPresent,
             store,
             MaxDegreeOfParallelism,
-            DataverseNoRetryDiagnosticMode.IsPresent);
+            DataverseNoRetryDiagnosticMode.IsPresent,
+            WhatIf.IsPresent);
         var configurationJson = MigrationConfigurationSnapshot.CreateJson(
             Steps,
             Connections,
             new MigrationSchedulerLimits(
                 MaxDegreeOfParallelism,
                 MaxQueuedBatches,
-                MaxQueuedBatchesPerStep));
+                MaxQueuedBatchesPerStep),
+            WhatIf.IsPresent,
+            modulesToImport,
+            requiredModules,
+            executor.ResolvedRequiredModules,
+            helperFiles,
+            sharedScripts);
         var connectionInstancesJson = MigrationConfigurationSnapshot.AppendConnectionInstanceSnapshot(
             null,
             MigrationConfigurationSnapshot.CaptureConnectionInstances(Connections, "Started"));
@@ -167,7 +221,7 @@ public sealed class InvokeMigrationCommand : PSCmdlet
                 PercentComplete = 100
             });
             UpdateConnectionInstanceSnapshot(store, effectiveRunId, Connections, "Completed");
-            WriteObject(result);
+            WriteObject(result with { IsWhatIf = WhatIf.IsPresent });
         }
         catch (OperationCanceledException) when (_cancellation.IsCancellationRequested)
         {
@@ -273,11 +327,45 @@ public sealed class InvokeMigrationCommand : PSCmdlet
         });
     }
 
-    private static string ComputeStepHash(IEnumerable<PSObject> steps, IEnumerable<string> modulesToImport)
+    private static string ComputeStepHash(
+        IEnumerable<PSObject> steps,
+        IEnumerable<string> modulesToImport,
+        IEnumerable<ModuleSpecification> requiredModules,
+        IEnumerable<PSModuleInfo> resolvedRequiredModules,
+        IEnumerable<(string Path, string Content)> helperFiles,
+        IEnumerable<string> sharedScripts)
     {
         var stepArray = steps.ToArray();
         var normalizedSteps = stepArray.Select(NormalizeForHash).ToArray();
         var normalizedModules = modulesToImport.OrderBy(module => module, StringComparer.OrdinalIgnoreCase);
+        var normalizedRequiredModules = requiredModules
+            .OrderBy(module => module.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(module => new
+            {
+                module.Name,
+                Version = module.Version?.ToString(),
+                MaximumVersion = module.MaximumVersion?.ToString(),
+                RequiredVersion = module.RequiredVersion?.ToString(),
+                Guid = module.Guid?.ToString("D")
+            })
+            .ToArray();
+        var normalizedResolvedModules = resolvedRequiredModules
+            .OrderBy(module => module.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(module => new
+            {
+                module.Name,
+                Version = module.Version.ToString(),
+                Guid = module.Guid.ToString("D")
+            })
+            .ToArray();
+        var normalizedHelperFiles = helperFiles.Select(file => new
+        {
+            file.Path,
+            Hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(file.Content))).ToLowerInvariant()
+        }).ToArray();
+        var normalizedSharedScripts = sharedScripts
+            .Select(script => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(script))).ToLowerInvariant())
+            .ToArray();
         var hasKeyedInput = stepArray.Any(step =>
         {
             var type = GetStepProperty(step, "Type")?.ToString();
@@ -290,12 +378,20 @@ public sealed class InvokeMigrationCommand : PSCmdlet
             {
                 KeyedInputContract = "streaming-join-order-v2",
                 Steps = normalizedSteps,
-                ModulesToImport = normalizedModules
+                ModulesToImport = normalizedModules,
+                RequiredModules = normalizedRequiredModules,
+                ResolvedRequiredModules = normalizedResolvedModules,
+                HelperFiles = normalizedHelperFiles,
+                SharedScripts = normalizedSharedScripts
             }
             : new
             {
                 Steps = normalizedSteps,
-                ModulesToImport = normalizedModules
+                ModulesToImport = normalizedModules,
+                RequiredModules = normalizedRequiredModules,
+                ResolvedRequiredModules = normalizedResolvedModules,
+                HelperFiles = normalizedHelperFiles,
+                SharedScripts = normalizedSharedScripts
             };
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(shape)));
         return Convert.ToHexString(bytes).ToLowerInvariant();

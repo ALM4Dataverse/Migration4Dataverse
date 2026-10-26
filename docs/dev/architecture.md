@@ -4,11 +4,11 @@ This guide describes the current implementation, not a promise of complete Kings
 
 ## System boundaries
 
-There are four binary PowerShell cmdlets, a read-only local monitoring UI/API, a separate transformation API, and a local SQLite owner service:
+There are five binary PowerShell cmdlets, a read-only local monitoring UI/API, a separate transformation API, and a local SQLite owner service:
 
 1. **The binary PowerShell cmdlet** [`Invoke-Migration`](../../src/Migration4Dataverse.Engine/PowerShell/InvokeMigrationCommand.cs) accepts a top-level `Steps` DAG. [`PowerShellMigrationStepFactory`](../../src/Migration4Dataverse.Engine/PowerShell/PowerShellMigrationStepFactory.Graph.cs) converts Source, Join, Transform, Filter, Append, Target, and callback nodes into [`MigrationStepDefinition`](../../src/Migration4Dataverse.Engine/Scheduling/MigrationStepDefinition.cs) objects for the shared [`DependencyScheduler`](../../src/Migration4Dataverse.Engine/Scheduling/DependencyScheduler.cs). Keyed source and join inputs declare their row-flow dependencies; `DependsOn` is reserved for additional whole-step completion barriers. A two-input Join stages and indexes inputs on disk, emits matches incrementally, then sends one nested row to a one-input Transform. Callback mode supports explicit multi-parent batch readiness through `MigrationDependencyOutput.RequiredBatchIds`.
 2. **The data-flow API** in `Migration4Dataverse.Engine.Transformations` remains a separate named transformation DAG. PowerShell callers define it with hashtables and inline Transform and Filter script blocks; the engine internally binds those scripts to their node IDs. Its stream-wide Sort and Merge operators are not yet wired into `Invoke-Migration`.
-3. **The dashboard** [`MigrationDashboardServer`](../../src/Migration4Dataverse.Engine/Dashboard/MigrationDashboardServer.cs) hosts the built React/React Flow SPA and a read-only API over the same SQLite file. It binds only to a loopback URL. Basic run/step/batch metadata is always retained; row payload snapshots are separately opt-in.
+3. **The dashboard** [`MigrationDashboardServer`](../../src/Migration4Dataverse.Engine/Dashboard/MigrationDashboardServer.cs) hosts the built React/React Flow SPA and a read-only API over the same SQLite file. It binds only to a loopback URL. Basic run/step/batch metadata is always retained; row payload snapshots are opt-in except for `Invoke-Migration -WhatIf`, which captures planned target inputs.
 4. **The database owner** is hosted by the first caller that opens a database, or explicitly with `Start-MigrationDatabaseServer`. It is the only Migration4Dataverse process that opens that SQLite file; other processes use same-user named-pipe IPC. Scheduler execution, workers, live connections, and callbacks remain in each caller process. A database can serve multiple active run IDs, with per-run leases preventing duplicate schedulers for the same run.
 5. **Run history** is queryable through [`Get-MigrationRun`](../../src/Migration4Dataverse.Engine/PowerShell/GetMigrationRunCommand.cs). The dashboard can also preview caller-supplied step and connection objects without starting a migration or opening a database.
 
@@ -16,6 +16,7 @@ There are four binary PowerShell cmdlets, a read-only local monitoring UI/API, a
 flowchart LR
     config["Top-level Source / operation / Target steps"]
     connections["Caller-owned named connection objects"]
+    scriptConfig["Run-wide helper scripts and required modules"]
     invoke["Invoke-Migration"]
     sourceFeeder["Source step feeder"]
     sourceCount["Optional source count preflight"]
@@ -27,6 +28,8 @@ flowchart LR
     dataverseSource["Dataverse query reader"]
     customSource["Paged custom source callback"]
     runspaces["Pooled PowerShell handlers and callbacks"]
+    previewGate{"WhatIf preview?"}
+    previewRows["Capture planned target rows"]
     targetType{"Target.Type"}
     throughput["Run-wide successful target throughput"]
     targetTuner["Pipeline batch tuner"]
@@ -60,6 +63,7 @@ flowchart LR
 
     config --> invoke
     connections --> invoke
+    scriptConfig --> invoke
     invoke --> scheduler
     scheduler --> sourceCount
     sourceCount -->|wrapped Query / optional CountQuery| databaseReaders
@@ -90,7 +94,9 @@ flowchart LR
     dataverseSource --> sourceFeeder
     customSource --> runspaces
     customSource --> sourceFeeder
-    runspaces --> targetType
+    runspaces --> previewGate
+    previewGate -->|execute| targetType
+    previewGate -->|preview: skip target and callback side effects| previewRows --> storeClient
     runspaces -->|target batch outcomes| throughput
     runspaces -->|batch-size experiments| targetTuner
     targetTuner -->|one experiment at a time; pipeline throughput| throughput
@@ -115,7 +121,7 @@ flowchart LR
 
 ### Typed connectors and named connections
 
-Each Source or Target step declares a connector `Type` and `ConnectionId`. The caller supplies the corresponding runtime objects in a map keyed by ID; secrets are not stored in step data. Sources support JSONL, CSV, Parquet, SQLite and DuckDB SQL queries, Dataverse queries, and paged PowerShell callbacks. Database query results stream from ADO.NET readers. Dataverse source queries use `Get-DataverseRecord` Simple/FetchXML modes or read-only Sql4Cds queries through `Invoke-DataverseSql`; results stream through the runspace pool with bounded buffering. Targets support Dataverse, JSONL, CSV, Parquet, SQLite, DuckDB, and PowerShell callbacks. Types and connection IDs may vary by step. There is not yet a general connector registry or plug-in API.
+Each Source or Target step declares a connector `Type` and `ConnectionId`. The caller supplies the corresponding runtime objects in a map keyed by ID; secrets are not stored in step data. `New-MigrationDatabaseConnection` creates built-in SQLite or DuckDB ADO.NET connection objects without caller-side assembly loading. Sources support JSONL, CSV, Parquet, SQLite and DuckDB SQL queries, Dataverse queries, and paged PowerShell callbacks. Database query results stream from ADO.NET readers. Dataverse source queries use `Get-DataverseRecord` Simple/FetchXML modes or read-only Sql4Cds queries through `Invoke-DataverseSql`; results stream through the runspace pool with bounded buffering. Targets support Dataverse, JSONL, CSV, Parquet, SQLite, DuckDB, and PowerShell callbacks. Types and connection IDs may vary by step. There is not yet a general connector registry or plug-in API.
 
 For a Dataverse source or target, the connection map contains the module connection. Steps sharing a Dataverse target connection are serialized by a semaphore. Built-in file connectors receive a directory connection. Their source and target paths are resolved relative to that directory. JSONL, CSV, and Parquet targets write each batch to a separate file under the target step path and run ID using a temporary file and atomic move; an identical replay is accepted and conflicting content is reported. File targets require no Dataverse connection or schema setup. Custom callbacks receive the caller's connection object; custom targets must implement their own replay-safe write behavior.
 
@@ -123,7 +129,7 @@ SQLite and DuckDB connectors use their ADO.NET connection objects from `-Connect
 
 Dataverse queries rerun from the beginning when resuming; the source reader replays records through the last completed source cursor. Simple queries automatically order by `Source.Key` unless an `OrderBy` is supplied with ascending `Key` first. FetchXML, SQL, and custom readers should provide a stable ascending `Key` order. Root source keys must be unique and strictly increasing using case-insensitive ordinal comparison for Dataverse sources, matching platform collation; other root sources use ordinal comparison. Row-linked child sources are staged internally and need not be grouped by parent. Child keys must be unique within each non-null parent relationship.
 
-[`PowerShellScriptExecutor`](../../src/Migration4Dataverse.Engine/PowerShell/PowerShellScriptExecutor.cs) imports requested modules into a runspace pool, executes scripts asynchronously with cancellation, and raises `PowerShellScriptException` when PowerShell reports errors. Its bounded streaming output path allows Dataverse source results to be batched without buffering the full query. Migration step handlers execute Transform/Filter scripts and dispatch Target batches to the selected connector; custom connector modules are imported into the pool so callbacks can use their dependencies from runspaces.
+[`PowerShellScriptExecutor`](../../src/Migration4Dataverse.Engine/PowerShell/PowerShellScriptExecutor.cs) imports requested modules into a runspace pool, makes configured helper scripts available to each invocation, executes scripts asynchronously with cancellation, and raises `PowerShellScriptException` when PowerShell reports errors. `-RequiredModules` resolves installed PowerShell module specifications and enforces requested version constraints; their resolved versions and helper script contents participate in the default resume hash. Its bounded streaming output path allows Dataverse source results to be batched without buffering the full query. Migration step handlers execute Transform/Filter scripts and dispatch Target batches to the selected connector; custom connector modules are imported into the pool so callbacks can use their dependencies from runspaces.
 
 When a Join references Dataverse Target steps, those Targets appear as the right-hand row-flow input. Producers persist each required input row and configured join-key projection to run-scoped SQLite staging as their batches complete; Target rows include the final GUID returned by `Set-DataverseRecord -PassThru`. The indexed reader processes left rows in their stable sequence and probes the durable parent-key index as parent rows become available. Matches are emitted before either side completes; non-null unmatched keys are resolved only after the right-hand step completes, while null or blank keys never match. `inner` filters unmatched rows; `left` retains them with the parent alias set to `$null`. A Join may also use a Source as its parent input. For whole-job sequencing, that Source can declare `DependsOn` on the terminal Target and reread its completed rows from Dataverse; the Join then incurs those additional reads instead of consuming Target output rows. Chained two-input joins support additional lookups and dotted child-key paths into a nested left row. Input ordering is not required; SQLite staging is removed after success and retained after failure for run recovery.
 
@@ -528,7 +534,7 @@ Default scheduler settings are defined in `DependencySchedulerOptions`: four wor
 
 ## Step graph and callback execution
 
-[`PowerShellMigrationStepFactory`](../../src/Migration4Dataverse.Engine/PowerShell/PowerShellMigrationStepFactory.Graph.cs) parses node IDs, types, row-flow inputs, source completion/row-linked dependencies, connector definitions, and inline scripts, validates the DAG, and creates source readers and handlers. The generated step hash covers step definitions and module references, and versions the row-linked source contract to prevent unsafe resume of runs without a source-key index. Root and row-linked Source nodes read connector streams; a Transform, Filter, or Append node consumes batches routed by its declared input IDs.
+[`PowerShellMigrationStepFactory`](../../src/Migration4Dataverse.Engine/PowerShell/PowerShellMigrationStepFactory.Graph.cs) parses node IDs, types, row-flow inputs, source completion/row-linked dependencies, connector definitions, and inline scripts, validates the DAG, and creates source readers and handlers. The generated step hash covers step definitions and module references, and versions the row-linked source contract to prevent unsafe resume of runs without a source-key index. WhatIf previews add a distinct hash suffix, execute sources and transforms while capturing their rows, and skip typed target writes and callback handlers. Their PowerShell result sets `DependencySchedulerResult.IsWhatIf`; target rows are processed for preview but are not counted as successful writes. Root and row-linked Source nodes read connector streams; a Transform, Filter, or Append node consumes batches routed by its declared input IDs.
 
 [`DependencyScheduler`](../../src/Migration4Dataverse.Engine/Scheduling/DependencyScheduler.cs) resolves configured source count providers before persisting expected totals, then durably queues root batches and tracks completion of every step. Typed handlers dispatch Target steps to Dataverse, atomic JSONL/CSV/Parquet batch writers, or custom connector callbacks. Successful step batches release bounded work for each declared consumer; SQLite commits dependency events transactionally with producer completion. Source completion barriers wait for the complete referenced step, while row-linked source edges stream nested rows from parent source batches. Callback nodes can add explicit `RequiredBatchIds` for multi-parent batch readiness. That readiness mechanism does not join record payloads, and typed stream-wide Merge and Sort nodes are not yet integrated into this execution path.
 

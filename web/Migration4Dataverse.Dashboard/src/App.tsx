@@ -220,6 +220,7 @@ interface MigrationConfiguration {
   jobs: ConfigurationJob[];
   connections: ConfigurationConnection[];
   schedulerLimits?: SchedulerLimits;
+  isWhatIf?: boolean;
 }
 
 interface ConnectionInstance {
@@ -290,6 +291,7 @@ interface ApiConfiguration {
   steps: ApiStep[];
   connections: ConfigurationConnection[];
   schedulerLimits?: SchedulerLimits;
+  isWhatIf?: boolean;
 }
 
 interface ApiDashboardStep extends Omit<DashboardJob, "name" | "dependsOn" | "hasSource"> {
@@ -402,6 +404,7 @@ function normalizeConfiguration(configuration: ApiConfiguration): MigrationConfi
     }),
     connections: configuration.connections,
     schedulerLimits: configuration.schedulerLimits,
+    isWhatIf: configuration.isWhatIf,
   };
 }
 
@@ -1975,17 +1978,22 @@ export default function App() {
           const width = lineageActive ? 360 : 320;
           const activityHint = activityHintFor(job, jobs, configurationOnly);
           const specialistInfo = specialistInfoFor(job, jobConfiguration);
+          const targetType = getStringProperty(
+            asRecord(getPropertyValue(jobConfiguration?.properties, "Target")),
+            "Type",
+          );
+          const stableSpecialistInfoCount = targetType?.toLocaleLowerCase() === "dataverse"
+            ? 9
+            : specialistInfo.length;
+          const connectionHeight = (sourceConnection || targetConnection)
+            ? 26 + (sourceConnection && targetConnection ? 13 : 0)
+            : 0;
           const height = lineageActive
             ? 300
-            : 168 +
-              ((sourceConnection || targetConnection)
-                ? 26 + (sourceConnection && targetConnection ? 13 : 0)
-                : 0) +
-              (stepProgress(job, jobs) ? 8 : 0) +
-              (activityHint ? 28 : 0) +
-              ((job.rowsPerSecondSamples?.length ?? 0) > 0 ? 42 : 0) +
-              (specialistInfo.length > 0 ? 8 + specialistInfo.length * 18 : 0) +
-              (job.failedRows > 0 || job.batchesWithErrors > 0 ? 29 : 0);
+            : configurationOnly
+              ? 168 + connectionHeight
+              : 275 + connectionHeight +
+                (stableSpecialistInfoCount > 0 ? 8 + stableSpecialistInfoCount * 18 : 0);
           const position = {
             x: level * (lineageActive ? 410 : 350),
             y: top,
@@ -2130,7 +2138,10 @@ export default function App() {
         setGraphLayoutError(
           `Unable to arrange the workflow graph: ${reason instanceof Error ? reason.message : String(reason)}`,
         );
-        setGraphLayout({ key: graphLayoutKey, positions: new Map() });
+        setGraphLayout((current) => ({
+          key: graphLayoutKey,
+          positions: current?.positions ?? new Map(),
+        }));
       }
     };
     void layoutGraph();
@@ -2139,9 +2150,7 @@ export default function App() {
   }, [graphLayoutKey]);
 
   const nodes = useMemo<Node<JobNodeData>[]>(() => baseNodes.map((node) => {
-    const position = graphLayout?.key === graphLayoutKey
-      ? graphLayout.positions.get(node.id)
-      : undefined;
+    const position = graphLayout?.positions.get(node.id);
     return position ? { ...node, position } : node;
   }), [baseNodes, graphLayout, graphLayoutKey]);
 
@@ -2341,10 +2350,10 @@ export default function App() {
               {previewConfiguration && <option value="__configuration__">Configuration preview · not executing</option>}
               {runs.map((item) => (
                 <option key={item.runId} value={item.runId}>
-                  {item.jobName} · {runStatusLabel(item)} · {new Date(item.createdUtc).toLocaleString()}
+                  {item.jobName}{item.configuration?.isWhatIf ? " · WhatIf preview" : ""} · {runStatusLabel(item)} · {new Date(item.createdUtc).toLocaleString()}
                 </option>
               ))}
-              {runs.length === 0 && !previewConfiguration && <option value="__empty__" disabled>No runs found</option>}
+              {runs.length === 0 && !loading && !previewConfiguration && <option value="__empty__" disabled>No runs found</option>}
             </select>
             <div className="live-state"><span className="live-dot" /> Live · 3s refresh</div>
             <button
@@ -2371,7 +2380,19 @@ export default function App() {
         </div>
       )}
 
-      {!viewRun && !configurationOnly ? (
+      {viewRun?.configuration?.isWhatIf && (
+        <div className="notice notice-warning" role="status">
+          <strong>WhatIf preview — no target writes or batch callbacks were executed.</strong>
+          {" "}Source readers and transforms ran; inspect captured target rows in the step snapshots.
+        </div>
+      )}
+
+      {loading && !viewRun && !configurationOnly ? (
+        <section className="empty-state">
+          <FluentSpinner />
+          <Text variant="large">Loading migration runs...</Text>
+        </section>
+      ) : !viewRun && !configurationOnly ? (
         <section className="empty-state">
           <Layers3 size={44} />
           <Text variant="xxLarge">No migration runs found</Text>

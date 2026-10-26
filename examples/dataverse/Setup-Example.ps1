@@ -112,7 +112,7 @@ Write-Host "Verified the complete 257,375-row Kaggle dataset in '$dataDirectory'
 $dataverseUrl = [uri]'https://org2aa8aa8c.crm11.dynamics.com'
 $connectionProfileName = 'Migration4DataverseExample'
 
-Import-Module Rnwood.Dataverse.Data.PowerShell -ErrorAction Stop
+Import-Module Rnwood.Dataverse.Data.PowerShell -MinimumVersion '3.3.0' -ErrorAction Stop
 $connection = Get-DataverseConnection `
     -Url $dataverseUrl `
     -DeviceCode `

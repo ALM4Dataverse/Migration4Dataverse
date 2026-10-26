@@ -25,7 +25,7 @@ Each migration SQLite database has one local owner process that centralizes all 
 - Streaming one- and multi-parent relationships: join children to keyed parent rows as they become available instead of waiting for every parent job to finish. Unmatched non-null keys fail clearly; null relationship keys remain unjoined.
 - Bounded, fair scheduling with per-step queue limits and downstream-capacity reservations, so a slow fan-out branch is less likely to starve other branches.
 - Checkpoints and replay-aware targets for recovery; Dataverse targets can tune batch size and concurrency automatically within configured limits.
-- Embedded SQLite and DuckDB connectors and database-backed transforms for local staging and SQL-based processing without a separate SQL Server service.
+- Embedded SQLite and DuckDB connectors and database-backed transforms for local staging and SQL-based processing without a separate SQL Server service; `New-MigrationDatabaseConnection` creates provider connections without manual assembly loading.
 - Optional efficient source totals from supported query/count providers, without streaming the full source solely to count it.
 - A local dashboard for live input/output throughput, target progress and outcomes, execution timeline, runtime hotspots, and optional captured-row lineage.
 

@@ -7,10 +7,10 @@ $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'
 $moduleManifest = Join-Path $repositoryRoot 'src/Migration4Dataverse.PowerShell/Migration4Dataverse.PowerShell.psd1'
 Import-Module -Name $moduleManifest -Force -ErrorAction Stop
 
-$source = [DuckDB.NET.Data.DuckDBConnection]::new(
-    "Data Source=$(Join-Path $dataDirectory 'source.duckdb')")
-$transform = [DuckDB.NET.Data.DuckDBConnection]::new(
-    "Data Source=$(Join-Path $dataDirectory 'transform.duckdb')")
+$source = New-MigrationDatabaseConnection -Provider DuckDB -ConnectionString `
+    "Data Source=$(Join-Path $dataDirectory 'source.duckdb')"
+$transform = New-MigrationDatabaseConnection -Provider DuckDB -ConnectionString `
+    "Data Source=$(Join-Path $dataDirectory 'transform.duckdb')"
 try {
     $source.Open()
     $command = $source.CreateCommand()

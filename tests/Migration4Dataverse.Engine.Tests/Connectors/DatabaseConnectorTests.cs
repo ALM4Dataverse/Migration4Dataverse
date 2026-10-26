@@ -13,6 +13,44 @@ namespace Migration4Dataverse.Engine.Tests.Connectors;
 
 public sealed class DatabaseConnectorTests
 {
+    [Theory]
+    [InlineData("SQLite", typeof(SqliteConnection))]
+    [InlineData("DuckDB", typeof(DuckDBConnection))]
+    public void CreatesSupportedDatabaseConnections(string provider, Type expectedType)
+    {
+        using var connection = MigrationDatabaseConnectionFactory.Create(provider, "Data Source=:memory:");
+
+        Assert.IsType(expectedType, connection);
+    }
+
+    [Fact]
+    public void RejectsUnsupportedDatabaseProviders()
+    {
+        var exception = Assert.Throws<ArgumentOutOfRangeException>(
+            () => MigrationDatabaseConnectionFactory.Create("Postgres", "Host=localhost"));
+
+        Assert.Contains("SQLite or DuckDB", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NewMigrationDatabaseConnectionCmdletCreatesProviderConnection()
+    {
+        using var powershell = PS.Create();
+        powershell.AddCommand("Import-Module")
+            .AddParameter("Name", typeof(InvokeMigrationCommand).Assembly.Location);
+        powershell.Invoke();
+        Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
+
+        powershell.Commands.Clear();
+        var output = powershell.AddCommand("New-MigrationDatabaseConnection")
+            .AddParameter("Provider", "SQLite")
+            .AddParameter("ConnectionString", "Data Source=:memory:")
+            .Invoke();
+
+        Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
+        using var connection = Assert.IsType<SqliteConnection>(Assert.Single(output).BaseObject);
+    }
+
     [Fact]
     public async Task SqliteSourceExecutesConfiguredQueryAndStreamsRows()
     {

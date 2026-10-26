@@ -4,7 +4,7 @@ This documentation describes the supported public cmdlets, step configuration, e
 
 ## Public API
 
-- [Cmdlets and functions](./cmdlets/README.md) — reference for every exported PowerShell command, including [`Get-MigrationRun`](./cmdlets/get-migration-run.md), [`Clear-MigrationTargetTuning`](./cmdlets/clear-migration-target-tuning.md), the [database owner](./cmdlets/migration-database-server.md), and the [migration dashboard](./cmdlets/migration-dashboard.md).
+- [Cmdlets and functions](./cmdlets/README.md) — reference for every exported PowerShell command, including [`New-MigrationDatabaseConnection`](./cmdlets/new-migration-database-connection.md), [`Get-MigrationRun`](./cmdlets/get-migration-run.md), [`Clear-MigrationTargetTuning`](./cmdlets/clear-migration-target-tuning.md), the [database owner](./cmdlets/migration-database-server.md), and the [migration dashboard](./cmdlets/migration-dashboard.md).
 - [Migration step configuration](./configuration.md) — source, transform, filter, append, target, and callback step shapes.
 - [Concepts](./concepts/README.md) — dependencies, batching, recovery, replay safety, and runtime connections.
 

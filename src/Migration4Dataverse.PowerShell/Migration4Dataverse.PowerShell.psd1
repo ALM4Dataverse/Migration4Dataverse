@@ -15,6 +15,7 @@
     )
     CmdletsToExport = @(
         'Invoke-Migration'
+        'New-MigrationDatabaseConnection'
         'Get-MigrationRun'
         'Clear-MigrationTargetTuning'
         'Start-MigrationDatabaseServer'

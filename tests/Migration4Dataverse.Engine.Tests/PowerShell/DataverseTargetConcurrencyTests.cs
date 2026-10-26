@@ -267,7 +267,8 @@ public sealed class DataverseTargetConcurrencyTests
                 false,
                 store,
                 maxTargetConcurrency,
-                disableRetriesForDiagnostics
+                disableRetriesForDiagnostics,
+                false
             ]);
     }
 

@@ -11,12 +11,12 @@ $moduleManifest = Join-Path $repositoryRoot 'src/Migration4Dataverse.PowerShell/
 Import-Module -Name $moduleManifest -Force -ErrorAction Stop
 
 $connections = @{
-    'source-db' = [Microsoft.Data.Sqlite.SqliteConnection]::new(
-        "Data Source=$(Join-Path $dataDirectory 'source.sqlite')")
-    'transform-db' = [Microsoft.Data.Sqlite.SqliteConnection]::new(
-        "Data Source=$(Join-Path $dataDirectory 'transform.sqlite')")
-    'target-db' = [Microsoft.Data.Sqlite.SqliteConnection]::new(
-        "Data Source=$(Join-Path $dataDirectory 'output.sqlite')")
+    'source-db' = New-MigrationDatabaseConnection -Provider SQLite -ConnectionString `
+        "Data Source=$(Join-Path $dataDirectory 'source.sqlite')"
+    'transform-db' = New-MigrationDatabaseConnection -Provider SQLite -ConnectionString `
+        "Data Source=$(Join-Path $dataDirectory 'transform.sqlite')"
+    'target-db' = New-MigrationDatabaseConnection -Provider SQLite -ConnectionString `
+        "Data Source=$(Join-Path $dataDirectory 'output.sqlite')"
 }
 
 $steps = @(

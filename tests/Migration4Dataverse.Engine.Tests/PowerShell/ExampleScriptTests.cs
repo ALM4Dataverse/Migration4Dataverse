@@ -63,6 +63,23 @@ public sealed class ExampleScriptTests
         }
     }
 
+    [Theory]
+    [InlineData("sqlite", "SQLite", "Microsoft.Data.Sqlite.SqliteConnection")]
+    [InlineData("duckdb", "DuckDB", "DuckDB.NET.Data.DuckDBConnection")]
+    public void DatabaseExamplesUseEngineConnectionFactory(
+        string folder,
+        string provider,
+        string providerConnectionType)
+    {
+        var exampleDirectory = Path.Combine(FindRepositoryRoot(), "examples", folder);
+        foreach (var fileName in new[] { "Setup-Example.ps1", "example.ps1" })
+        {
+            var script = File.ReadAllText(Path.Combine(exampleDirectory, fileName));
+            Assert.Contains($"New-MigrationDatabaseConnection -Provider {provider}", script, StringComparison.Ordinal);
+            Assert.DoesNotContain(providerConnectionType, script, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void ExampleConfigurationFilesAndSharedScriptsHaveBeenRemoved()
     {

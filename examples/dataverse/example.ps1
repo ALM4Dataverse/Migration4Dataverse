@@ -34,7 +34,7 @@ $connections = @{
     'example-files' = [System.IO.DirectoryInfo]::new($dataDirectory)
 }
 $connectionProfileName = 'Migration4DataverseExample'
-Import-Module Rnwood.Dataverse.Data.PowerShell -ErrorAction Stop
+Import-Module Rnwood.Dataverse.Data.PowerShell -MinimumVersion '3.3.0' -ErrorAction Stop
 $connections['example-dataverse'] = Get-DataverseConnection `
     -Name $connectionProfileName `
     -DisableAffinityCookie `

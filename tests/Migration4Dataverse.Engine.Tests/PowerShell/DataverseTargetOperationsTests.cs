@@ -25,6 +25,7 @@ public sealed class DataverseTargetOperationsTests
         {
             CreateSource("UpsertSource", "upsert.jsonl"),
             CreateTarget("UpsertTarget", "UpsertSource", "upsert", "Upsert", matchOn: ["code"]),
+            CreateTarget("NoLookupDisabledTarget", "UpsertSource", "upsert-disabled", "Upsert", matchOn: ["code"], noLookup: false),
             CreateSource("CreateSource", "create.jsonl"),
             CreateTarget("CreateTarget", "CreateSource", "create", "Create"),
             CreateSource("UpdateSource", "update.jsonl"),
@@ -41,7 +42,10 @@ public sealed class DataverseTargetOperationsTests
                 lookupColumns: new Hashtable(StringComparer.OrdinalIgnoreCase)
                 {
                     ["parentcustomerid"] = "new_salesforceid"
-                })
+                },
+                noLookup: true,
+                bypassBusinessLogicExecution: ["CustomSync", "CustomAsync"],
+                bypassBusinessLogicExecutionStepIds: [Guid.Parse("11111111-2222-3333-4444-555555555555")])
         };
         var connections = new Hashtable(StringComparer.OrdinalIgnoreCase)
         {
@@ -54,7 +58,7 @@ public sealed class DataverseTargetOperationsTests
         var createGraph = factory.GetMethod("CreateGraph", BindingFlags.Public | BindingFlags.Static)!;
         using var stepSet = (IDisposable)createGraph.Invoke(
             null,
-            [steps, connections, executor, 1, false, store, 8, false])!;
+            [steps, connections, executor, 1, false, store, 8, false, false])!;
         var definitions = (IReadOnlyList<MigrationStepDefinition>)stepSet.GetType()
             .GetProperty("Steps", BindingFlags.Public | BindingFlags.Instance)!
             .GetValue(stepSet)!;
@@ -72,12 +76,13 @@ public sealed class DataverseTargetOperationsTests
 
         Assert.Equal("dataverse-operations-run", result.RunId);
         var calls = File.ReadAllLines(directory.CallsPath);
-        Assert.Contains("upsert:Set:match=code", calls);
-        Assert.Contains("create:Set:create-only", calls);
-        Assert.Contains("update:Set:no-create:match=code", calls);
+        Assert.Contains("upsert:Set:match=code:no-lookup", calls);
+        Assert.Contains("upsert-disabled:Set:match=code", calls);
+        Assert.Contains("create:Set:create-only:no-lookup", calls);
+        Assert.Contains("update:Set:no-create:match=code:no-lookup", calls);
         Assert.Contains("delete:Remove:match=code", calls);
-        Assert.Contains("if-needed:Set:match=code", calls);
         Assert.Contains("if-needed:LookupColumns:parentcustomerid=new_salesforceid", calls);
+        Assert.Contains("if-needed:Set:match=code:no-lookup:bypass=CustomSync,CustomAsync:bypass-stepids=11111111-2222-3333-4444-555555555555", calls);
     }
 
     [Fact]
@@ -150,7 +155,7 @@ public sealed class DataverseTargetOperationsTests
         var createGraph = factory.GetMethod("CreateGraph", BindingFlags.Public | BindingFlags.Static)!;
         using var stepSet = (IDisposable)createGraph.Invoke(
             null,
-            [steps, connections, executor, 1, false, store, 8, false])!;
+            [steps, connections, executor, 1, false, store, 8, false, false])!;
         var definitions = (IReadOnlyList<MigrationStepDefinition>)stepSet.GetType()
             .GetProperty("Steps", BindingFlags.Public | BindingFlags.Instance)!
             .GetValue(stepSet)!;
@@ -196,10 +201,39 @@ public sealed class DataverseTargetOperationsTests
         var createGraph = factory.GetMethod("CreateGraph", BindingFlags.Public | BindingFlags.Static)!;
 
         var exception = Assert.Throws<TargetInvocationException>(
-            () => createGraph.Invoke(null, [steps, connections, executor, 1, false, null, 8, false]));
+            () => createGraph.Invoke(null, [steps, connections, executor, 1, false, null, 8, false, false]));
 
         Assert.IsType<ArgumentException>(exception.InnerException);
         Assert.Contains("Dataverse target operation", exception.InnerException.Message);
+    }
+
+    [Fact]
+    public void RejectsSetOnlyOptionsForDeleteTargets()
+    {
+        using var directory = new TemporaryDirectory();
+        using var executor = new PowerShellScriptExecutor(
+            modulesToImport: [typeof(InvokeMigrationCommand).Assembly.Location]);
+        var connections = new Hashtable(StringComparer.OrdinalIgnoreCase)
+        {
+            ["files"] = new DirectoryInfo(directory.Path),
+            ["crm"] = new object()
+        };
+        var steps = new[]
+        {
+            CreateSource("Source", "upsert.jsonl"),
+            CreateTarget("DeleteTarget", "Source", "target", "Delete", matchOn: ["code"], noLookup: true)
+        };
+        var factory = typeof(InvokeMigrationCommand).Assembly.GetType(
+            "Migration4Dataverse.Engine.PowerShell.PowerShellMigrationStepFactory",
+            throwOnError: true)!;
+        var createGraph = factory.GetMethod("CreateGraph", BindingFlags.Public | BindingFlags.Static)!;
+
+        var exception = Assert.Throws<TargetInvocationException>(
+            () => createGraph.Invoke(null, [steps, connections, executor, 1, false, null, 8, false, false]));
+
+        Assert.IsType<ArgumentException>(exception.InnerException);
+        Assert.Contains("does not support Set-DataverseRecord options", exception.InnerException.Message);
+        Assert.Contains("NoLookup", exception.InnerException.Message);
     }
 
     private static PSObject CreateSource(string id, string fileName) =>
@@ -223,7 +257,10 @@ public sealed class DataverseTargetOperationsTests
         string table,
         string operation,
         string[]? matchOn = null,
-        Hashtable? lookupColumns = null)
+        Hashtable? lookupColumns = null,
+        bool? noLookup = null,
+        string[]? bypassBusinessLogicExecution = null,
+        Guid[]? bypassBusinessLogicExecutionStepIds = null)
     {
         var options = new Hashtable(StringComparer.OrdinalIgnoreCase);
         if (matchOn is not null)
@@ -233,6 +270,18 @@ public sealed class DataverseTargetOperationsTests
         if (lookupColumns is not null)
         {
             options["LookupColumns"] = lookupColumns;
+        }
+        if (noLookup.HasValue)
+        {
+            options["NoLookup"] = noLookup.Value;
+        }
+        if (bypassBusinessLogicExecution is not null)
+        {
+            options["BypassBusinessLogicExecution"] = bypassBusinessLogicExecution;
+        }
+        if (bypassBusinessLogicExecutionStepIds is not null)
+        {
+            options["BypassBusinessLogicExecutionStepIds"] = bypassBusinessLogicExecutionStepIds;
         }
         return PSObject.AsPSObject(new
         {
@@ -292,6 +341,9 @@ public sealed class DataverseTargetOperationsTests
                         [int] $InitialRetryDelay,
                         [string[][]] $MatchOn,
                         [hashtable] $LookupColumns,
+                        [switch] $NoLookup,
+                        [object[]] $BypassBusinessLogicExecution,
+                        [guid[]] $BypassBusinessLogicExecutionStepIds,
                         [switch] $CreateOnly,
                         [switch] $NoCreate,
                         [switch] $Upsert,
@@ -303,6 +355,13 @@ public sealed class DataverseTargetOperationsTests
                         if ($NoCreate) { $details.Add('no-create') }
                         if ($Upsert) { $details.Add('upsert') }
                         if ($MatchOn) { $details.Add('match=' + ($MatchOn[0] -join ',')) }
+                        if ($NoLookup) { $details.Add('no-lookup') }
+                        if ($BypassBusinessLogicExecution) {
+                            $details.Add('bypass=' + ($BypassBusinessLogicExecution -join ','))
+                        }
+                        if ($BypassBusinessLogicExecutionStepIds) {
+                            $details.Add('bypass-stepids=' + ($BypassBusinessLogicExecutionStepIds -join ','))
+                        }
                         Add-Content -LiteralPath (Join-Path $PSScriptRoot 'calls.txt') -Value "${TableName}:Set:$($details -join ':')"
                         if ($LookupColumns) {
                             Add-Content -LiteralPath (Join-Path $PSScriptRoot 'calls.txt') `

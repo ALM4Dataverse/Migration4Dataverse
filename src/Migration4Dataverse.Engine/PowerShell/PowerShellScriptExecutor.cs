@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Management.Automation;
 using System.Management.Automation.Runspaces;
 using System.Threading.Channels;
+using Microsoft.PowerShell.Commands;
 using Migration4Dataverse.Engine.Scheduling;
 using Migration4Dataverse.Engine.Storage;
 
@@ -10,17 +11,33 @@ namespace Migration4Dataverse.Engine.PowerShell;
 public sealed class PowerShellScriptExecutor : IDisposable
 {
     private readonly RunspacePool _runspacePool;
+    private readonly string[] _sharedScripts;
+    private readonly PSModuleInfo[] _resolvedRequiredModules;
     private bool _disposed;
 
-    public PowerShellScriptExecutor(int maxRunspaces = 1, IEnumerable<string>? modulesToImport = null)
+    public PowerShellScriptExecutor(
+        int maxRunspaces = 1,
+        IEnumerable<string>? modulesToImport = null,
+        IEnumerable<string>? sharedScripts = null,
+        IEnumerable<ModuleSpecification>? requiredModules = null)
     {
         if (maxRunspaces < 1)
         {
             throw new ArgumentOutOfRangeException(nameof(maxRunspaces), "At least one runspace is required.");
         }
 
+        _sharedScripts = sharedScripts?.ToArray() ?? Array.Empty<string>();
+        _resolvedRequiredModules = ResolveRequiredModules(requiredModules);
         var initialSessionState = InitialSessionState.CreateDefault2();
-        var modules = modulesToImport?.Where(module => !string.IsNullOrWhiteSpace(module)).ToArray();
+        initialSessionState.Assemblies.Add(
+            new SessionStateAssemblyEntry(typeof(Microsoft.Data.Sqlite.SqliteConnection).Assembly.Location));
+        initialSessionState.Assemblies.Add(
+            new SessionStateAssemblyEntry(typeof(DuckDB.NET.Data.DuckDBConnection).Assembly.Location));
+        var modules = (modulesToImport ?? Array.Empty<string>())
+            .Where(module => !string.IsNullOrWhiteSpace(module))
+            .Concat(_resolvedRequiredModules.Select(module => module.Path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
         if (modules is { Length: > 0 })
         {
             initialSessionState.ImportPSModule(modules);
@@ -36,6 +53,8 @@ public sealed class PowerShellScriptExecutor : IDisposable
         _runspacePool.Open();
     }
 
+    public IReadOnlyList<PSModuleInfo> ResolvedRequiredModules => _resolvedRequiredModules;
+
     public IReadOnlyList<PSObject> Invoke(string script, IReadOnlyList<object?>? arguments = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -43,14 +62,7 @@ public sealed class PowerShellScriptExecutor : IDisposable
 
         using var powerShell = System.Management.Automation.PowerShell.Create();
         powerShell.RunspacePool = _runspacePool;
-        powerShell.AddScript(script, useLocalScope: true);
-        if (arguments is not null)
-        {
-            foreach (var argument in arguments)
-            {
-                powerShell.AddArgument(argument);
-            }
-        }
+        AddInvocationScript(powerShell, script, arguments);
 
         var output = powerShell.Invoke();
         if (powerShell.HadErrors)
@@ -133,11 +145,7 @@ public sealed class PowerShellScriptExecutor : IDisposable
             cancellationToken.ThrowIfCancellationRequested();
             using var powerShell = System.Management.Automation.PowerShell.Create();
             powerShell.RunspacePool = _runspacePool;
-            powerShell.AddScript(script, useLocalScope: true);
-            foreach (var argument in invocationArguments)
-            {
-                powerShell.AddArgument(argument);
-            }
+            AddInvocationScript(powerShell, script, invocationArguments);
 
             var asyncResult = powerShell.BeginInvoke();
             using var cancellationRegistration = cancellationToken.Register(
@@ -183,15 +191,11 @@ public sealed class PowerShellScriptExecutor : IDisposable
         });
         using var powerShell = System.Management.Automation.PowerShell.Create();
         powerShell.RunspacePool = _runspacePool;
-        powerShell.AddScript(script, useLocalScope: true);
 
         var invocationArguments = arguments?.ToList() ?? new List<object?>();
         invocationArguments.Add(new Action<PSObject>(record =>
             channel.Writer.WriteAsync(record, cancellationToken).AsTask().GetAwaiter().GetResult()));
-        foreach (var argument in invocationArguments)
-        {
-            powerShell.AddArgument(argument);
-        }
+        AddInvocationScript(powerShell, script, invocationArguments);
 
         var asyncResult = powerShell.BeginInvoke();
         using var cancellationRegistration = cancellationToken.Register(
@@ -244,6 +248,88 @@ public sealed class PowerShellScriptExecutor : IDisposable
         _runspacePool.Close();
         _runspacePool.Dispose();
         _disposed = true;
+    }
+
+    private void AddInvocationScript(
+        System.Management.Automation.PowerShell powerShell,
+        string script,
+        IReadOnlyList<object?>? arguments)
+    {
+        powerShell.AddScript(
+            """
+            param($sharedScripts, $scriptText, $scriptArguments)
+            foreach ($sharedScript in $sharedScripts) {
+                $null = . ([scriptblock]::Create($sharedScript))
+            }
+            & ([scriptblock]::Create($scriptText)) @scriptArguments
+            """,
+            useLocalScope: true)
+            .AddArgument(_sharedScripts)
+            .AddArgument(script)
+            .AddArgument(arguments?.ToArray() ?? Array.Empty<object?>());
+    }
+
+    private static PSModuleInfo[] ResolveRequiredModules(IEnumerable<ModuleSpecification>? requiredModules)
+    {
+        var requirements = requiredModules?.ToArray() ?? Array.Empty<ModuleSpecification>();
+        if (requirements.Length == 0)
+        {
+            return Array.Empty<PSModuleInfo>();
+        }
+
+        using var runspace = RunspaceFactory.CreateRunspace(InitialSessionState.CreateDefault2());
+        runspace.Open();
+        var resolvedModules = new List<PSModuleInfo>(requirements.Length);
+        foreach (var requirement in requirements)
+        {
+            if (requirement is null)
+            {
+                throw new ArgumentException("RequiredModules cannot contain null entries.", nameof(requiredModules));
+            }
+            if (string.IsNullOrWhiteSpace(requirement.Name))
+            {
+                throw new ArgumentException("Every required PowerShell module must have a module name.", nameof(requiredModules));
+            }
+            var maximumVersion = requirement.MaximumVersion is null
+                ? null
+                : Version.Parse(requirement.MaximumVersion);
+
+            using var powerShell = System.Management.Automation.PowerShell.Create();
+            powerShell.Runspace = runspace;
+            powerShell.AddCommand("Get-Module")
+                .AddParameter("ListAvailable")
+                .AddParameter("Name", requirement.Name);
+            var available = powerShell.Invoke()
+                .Select(module => module.BaseObject)
+                .OfType<PSModuleInfo>()
+                .Where(module => string.Equals(module.Name, requirement.Name, StringComparison.OrdinalIgnoreCase))
+                .Where(module => requirement.Guid is null || module.Guid == requirement.Guid)
+                .Where(module => requirement.RequiredVersion is null || module.Version == requirement.RequiredVersion)
+                .Where(module => requirement.Version is null || module.Version >= requirement.Version)
+                .Where(module => maximumVersion is null || module.Version <= maximumVersion)
+                .OrderByDescending(module => module.Version)
+                .ToArray();
+            if (powerShell.HadErrors)
+            {
+                throw new PowerShellScriptException(
+                    powerShell.Streams.Error.Select(error => error.ToString()).ToArray());
+            }
+            if (available.Length == 0)
+            {
+                throw new InvalidOperationException(
+                    $"Required PowerShell module '{requirement}' is not installed with a compatible version.");
+            }
+
+            var modulePath = available[0].Path;
+            if (string.IsNullOrWhiteSpace(modulePath))
+            {
+                throw new InvalidOperationException(
+                    $"Required PowerShell module '{requirement}' resolved to an empty module path.");
+            }
+            resolvedModules.Add(available[0]);
+        }
+
+        return resolvedModules.ToArray();
     }
 }
 

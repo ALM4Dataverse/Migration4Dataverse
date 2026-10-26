@@ -61,7 +61,8 @@ internal static partial class PowerShellMigrationStepFactory
         bool captureDebugData = false,
         IMigrationStore? store = null,
         int maxTargetConcurrency = 32,
-        bool disableDataverseRetriesForDiagnostics = false)
+        bool disableDataverseRetriesForDiagnostics = false,
+        bool whatIf = false)
     {
         ArgumentNullException.ThrowIfNull(stepObjects);
         ArgumentNullException.ThrowIfNull(connections);
@@ -80,7 +81,7 @@ internal static partial class PowerShellMigrationStepFactory
         ValidateDatabaseSourceConnections(inputs);
         var dispatchWeights = CalculatePipelineDispatchWeights(inputs);
         foreach (var databaseTarget in inputs.Where(input =>
-                     input.Type == "target" && input.TargetType is "sqlite" or "duckdb"))
+                     !whatIf && input.Type == "target" && input.TargetType is "sqlite" or "duckdb"))
         {
             DatabaseBatchTargetWriter.PrepareTargetSchema(
                 (DbConnection)databaseTarget.TargetConnection!,
@@ -314,18 +315,27 @@ internal static partial class PowerShellMigrationStepFactory
                     ["BatchSize"] = input.BatchSize,
                     ["Children"] = childContexts,
                     ["JoinInputConsumers"] = joinInputConsumers,
-                    ["CaptureDebugData"] = captureDebugData
+                    ["CaptureDebugData"] = captureDebugData,
+                    ["WhatIf"] = whatIf
                 };
                 var handlerWithLease = input.Type == "callback"
                     ? executor.CreateMigrationBatchHandlerWithExecutionLease(
-                        "param($batch, $callbackText, $sourceConnection, $targetConnection) " +
-                        "$callback = [scriptblock]::Create($callbackText); " +
-                        "& $callback $batch $sourceConnection $targetConnection",
+                        """
+                        param($batch, $callbackText, $sourceConnection, $targetConnection, $whatIf)
+                        if ($whatIf) {
+                            [Migration4Dataverse.Engine.Scheduling.MigrationBatchResult]::new(
+                                '{"Succeeded":0,"Failed":0}', $false, $null, $null)
+                        } else {
+                            $callback = [scriptblock]::Create($callbackText)
+                            & $callback $batch $sourceConnection $targetConnection
+                        }
+                        """,
                         (_, _) => new object?[]
                         {
                             input.CallbackScriptText!,
                             input.CallbackSourceConnection,
-                            input.CallbackTargetConnection
+                            input.CallbackTargetConnection,
+                            whatIf
                         })
                     : executor.CreateMigrationBatchHandlerWithExecutionLease(
                         NodeHandlerScript,
@@ -701,6 +711,26 @@ internal static partial class PowerShellMigrationStepFactory
                         supportedOperation,
                         targetOperation,
                         StringComparison.OrdinalIgnoreCase));
+                var setOnlyOptions = new List<string>();
+                var noLookup = GetProperty(targetOptions, "NoLookup");
+                if (noLookup is not null && LanguagePrimitives.IsTrue(noLookup))
+                {
+                    setOnlyOptions.Add("NoLookup");
+                }
+                setOnlyOptions.AddRange(new[]
+                {
+                    "BypassBusinessLogicExecution",
+                    "BypassBusinessLogicExecutionStepIds"
+                });
+                var deleteOptions = setOnlyOptions
+                    .Where(option => GetProperty(targetOptions, option) is not null)
+                    .ToArray();
+                if (targetOperation == "Delete" && deleteOptions.Length > 0)
+                {
+                    throw new ArgumentException(
+                        $"Dataverse Delete target step '{id}' does not support Set-DataverseRecord options: " +
+                        $"{string.Join(", ", deleteOptions)}.");
+                }
                 if (targetOperation == "Create" &&
                     GetProperty(targetOptions, "MatchOn") is not null)
                 {

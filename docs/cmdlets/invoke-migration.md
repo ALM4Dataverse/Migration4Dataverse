@@ -9,7 +9,7 @@ Runs a durable, top-level migration-step graph through the C# dependency schedul
 | `-DatabasePath` | Yes | Non-empty path | File-backed SQLite migration store. Its parent directory is created when missing. |
 | `-RunName` | Yes | Non-empty string | Human-readable name associated with the run ID. Reusing a run ID with a different name is rejected. |
 | `-RunId` | No | New GUID in `N` format | Stable identity used to resume an existing run. Keep the same ID to resume; use a new ID for a distinct run. |
-| `-StepHash` | No | SHA-256 of normalized steps and `ModulesToImport` | Resume-compatibility identity. The generated hash also versions row-linked source behavior. Supply a stable hash only when you intentionally manage compatibility yourself. |
+| `-StepHash` | No | SHA-256 of steps, module requirements and resolved versions, and shared scripts | Resume-compatibility identity. Helper-file contents and inline shared-script definitions participate in the generated hash. The generated hash also versions row-linked source behavior. Supply a stable hash only when you intentionally manage compatibility yourself. |
 | `-Steps` | Yes | One or more native hashtables or PowerShell objects | Top-level migration graph. Every node declares `Id`, `Type`, and `Inputs`; source nodes may also declare `DependsOn`. |
 | `-Connections` | No | Empty hashtable | Map from connection IDs to live objects, including `Microsoft.Data.Sqlite.SqliteConnection` and `DuckDB.NET.Data.DuckDBConnection` instances for database connectors. The caller retains ownership of supplied objects. |
 | `-MaxDegreeOfParallelism` | No | `4`; positive; scheduler supports at most `32` | Maximum scheduler workers and shared Dataverse connection concurrency ceiling. |
@@ -18,11 +18,35 @@ Runs a durable, top-level migration-step graph through the C# dependency schedul
 | `-MaxAttempts` | No | `5`; positive | Maximum handler attempts before a batch fails. `-DataverseNoRetryDiagnosticMode` forces one attempt for diagnosing throttling. |
 | `-DataverseNoRetryDiagnosticMode` | No | Off | Diagnostic-only switch that disables Dataverse connection retries, `Set-DataverseRecord` retries, and scheduler retries for the run. Normal retries remain enabled by default. |
 | `-ModulesToImport` | No | Empty string array | PowerShell modules or paths imported into pooled runspaces. Required connector modules are loaded automatically; custom connector modules are imported from their connector definitions. |
+| `-RequiredModules` | No | Empty `ModuleSpecification` array | PowerShell module requirements imported into every pooled runspace. Each specification can set `ModuleName`, minimum `ModuleVersion`, `MaximumVersion`, `RequiredVersion`, and `Guid`; a missing or incompatible module fails the run before migration scheduling starts. |
+| `-ScriptsToLoad` | No | Empty string array | Paths to shared PowerShell helper scripts. Their function definitions are made available to source, transform, and callback scripts. File contents participate in the default resume hash. |
+| `-SharedScripts` | No | Empty `ScriptBlock` array | Inline shared PowerShell helper definitions available to source, transform, and callback scripts. Their contents participate in the default resume hash. |
 | `-BatchSize` | No | `100`; range `1..1000` | Default batch size for Source steps. A Target step's `BatchSize` overrides it. Callback nodes define their own batch payloads. |
 | `-EnableDebugCapture` | No | Off | Opt in to per-row input, output, callback-stage, and batch-outcome snapshots. Debug capture is persisted in SQLite and can materially increase write volume or expose business data. Common secret/token fields are redacted; protect the database and review payloads. |
 | `-DebugCaptureRetentionDays` | No | `30`; range `1..3650` | Retention for opt-in debug snapshots. Expired snapshots are purged as new snapshots are captured. This does not delete basic run, step, batch, outcome, or checkpoint metadata. |
+| `-WhatIf` | No | Off | Execute source readers and transforms, capture the planned rows, and skip target writes and generic batch callbacks. Debug capture is enabled for the preview automatically. Caller-authored source readers and transform scripts may still have side effects. Preview runs use a distinct resume hash and cannot be resumed as write runs. |
 
-The cmdlet emits live PowerShell progress while the scheduler runs, then one `DependencySchedulerResult`. Progress is based on target input rows, including rows still queued or in flight. A percentage is shown only when every target's input stream is finalized and all its batches are countable; otherwise the status says that the total is still growing or unavailable. With multiple targets, totals represent target-write work and may count the same logical source row more than once. The result includes `TargetRowsProcessed`, `TargetRowsSucceeded`, `TargetRowsFailed`, `TargetRowsExpected` (null when unknown), and `FilteredRows` (filter drops summed across steps, so a row removed at multiple steps is counted multiple times). Calling `Stop-Processing` cancels the active run; cancelled work remains durable and can be resumed with the same run identity and step definition.
+The cmdlet emits live PowerShell progress while the scheduler runs, then one `DependencySchedulerResult`. Progress is based on target input rows, including rows still queued or in flight. A percentage is shown only when every target's input stream is finalized and all its batches are countable; otherwise the status says that the total is still growing or unavailable. With multiple targets, totals represent target-write work and may count the same logical source row more than once. The result includes `TargetRowsProcessed`, `TargetRowsSucceeded`, `TargetRowsFailed`, `TargetRowsExpected` (null when unknown), `FilteredRows` (filter drops summed across steps), and `IsWhatIf`. In WhatIf previews, processed rows are planned rows and target success counts remain zero because no writes occurred. Calling `Stop-Processing` cancels the active run; cancelled work remains durable and can be resumed with the same run identity and step definition.
+
+Shared scripts are loaded into each invocation's runspace before the step script runs, so helpers work consistently across parallel workers and all PowerShell-backed step types. Use these inputs for function definitions rather than one-time setup: script contents are evaluated for each invocation, and state should be passed through step arguments or named connections instead of relying on runspace reuse. Modules in `-RequiredModules` are imported with the requested version constraints; `-ModulesToImport` remains available for unpinned module names or paths.
+
+```powershell
+$sharedFunctions = {
+    function Convert-MigrationName {
+        param([string]$Name)
+        $Name.Trim().ToUpperInvariant()
+    }
+}
+$moduleRequirement = @{
+    ModuleName = 'Contoso.MigrationTools'
+    ModuleVersion = '2.1.0'
+}
+
+Invoke-Migration ... `
+    -ScriptsToLoad @('./migration-helpers.ps1') `
+    -SharedScripts @($sharedFunctions) `
+    -RequiredModules @($moduleRequirement)
+```
 
 Every SQLite database has one process owner. Store access starts that owner implicitly in the first caller when needed; for multiple independent PowerShell processes, start [`Start-MigrationDatabaseServer`](./migration-database-server.md) in a dedicated process first. Migration schedulers, workers, live connections, and callbacks remain in their caller processes and communicate with the owner over same-user local IPC. Multiple distinct run IDs may run concurrently through one database; a per-run scheduler lease prevents duplicate schedulers for the same run. Keep the owner alive until all clients have finished. See [Migration dashboard](./migration-dashboard.md) for using the same owner for dashboard reads.
 
@@ -31,6 +55,8 @@ Every run retains basic operational metadata, including the step graph, batch st
 `Inputs` routes row batches and implicitly declares row-flow dependencies. A source input object uses `Job` and `Keys = @{ Child = '...'; Parent = '...' }` for a keyed parent-source relationship; `RowsPerParent` is optional. Null child keys mean that relationship is absent and the row is retained without waiting on that parent, while unmatched non-null keys fail the source. `DependsOn` accepts only step IDs and is reserved for additional completion barriers. Row-linked source rows are staged in temporary SQLite storage; child files need not be pre-sorted. A `join` node has exactly two ordered `Inputs`: the left/child step and the right/parent step, each with an `As` alias; the parent input also declares ordered `Keys` pairs. Joins can be chained to add parent lookups, including lookups by dotted paths into an earlier joined row. `JoinType` selects `inner` or `left` behavior. `JoinOrder` defaults to `ready`, so matches stream as parent rows arrive even when an earlier child key is still pending; this can reorder output rows. Set it to `stable` to preserve left-input order, at the cost of waiting behind earlier unresolved keys. Non-null unmatched keys resolve when the parent step completes; null keys never match, and left joins retain them immediately. See the [dependency guide](../concepts/dependencies.md) for key configuration and completion semantics.
 
 Debug-capture settings are fixed when a run is created. Resuming with a different capture setting or retention period is rejected.
+
+`-WhatIf` records planned target input rows in the run's debug snapshots so they can be inspected in the dashboard, which labels preview runs. It does not call target connectors or batch callbacks. Source readers and transforms still run; avoid using preview with caller-authored scripts that perform writes or other side effects.
 
 For Dataverse Targets, `BatchSize` and `MaxConcurrency` default to `auto`. Batch-size experiments are serialized across the pipeline and scored against total successful Dataverse output rows per second. Auto concurrency is a shared adaptive budget for targets on the same connection, bounded by `-MaxDegreeOfParallelism`; connection retry/throttle telemetry can reduce the budget when throttling is observed. Batch sizes persist by target step ID, while shared concurrency profiles are versioned and associated with a connection ID. Compatible values are reused on later runs using the same database, subject to current invocation limits. Use [`Clear-MigrationTargetTuning`](./clear-migration-target-tuning.md) to remove a step's profile or clear all profiles from the database. Normal retry behavior is retained; use `-DataverseNoRetryDiagnosticMode` only when intentionally testing the un-retried service response.
 

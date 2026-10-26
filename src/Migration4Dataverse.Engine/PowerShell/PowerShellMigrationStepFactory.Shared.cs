@@ -257,7 +257,7 @@ internal static partial class PowerShellMigrationStepFactory
             $targetExecutionLease = $null
             $targetTuningLease = $null
             $targetSucceeded = $false
-            if ($context.TargetType -in @('dataverse', 'custom', 'sqlite', 'duckdb')) {
+            if (-not $context.WhatIf -and $context.TargetType -in @('dataverse', 'custom', 'sqlite', 'duckdb')) {
                 if ($null -ne $context.TargetController) {
                     $targetExecutionLease = $context.ExecutionLease
                     if ($null -eq $targetExecutionLease) {
@@ -270,7 +270,11 @@ internal static partial class PowerShellMigrationStepFactory
                 }
             }
             try {
-                switch ($context.TargetType) {
+                if ($context.WhatIf) {
+                    $targetSucceeded = $true
+                }
+                else {
+                    switch ($context.TargetType) {
                     'dataverse' {
                         $targetOptions = ConvertFrom-Json -InputObject $context.TargetOptionsJson `
                             -AsHashtable -Depth 100 -ErrorAction Stop
@@ -309,6 +313,18 @@ internal static partial class PowerShellMigrationStepFactory
                         }
                         if ($targetOptions.Contains('LookupColumns')) {
                             $targetParameters.LookupColumns = $targetOptions.LookupColumns
+                        }
+                        if ($targetOperation -ne 'Delete' -and
+                            (-not $targetOptions.Contains('NoLookup') -or [bool]$targetOptions.NoLookup)) {
+                            $targetParameters.NoLookup = $true
+                        }
+                        if ($targetOptions.Contains('BypassBusinessLogicExecution')) {
+                            $targetParameters.BypassBusinessLogicExecution =
+                                $targetOptions.BypassBusinessLogicExecution
+                        }
+                        if ($targetOptions.Contains('BypassBusinessLogicExecutionStepIds')) {
+                            $targetParameters.BypassBusinessLogicExecutionStepIds =
+                                $targetOptions.BypassBusinessLogicExecutionStepIds
                         }
                         $records = [object[]][Migration4Dataverse.Engine.PowerShell.DataverseLookupReferenceResolver]::Resolve($records)
 
@@ -418,12 +434,15 @@ internal static partial class PowerShellMigrationStepFactory
                             throw "Custom target callback for step '$($context.StepId)' must return Boolean true."
                         }
                     }
-                    default {
-                        throw "Unsupported target connector type '$($context.TargetType)'."
+                        default {
+                            throw "Unsupported target connector type '$($context.TargetType)'."
+                        }
                     }
                 }
-                $targetSucceeded = $true
-                $context.PipelineThroughputMeter.Record([long]$records.Count)
+                if (-not $context.WhatIf) {
+                    $targetSucceeded = $true
+                    $context.PipelineThroughputMeter.Record([long]$records.Count)
+                }
             }
             finally {
                 if ($null -ne $targetExecutionLease) {
@@ -568,7 +587,12 @@ internal static partial class PowerShellMigrationStepFactory
             }
         }
 
-        $outcomeData = [ordered]@{ Succeeded = $outputRecords.Count; Failed = 0 }
+        $outcomeData = if ($context.WhatIf -and $context.Type -eq 'target') {
+            [ordered]@{ Succeeded = 0; Failed = 0; Previewed = $outputRecords.Count }
+        }
+        else {
+            [ordered]@{ Succeeded = $outputRecords.Count; Failed = 0 }
+        }
         if ($context.TargetType -eq 'dataverse' -and $null -ne $context.TargetController) {
             $outcomeData.SpecialistInfo = $context.TargetController.GetDashboardState($context.StepId)
         }

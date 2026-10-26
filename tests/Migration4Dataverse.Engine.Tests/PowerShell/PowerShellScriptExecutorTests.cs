@@ -1,6 +1,8 @@
+using System.Collections;
 using Migration4Dataverse.Engine.PowerShell;
 using Migration4Dataverse.Engine.Scheduling;
 using Migration4Dataverse.Engine.Storage;
+using Microsoft.PowerShell.Commands;
 
 namespace Migration4Dataverse.Engine.Tests.PowerShell;
 
@@ -15,6 +17,49 @@ public sealed class PowerShellScriptExecutorTests
 
         var result = Assert.Single(output);
         Assert.Equal(42, result.BaseObject);
+    }
+
+    [Fact]
+    public void MakesSharedScriptFunctionsAvailableForEveryInvocation()
+    {
+        using var executor = new PowerShellScriptExecutor(
+            maxRunspaces: 2,
+            sharedScripts:
+            [
+                "function Get-SharedValue { param($suffix) \"shared-$suffix\" }"
+            ]);
+
+        var output = executor.Invoke("param($suffix) Get-SharedValue $suffix", ["value"]);
+
+        Assert.Equal("shared-value", Assert.Single(output).BaseObject);
+    }
+
+    [Fact]
+    public void LoadsRequiredModulesWithVersionSpecifications()
+    {
+        var requiredModule = new ModuleSpecification(new Hashtable
+        {
+            ["ModuleName"] = "Microsoft.PowerShell.Utility",
+            ["ModuleVersion"] = "1.0"
+        });
+        using var executor = new PowerShellScriptExecutor(requiredModules: [requiredModule]);
+
+        var output = executor.Invoke("(Get-Module Microsoft.PowerShell.Utility).Name");
+
+        Assert.Contains(output, item => Equals(item.BaseObject, "Microsoft.PowerShell.Utility"));
+    }
+
+    [Fact]
+    public void RejectsUnavailableRequiredModules()
+    {
+        var requiredModule = new ModuleSpecification(new Hashtable
+        {
+            ["ModuleName"] = "Migration4Dataverse.Missing.TestModule",
+            ["ModuleVersion"] = "99.0"
+        });
+
+        Assert.Throws<InvalidOperationException>(
+            () => new PowerShellScriptExecutor(requiredModules: [requiredModule]));
     }
 
     [Fact]

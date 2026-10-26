@@ -21,6 +21,243 @@ public sealed class InvokeMigrationCommandTests
     }
 
     [Fact]
+    public void SharedScriptsFromFilesAndInlineDefinitionsAreAvailableToTransforms()
+    {
+        var temporaryDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"migration4dataverse-shared-scripts-{Guid.NewGuid():N}");
+        var sourceDirectory = Path.Combine(temporaryDirectory, "source");
+        var targetDirectory = Path.Combine(temporaryDirectory, "target");
+        Directory.CreateDirectory(sourceDirectory);
+        Directory.CreateDirectory(targetDirectory);
+        WriteJsonLines(Path.Combine(sourceDirectory, "accounts.jsonl"), """{"Id":"1","Name":"Ada"}""");
+        var helperPath = Path.Combine(temporaryDirectory, "helpers.ps1");
+        File.WriteAllText(helperPath, "function Get-SharedSuffix { param($value) \"$value-file\" }");
+
+        try
+        {
+            using var powershell = System.Management.Automation.PowerShell.Create();
+            powershell.AddCommand("Import-Module")
+                .AddParameter("Name", typeof(InvokeMigrationCommand).Assembly.Location);
+            powershell.Invoke();
+            Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
+
+            var steps = new Hashtable[]
+            {
+                new(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["Id"] = "AccountsSource",
+                    ["Type"] = "source",
+                    ["Inputs"] = Array.Empty<string>(),
+                    ["Source"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["Type"] = "jsonl",
+                        ["ConnectionId"] = "source",
+                        ["Path"] = "accounts.jsonl",
+                        ["Key"] = "Id",
+                        ["Options"] = new Hashtable()
+                    }
+                },
+                new(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["Id"] = "NormalizeAccounts",
+                    ["Type"] = "transform",
+                    ["Inputs"] = new[] { "AccountsSource" },
+                    ["Script"] = ScriptBlock.Create(
+                        "param($row) @{ Id = $row.Id; Name = Add-SharedPrefix (Get-SharedSuffix $row.Name) }")
+                },
+                new(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["Id"] = "AccountsTarget",
+                    ["Type"] = "target",
+                    ["Inputs"] = new[] { "NormalizeAccounts" },
+                    ["Target"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["Type"] = "jsonl",
+                        ["ConnectionId"] = "target",
+                        ["Path"] = "accounts",
+                        ["Operation"] = "Write",
+                        ["Options"] = new Hashtable()
+                    }
+                }
+            };
+
+            powershell.Commands.Clear();
+            var output = powershell.AddCommand("Invoke-Migration")
+                .AddParameter("DatabasePath", Path.Combine(temporaryDirectory, "migration.sqlite"))
+                .AddParameter("RunName", "SharedScripts")
+                .AddParameter("RunId", "shared-scripts")
+                .AddParameter("Steps", steps)
+                .AddParameter("Connections", new Hashtable(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["source"] = new DirectoryInfo(sourceDirectory),
+                    ["target"] = new DirectoryInfo(targetDirectory)
+                })
+                .AddParameter("ScriptsToLoad", new[] { helperPath })
+                .AddParameter(
+                    "RequiredModules",
+                    new[]
+                    {
+                        new Microsoft.PowerShell.Commands.ModuleSpecification(new Hashtable
+                        {
+                            ["ModuleName"] = "Microsoft.PowerShell.Utility",
+                            ["ModuleVersion"] = "1.0"
+                        })
+                    })
+                .AddParameter(
+                    "SharedScripts",
+                    new[] { ScriptBlock.Create("function Add-SharedPrefix { param($value) \"prefix-$value\" }") })
+                .Invoke();
+
+            Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
+            Assert.IsType<DependencySchedulerResult>(Assert.Single(output).BaseObject);
+            var outputPath = Assert.Single(Directory.GetFiles(targetDirectory, "*.jsonl", SearchOption.AllDirectories));
+            using var document = JsonDocument.Parse(File.ReadAllText(outputPath));
+            Assert.Equal("prefix-Ada-file", document.RootElement.GetProperty("Name").GetString());
+        }
+        finally
+        {
+            if (Directory.Exists(temporaryDirectory))
+            {
+                Directory.Delete(temporaryDirectory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void WhatIfCapturesTargetRowsAndSkipsTargetWritesAndCallbacks()
+    {
+        var temporaryDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"migration4dataverse-whatif-{Guid.NewGuid():N}");
+        var sourceDirectory = Path.Combine(temporaryDirectory, "source");
+        var targetDirectory = Path.Combine(temporaryDirectory, "target");
+        Directory.CreateDirectory(sourceDirectory);
+        Directory.CreateDirectory(targetDirectory);
+        WriteJsonLines(Path.Combine(sourceDirectory, "accounts.jsonl"), """{"Id":"1","Name":"Ada"}""");
+        var callbackPath = Path.Combine(temporaryDirectory, "callback.txt");
+
+        try
+        {
+            using var targetDatabase = new SqliteConnection("Data Source=:memory:");
+            targetDatabase.Open();
+            var steps = new Hashtable[]
+            {
+                new(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["Id"] = "AccountsSource",
+                    ["Type"] = "source",
+                    ["Inputs"] = Array.Empty<string>(),
+                    ["Source"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["Type"] = "jsonl",
+                        ["ConnectionId"] = "source",
+                        ["Path"] = "accounts.jsonl",
+                        ["Key"] = "Id",
+                        ["Options"] = new Hashtable()
+                    }
+                },
+                new(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["Id"] = "DatabaseTarget",
+                    ["Type"] = "target",
+                    ["Inputs"] = new[] { "AccountFields" },
+                    ["Target"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["Type"] = "sqlite",
+                        ["ConnectionId"] = "database",
+                        ["Table"] = "preview_rows",
+                        ["Operation"] = "Write",
+                        ["Options"] = new Hashtable()
+                    }
+                },
+                new(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["Id"] = "AccountFields",
+                    ["Type"] = "transform",
+                    ["Inputs"] = new[] { "AccountsSource" },
+                    ["Script"] = ScriptBlock.Create("param($row) @{ Name = [string]$row.Name }")
+                },
+                new(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["Id"] = "AccountsTarget",
+                    ["Type"] = "target",
+                    ["Inputs"] = new[] { "AccountFields" },
+                    ["Target"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["Type"] = "jsonl",
+                        ["ConnectionId"] = "target",
+                        ["Path"] = "accounts",
+                        ["Operation"] = "Write",
+                        ["Options"] = new Hashtable()
+                    }
+                },
+                new(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["Id"] = "SideEffectCallback",
+                    ["Type"] = "callback",
+                    ["Inputs"] = new[] { "AccountFields" },
+                    ["ExecuteBatch"] = ScriptBlock.Create(
+                        $"[System.IO.File]::WriteAllText('{callbackPath}', 'called'); " +
+                        "[Migration4Dataverse.Engine.Scheduling.MigrationBatchResult]::new(" +
+                        "'{\"Succeeded\":1,\"Failed\":0}', $false, $null, $null)")
+                }
+            };
+
+            using var powershell = System.Management.Automation.PowerShell.Create();
+            powershell.AddCommand("Import-Module")
+                .AddParameter("Name", typeof(InvokeMigrationCommand).Assembly.Location);
+            powershell.Invoke();
+            Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
+
+            powershell.Commands.Clear();
+            var databasePath = Path.Combine(temporaryDirectory, "migration.sqlite");
+            var output = powershell.AddCommand("Invoke-Migration")
+                .AddParameter("DatabasePath", databasePath)
+                .AddParameter("RunName", "WhatIfPreview")
+                .AddParameter("RunId", "whatif-preview")
+                .AddParameter("Steps", steps)
+                .AddParameter("Connections", new Hashtable(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["source"] = new DirectoryInfo(sourceDirectory),
+                    ["target"] = new DirectoryInfo(targetDirectory),
+                    ["database"] = targetDatabase
+                })
+                .AddParameter("WhatIf", true)
+                .Invoke();
+
+            Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
+            var result = Assert.IsType<DependencySchedulerResult>(Assert.Single(output).BaseObject);
+            Assert.True(result.IsWhatIf);
+            Assert.Equal(2, result.TargetRowsProcessed);
+            Assert.Equal(0, result.TargetRowsSucceeded);
+            Assert.Empty(Directory.GetFiles(targetDirectory, "*", SearchOption.AllDirectories));
+            Assert.False(File.Exists(callbackPath));
+            using (var command = targetDatabase.CreateCommand())
+            {
+                command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'preview_rows'";
+                Assert.Equal(0L, command.ExecuteScalar());
+            }
+            Assert.Contains(powershell.Streams.Warning, warning =>
+                warning.Message.Contains("WhatIf preview", StringComparison.Ordinal));
+
+            var store = new SqliteMigrationStore(databasePath);
+            var storedRun = store.GetDashboardRun("whatif-preview");
+            Assert.True(storedRun.DebugCaptureEnabled);
+            Assert.True(storedRun.Configuration?.GetProperty("isWhatIf").GetBoolean());
+            var preview = Assert.Single(store.GetDebugSnapshotPage(
+                "whatif-preview",
+                "AccountsTarget",
+                stageName: "AccountsTarget").Items);
+            Assert.Contains("Ada", preview.PayloadJson, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void NoRetryDiagnosticModeCapsSchedulerAttemptsAtOne()
     {
         var temporaryDirectory = Path.Combine(

@@ -11,12 +11,12 @@ $moduleManifest = Join-Path $repositoryRoot 'src/Migration4Dataverse.PowerShell/
 Import-Module -Name $moduleManifest -Force -ErrorAction Stop
 
 $connections = @{
-    'source-db' = [DuckDB.NET.Data.DuckDBConnection]::new(
-        "Data Source=$(Join-Path $dataDirectory 'source.duckdb')")
-    'transform-db' = [DuckDB.NET.Data.DuckDBConnection]::new(
-        "Data Source=$(Join-Path $dataDirectory 'transform.duckdb')")
-    'target-db' = [DuckDB.NET.Data.DuckDBConnection]::new(
-        "Data Source=$(Join-Path $dataDirectory 'output.duckdb')")
+    'source-db' = New-MigrationDatabaseConnection -Provider DuckDB -ConnectionString `
+        "Data Source=$(Join-Path $dataDirectory 'source.duckdb')"
+    'transform-db' = New-MigrationDatabaseConnection -Provider DuckDB -ConnectionString `
+        "Data Source=$(Join-Path $dataDirectory 'transform.duckdb')"
+    'target-db' = New-MigrationDatabaseConnection -Provider DuckDB -ConnectionString `
+        "Data Source=$(Join-Path $dataDirectory 'output.duckdb')"
 }
 
 $steps = @(

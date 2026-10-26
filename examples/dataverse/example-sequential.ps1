@@ -34,7 +34,7 @@ $connections = @{
     'example-files' = [System.IO.DirectoryInfo]::new($dataDirectory)
 }
 $connectionProfileName = 'Migration4DataverseExample'
-Import-Module Rnwood.Dataverse.Data.PowerShell -ErrorAction Stop
+Import-Module Rnwood.Dataverse.Data.PowerShell -MinimumVersion '3.3.0' -ErrorAction Stop
 $connections['example-dataverse'] = Get-DataverseConnection `
     -Name $connectionProfileName `
     -DisableAffinityCookie `
@@ -234,7 +234,7 @@ $steps += @(
         Inputs = @('ContactsSource')
         Script = {
             param($row)
-            @{
+            $fields = [ordered]@{
                 new_salesforceid = [string]$row.id
                 new_sourceownerid = [string]$row.owner_id
                 new_sourcerowjson = ConvertTo-Json -InputObject $row -Depth 8 -Compress
@@ -244,8 +244,15 @@ $steps += @(
                 telephone1 = [string]$row.phone
                 jobtitle = [string]$row.title
                 department = [string]$row.department
-                parentcustomerid = [string]$row.account_id
             }
+            $accountId = [string]$row.account_id
+            if (-not [string]::IsNullOrWhiteSpace($accountId)) {
+                $fields.parentcustomerid = @{
+                    TableName = 'account'
+                    KeyAttributes = @{ new_salesforceid = $accountId }
+                }
+            }
+            $fields
         }
     }
     @{
@@ -262,9 +269,6 @@ $steps += @(
             BatchSize = 'auto'
             Options = @{
                 MatchOn = ,@('new_salesforceid')
-                LookupColumns = @{
-                    parentcustomerid = 'new_salesforceid'
-                }
             }
         }
     }
@@ -301,11 +305,17 @@ $steps += @(
                 estimatedclosedate = [datetime]::ParseExact([string]$opportunity.close_date, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
             }
             if (-not [string]::IsNullOrWhiteSpace($accountId)) {
-                $fields.accountid = $accountId
+                $fields.accountid = @{
+                    TableName = 'account'
+                    KeyAttributes = @{ new_salesforceid = $accountId }
+                }
             }
             $leadId = [string]$opportunity.lead_source_id
             if (-not [string]::IsNullOrWhiteSpace($leadId)) {
-                $fields.originatingleadid = $leadId
+                $fields.originatingleadid = @{
+                    TableName = 'lead'
+                    KeyAttributes = @{ new_salesforceid = $leadId }
+                }
             }
             $fields
         }
@@ -324,10 +334,6 @@ $steps += @(
             BatchSize = 'auto'
             Options = @{
                 MatchOn = ,@('new_salesforceid')
-                LookupColumns = @{
-                    accountid = 'new_salesforceid'
-                    originatingleadid = 'new_salesforceid'
-                }
             }
         }
     }
@@ -386,11 +392,17 @@ $steps += @(
                 new_sourceownerid = [string]$order.owner_id
                 new_sourcerowjson = ConvertTo-Json -InputObject $order -Depth 8 -Compress
                 name = [string]$order.order_number
-                customerid = $accountId
+                customerid = @{
+                    TableName = 'account'
+                    KeyAttributes = @{ new_salesforceid = $accountId }
+                }
             }
             $opportunityId = [string]$order.opportunity_id
             if (-not [string]::IsNullOrWhiteSpace($opportunityId)) {
-                $orderFields.opportunityid = $opportunityId
+                $orderFields.opportunityid = @{
+                    TableName = 'opportunity'
+                    KeyAttributes = @{ new_salesforceid = $opportunityId }
+                }
             }
             # The configured Dataverse organization has one active price list.
             $priceListId = [guid]::Parse('65029c08-f01f-eb11-a812-000d3a33e825')
@@ -415,10 +427,6 @@ $steps += @(
             BatchSize = 'auto'
             Options = @{
                 MatchOn = ,@('new_salesforceid')
-                LookupColumns = @{
-                    customerid = 'new_salesforceid'
-                    opportunityid = 'new_salesforceid'
-                }
             }
         }
     }
@@ -450,7 +458,10 @@ $steps += @(
             @{
                 new_salesforceid = $sourceId
                 new_sourcerowjson = ConvertTo-Json -InputObject $row -Depth 8 -Compress
-                salesorderid = [string]$row.order_id
+                salesorderid = @{
+                    TableName = 'salesorder'
+                    KeyAttributes = @{ new_salesforceid = [string]$row.order_id }
+                }
                 isproductoverridden = $true
                 productdescription = [string]$row.product_name
                 quantity = [decimal]$row.quantity
@@ -472,9 +483,6 @@ $steps += @(
             BatchSize = 'auto'
             Options = @{
                 MatchOn = ,@('new_salesforceid')
-                LookupColumns = @{
-                    salesorderid = 'new_salesforceid'
-                }
             }
         }
     }
