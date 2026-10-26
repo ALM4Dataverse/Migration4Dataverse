@@ -292,9 +292,10 @@ interface ApiConfiguration {
   schedulerLimits?: SchedulerLimits;
 }
 
-interface ApiDashboardStep extends Omit<DashboardJob, "name" | "dependsOn"> {
+interface ApiDashboardStep extends Omit<DashboardJob, "name" | "dependsOn" | "hasSource"> {
   id: string;
   inputs: string[];
+  isSource: boolean;
 }
 
 interface ApiRunSummary extends Omit<RunSummary, "jobName" | "jobs" | "configuration"> {
@@ -324,6 +325,8 @@ const emptySnapshotFilters: Record<string, string> = {};
 
 interface JobNodeData extends Record<string, unknown> {
   job: DashboardJob;
+  progress: StepProgress | null;
+  inputRowsDisplay: string;
   jobType: string;
   status: JobStatus;
   activityHint: string | null;
@@ -409,6 +412,7 @@ function normalizeRun(run: ApiRunSummary): RunSummary {
     jobs: run.steps.map((step) => ({
       ...step,
       name: step.id,
+      hasSource: step.isSource,
       type: step.type,
       dependsOn: [...step.inputs, ...step.completionDependencies],
     })),
@@ -827,9 +831,139 @@ function activityHintFor(job: DashboardJob, jobs: DashboardJob[], configurationO
   return "Waiting for work";
 }
 
-function inputRowProgress(job: DashboardJob): { value: number; max: number } | null {
-  if (job.expectedRows === null || job.expectedRows <= 0) return null;
-  return { value: Math.min(job.inputRowsProcessed, job.expectedRows), max: job.expectedRows };
+interface ProjectedInputRows {
+  expectedRows: number;
+  isEstimate: boolean;
+}
+
+function projectedInputRows(job: DashboardJob, jobs: DashboardJob[]): ProjectedInputRows | null {
+  const jobsByName = new Map(jobs.map((candidate) => [candidate.name, candidate]));
+  return projectedStepRows(job, jobsByName, new Map(), new Set()).inputRows;
+}
+
+interface ProjectedStepRows {
+  inputRows: ProjectedInputRows | null;
+  outputRows: ProjectedInputRows | null;
+}
+
+function projectedStepRows(
+  job: DashboardJob,
+  jobsByName: Map<string, DashboardJob>,
+  cache: Map<string, ProjectedStepRows>,
+  visiting: Set<string>,
+): ProjectedStepRows {
+  const cached = cache.get(job.name);
+  if (cached) return cached;
+  if (visiting.has(job.name)) return { inputRows: null, outputRows: null };
+  visiting.add(job.name);
+
+  const knownInputRows = job.inputRowsProcessed + job.inputRowsPending + job.inputRowsInFlight;
+  let inputRows: ProjectedInputRows | null = job.inputFinalized
+    ? job.expectedRows === null
+      ? null
+      : { expectedRows: job.expectedRows, isEstimate: false }
+    : job.hasSource && job.expectedRows !== null
+      ? { expectedRows: job.expectedRows, isEstimate: false }
+      : null;
+
+  if (!inputRows && !job.inputFinalized && !job.hasSource) {
+    const parentNames = job.dependsOn
+      .filter((dependency) => !job.completionDependencies.includes(dependency));
+    const parents = parentNames
+      .map((name) => jobsByName.get(name))
+      .filter((parent): parent is DashboardJob => parent !== undefined);
+    if (parents.length > 0 && parents.length === parentNames.length) {
+      const parentRows = parents.map((parent) =>
+        projectedStepRows(parent, jobsByName, cache, visiting).outputRows);
+      if (parentRows.every((rows) => rows !== null)) {
+        const parentRowsExpected = parentRows.reduce(
+          (total, rows) => total + (rows?.expectedRows ?? 0),
+          0,
+        );
+        const parentRowsProduced = parents.reduce(
+          (total, parent) => total + parent.succeededRows + parent.failedRows,
+          0,
+        );
+        const observedInputRatio = parentRowsProduced > 0
+          ? knownInputRows / parentRowsProduced
+          : 1;
+        const expectedRows = parents.length === 1
+          ? parentRowsExpected
+          : knownInputRows +
+            Math.max(0, parentRowsExpected - parentRowsProduced) * observedInputRatio;
+        inputRows = {
+          expectedRows: Math.max(knownInputRows, expectedRows),
+          isEstimate: true,
+        };
+      }
+    }
+  }
+
+  const outputRowsProduced = job.succeededRows + job.failedRows;
+  let outputRows: ProjectedInputRows | null = null;
+  if (inputRows) {
+    const observedOutputRatio = job.inputRowsProcessed > 0
+      ? outputRowsProduced / job.inputRowsProcessed
+      : 1;
+    outputRows = {
+      expectedRows: Math.max(
+        outputRowsProduced,
+        outputRowsProduced +
+          Math.max(0, inputRows.expectedRows - job.inputRowsProcessed) * observedOutputRatio,
+      ),
+      isEstimate: !job.isComplete,
+    };
+  } else if (job.isComplete) {
+    outputRows = { expectedRows: outputRowsProduced, isEstimate: false };
+  }
+
+  visiting.delete(job.name);
+  const projection = { inputRows, outputRows };
+  cache.set(job.name, projection);
+  return projection;
+}
+
+interface StepProgress {
+  value: number;
+  max: number;
+  kind: "rows" | "batches";
+  ariaLabel: string;
+  title: string;
+}
+
+function stepProgress(job: DashboardJob, jobs: DashboardJob[]): StepProgress | null {
+  const projectedRows = projectedInputRows(job, jobs);
+  if (projectedRows && projectedRows.expectedRows > 0) {
+    const estimateLabel = projectedRows.isEstimate ? "estimated " : "";
+    return {
+      value: Math.min(job.inputRowsProcessed, projectedRows.expectedRows),
+      max: projectedRows.expectedRows,
+      kind: "rows",
+      ariaLabel: `${job.name} ${estimateLabel}input row progress`,
+      title: projectedRows.isEstimate
+        ? "Estimated from upstream row projections and observed input ratios."
+        : "Input rows processed."
+    };
+  }
+
+  const totalBatches = job.succeededBatches + job.batchesWithErrors +
+    job.pendingBatches + job.inFlightBatches;
+  if (totalBatches <= 0) return null;
+  const completedBatches = job.succeededBatches + job.batchesWithErrors;
+  return {
+    value: Math.min(completedBatches, totalBatches),
+    max: totalBatches,
+    kind: "batches",
+    ariaLabel: `${job.name} batch progress among currently materialized batches`,
+    title: "Progress among currently materialized batches; more batches may be added."
+  };
+}
+
+function inputRowsLabel(job: DashboardJob, jobs: DashboardJob[]): string {
+  const projectedRows = projectedInputRows(job, jobs);
+  if (!projectedRows) return number.format(job.inputRowsProcessed);
+  const estimateMarker = projectedRows.isEstimate ? "~" : "";
+  return `${number.format(job.inputRowsProcessed)} / ${estimateMarker}${number.format(projectedRows.expectedRows)}`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -840,6 +974,61 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 function getStringProperty(value: unknown, ...propertyNames: string[]): string | undefined {
   const property = getPropertyValue(value, ...propertyNames);
   return typeof property === "string" && property.trim() ? property.trim() : undefined;
+}
+
+function modelDrivenRecordUrl(
+  snapshot: DebugSnapshot,
+  configurationJobs: ConfigurationJob[],
+  connectionInstances: ConnectionInstanceSnapshot[],
+): string | null {
+  const job = configurationJobs.find((candidate) => candidate.name === snapshot.jobName);
+  const target = asRecord(getPropertyValue(job?.properties, "Target"));
+  const source = asRecord(getPropertyValue(job?.properties, "Source"));
+  const targetIsDataverse = (job?.targetConnectionType ?? getStringProperty(target, "Type"))
+    ?.toLocaleLowerCase().includes("dataverse") ?? false;
+  const sourceIsDataverse = (job?.sourceConnectionType ?? getStringProperty(source, "Type"))
+    ?.toLocaleLowerCase().includes("dataverse") ?? false;
+  const endpoint = targetIsDataverse ? target : sourceIsDataverse ? source : null;
+  const connectionId = targetIsDataverse ? job?.targetConnectionId : job?.sourceConnectionId;
+  const tableName = getStringProperty(endpoint, "TableName", "Table", "EntityName", "LogicalName");
+  if (!tableName || !/^[A-Za-z][A-Za-z0-9_]*$/.test(tableName) ||
+      !connectionId) {
+    return null;
+  }
+
+  const primaryId = getStringProperty(parsePayload(snapshot.payloadJson), `${tableName}id`);
+  if (!primaryId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(primaryId)) {
+    return null;
+  }
+
+  const connection = [...connectionInstances]
+    .reverse()
+    .flatMap((capture) => capture.connections)
+    .find((candidate) => candidate.id === connectionId);
+  const organizationUrl = getStringProperty(
+    connection?.properties,
+    "ConnectedOrgUriActual",
+    "ConnectedOrgUri",
+    "OrganizationUri",
+    "OrganizationUrl",
+  );
+  if (!organizationUrl) return null;
+
+  let baseUrl: URL;
+  try {
+    baseUrl = new URL(organizationUrl);
+  } catch {
+    return null;
+  }
+  if (!["https:", "http:"].includes(baseUrl.protocol) || baseUrl.username || baseUrl.password) {
+    return null;
+  }
+
+  const recordUrl = new URL("/main.aspx", baseUrl.origin);
+  recordUrl.searchParams.set("pagetype", "entityrecord");
+  recordUrl.searchParams.set("etn", tableName);
+  recordUrl.searchParams.set("id", primaryId);
+  return recordUrl.toString();
 }
 
 function getPropertyValue(value: unknown, ...propertyNames: string[]): unknown {
@@ -1110,7 +1299,7 @@ function JobNode({ data }: NodeProps<Node<JobNodeData>>) {
   const TypeIcon = jobTypeIcon(jobType);
   const StatusIcon = meta.icon;
   const typeLabel = jobTypeInfo[jobType.toLowerCase()]?.label ?? "Step";
-  const rowProgress = inputRowProgress(job);
+  const rowProgress = data.progress;
   const stages = lineageStages(lineageSnapshots);
 
   return (
@@ -1185,18 +1374,19 @@ function JobNode({ data }: NodeProps<Node<JobNodeData>>) {
             <span>{number.format(job.succeededRows)} rows</span>
             <span
               className={rowProgress ? "job-node-progress-cell" : undefined}
-              title={`Input rows in completed batches${job.inputFinalized ? "" : "; expected total may grow"}`}
+              title={rowProgress?.title ?? `Input rows in completed batches${job.inputFinalized ? "" : "; expected total may grow"}`}
             >
               <span>
-                {number.format(job.inputRowsProcessed)} input rows
-                {job.expectedRows === null ? "" : ` / ${number.format(job.expectedRows)}`}
+                {rowProgress?.kind === "batches"
+                  ? `${data.inputRowsDisplay} input rows · ${number.format(job.succeededBatches + job.batchesWithErrors)} / ${number.format(rowProgress.max)} batches`
+                  : `${data.inputRowsDisplay} input rows`}
               </span>
               {rowProgress && (
                 <progress
                   className="job-row-progress"
                   max={rowProgress.max}
                   value={rowProgress.value}
-                  aria-label={`${job.name} input row progress${job.inputFinalized ? "" : "; expected total may grow"}`}
+                  aria-label={rowProgress.ariaLabel}
                 />
               )}
             </span>
@@ -1791,7 +1981,7 @@ export default function App() {
               ((sourceConnection || targetConnection)
                 ? 26 + (sourceConnection && targetConnection ? 13 : 0)
                 : 0) +
-              (inputRowProgress(job) ? 8 : 0) +
+              (stepProgress(job, jobs) ? 8 : 0) +
               (activityHint ? 28 : 0) +
               ((job.rowsPerSecondSamples?.length ?? 0) > 0 ? 42 : 0) +
               (specialistInfo.length > 0 ? 8 + specialistInfo.length * 18 : 0) +
@@ -1809,6 +1999,8 @@ export default function App() {
             position,
             data: {
               job,
+              progress: stepProgress(job, jobs),
+              inputRowsDisplay: inputRowsLabel(job, jobs),
               jobType: jobConfiguration?.type ?? "step",
               status: statusFor(job, jobs, configurationOnly),
               activityHint,
@@ -2349,14 +2541,12 @@ export default function App() {
                             })}
                           </div>
                         );
-                      const inputRows = job.expectedRows === null
-                        ? number.format(job.inputRowsProcessed)
-                        : `${number.format(job.inputRowsProcessed)} / ${number.format(job.expectedRows)}`;
+                      const inputRows = inputRowsLabel(job, jobs);
                       const inputWork = [
                         job.inputRowsInFlight > 0 ? `${number.format(job.inputRowsInFlight)} in progress` : "",
                         job.inputRowsPending > 0 ? `${number.format(job.inputRowsPending)} queued` : "",
                       ].filter(Boolean).join(" · ");
-                      const rowProgress = inputRowProgress(job);
+                      const rowProgress = stepProgress(job, jobs);
                       return (
                         <tr
                           key={job.name}
@@ -2415,14 +2605,19 @@ export default function App() {
                             <span>{number.format(job.succeededRows)}</span>
                             {job.failedRows > 0 && <small className="job-table-secondary">{number.format(job.failedRows)} failed</small>}
                           </td>
-                          <td title={`${inputRows} input rows${job.inputFinalized ? "" : " · expected total may grow"}${inputWork ? ` · ${inputWork}` : ""}`}>
+                          <td title={`${inputRows} input rows${rowProgress?.title ? ` · ${rowProgress.title}` : ""}${inputWork ? ` · ${inputWork}` : ""}`}>
                             <span>{inputRows}</span>
+                            {rowProgress?.kind === "batches" && (
+                              <small className="job-table-secondary">
+                                {number.format(job.succeededBatches + job.batchesWithErrors)} / {number.format(rowProgress.max)} batches materialized
+                              </small>
+                            )}
                             {rowProgress && (
                               <progress
                                 className="job-row-progress"
                                 max={rowProgress.max}
                                 value={rowProgress.value}
-                                aria-label={`${job.name} input row progress${job.inputFinalized ? "" : "; expected total may grow"}`}
+                                aria-label={rowProgress.ariaLabel}
                               />
                             )}
                             {inputWork && <small className="job-table-secondary">{inputWork}</small>}
@@ -2561,6 +2756,8 @@ export default function App() {
                           onLoadMore={loadMoreJobRows}
                           onSelectRow={selectSnapshot}
                           debugEnabled={viewRun.debugCaptureEnabled}
+                          configurationJobs={viewRun.configuration?.jobs ?? []}
+                          connectionInstances={viewRun.connectionInstances ?? []}
                           trace={trace}
                           selectedSnapshot={selectedSnapshot}
                           rowSearch={rowSearch}
@@ -2643,10 +2840,11 @@ function MigrationSummaryPanel({
   const targetRowsProcessed = targets.reduce((total, job) => total + job.inputRowsProcessed, 0);
   const targetRowsSucceeded = targets.reduce((total, job) => total + job.succeededRows, 0);
   const targetRowsFailed = targets.reduce((total, job) => total + job.failedRows, 0);
-  const targetRowsExpected = targets.length > 0 &&
-    targets.every((job) => job.inputFinalized && job.expectedRows !== null)
-    ? targets.reduce((total, job) => total + (job.expectedRows ?? 0), 0)
+  const targetRowProjections = targets.map((job) => projectedInputRows(job, jobs));
+  const targetRowsExpected = targets.length > 0 && targetRowProjections.every((projection) => projection !== null)
+    ? targetRowProjections.reduce((total, projection) => total + (projection?.expectedRows ?? 0), 0)
     : null;
+  const targetRowsExpectedIsEstimate = targetRowProjections.some((projection) => projection?.isEstimate);
   const targetProgress = targetRowsExpected === null
     ? null
     : targetRowsExpected === 0
@@ -2681,8 +2879,17 @@ function MigrationSummaryPanel({
           </div>
           <div className="summary-target-metric">
             <div className="summary-target-count">
-              <span>{targetRowsExpected === null ? "Target rows so far" : "Target rows"}</span>
-              <strong>{number.format(targetRowsExpected ?? targetRowsProcessed)}</strong>
+              <span>
+                {targetRowsExpected === null
+                  ? "Target rows so far"
+                  : targetRowsExpectedIsEstimate
+                    ? "Projected target rows"
+                    : "Target rows"}
+              </span>
+              <strong>
+                {targetRowsExpectedIsEstimate ? "~" : ""}
+                {number.format(targetRowsExpected ?? targetRowsProcessed)}
+              </strong>
             </div>
             <div className="summary-target-outcomes">
               <span>Succeeded <strong>{number.format(targetRowsSucceeded)}</strong></span>
@@ -2693,7 +2900,10 @@ function MigrationSummaryPanel({
                 className="summary-target-progress"
                 max={100}
                 value={targetProgress ?? undefined}
-                aria-label={`${Math.round(targetProgress ?? 0)}% of target rows processed`}
+                aria-label={`${Math.round(targetProgress ?? 0)}% of ${targetRowsExpectedIsEstimate ? "projected " : ""}target rows processed`}
+                title={targetRowsExpectedIsEstimate
+                  ? "Projected from expected source rows and observed input ratios."
+                  : "Target rows processed."}
               />
             )}
           </div>
@@ -3266,6 +3476,8 @@ function JobInspector({
   onLoadMore,
   onSelectRow,
   debugEnabled,
+  configurationJobs,
+  connectionInstances,
   trace,
   selectedSnapshot,
   rowSearch,
@@ -3288,6 +3500,8 @@ function JobInspector({
   onLoadMore: () => void;
   onSelectRow: (snapshot: DebugSnapshot) => void;
   debugEnabled: boolean;
+  configurationJobs: ConfigurationJob[];
+  connectionInstances: ConnectionInstanceSnapshot[];
   trace: DebugSnapshot[];
   selectedSnapshot: DebugSnapshot | null;
   rowSearch: string;
@@ -3320,6 +3534,9 @@ function JobInspector({
       snapshot.payloadJson.toLocaleLowerCase().includes(query);
   });
   const visibleTrace = filteredTrace.slice(0, visibleTraceCount);
+  const selectedRecordUrl = selectedSnapshot
+    ? modelDrivenRecordUrl(selectedSnapshot, configurationJobs, connectionInstances)
+    : null;
 
   return (
     <div className="row-browser">
@@ -3384,6 +3601,11 @@ function JobInspector({
         <section className="selected-row-panel">
           <Text variant="mediumPlus">Selected row · {friendlyStageName(selectedSnapshot.stageName)}</Text>
           <Text variant="small">Lineage {selectedSnapshot.lineageId} · captured {new Date(selectedSnapshot.capturedUtc).toLocaleString()}</Text>
+          {selectedRecordUrl && (
+            <a className="action-button" href={selectedRecordUrl} target="_blank" rel="noopener noreferrer">
+              Open in model-driven app
+            </a>
+          )}
           <pre className="configuration-json">{prettyJson(selectedSnapshot.payloadJson)}</pre>
         </section>
       )}

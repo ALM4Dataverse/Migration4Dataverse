@@ -1,6 +1,6 @@
 # Dataverse target
 
-The `dataverse` target upserts mapped records through `Set-DataverseRecord` from `Rnwood.Dataverse.Data.PowerShell`. There is no built-in Dataverse source connector.
+The `dataverse` target writes mapped records through `Rnwood.Dataverse.Data.PowerShell`. There is no built-in Dataverse source connector.
 
 ## Configuration
 
@@ -9,10 +9,10 @@ The `dataverse` target upserts mapped records through `Set-DataverseRecord` from
 | `Type` | Yes | `dataverse`. |
 | `ConnectionId` | Yes | Key in `-Connections` whose value is a connection supported by `Rnwood.Dataverse.Data.PowerShell`. |
 | `Table` | Yes | Dataverse logical table name. |
-| `Operation` | No | `Upsert`; no other operation is supported by this connector. |
+| `Operation` | No | `Upsert` (default), `Create`, `Update`, `Delete`, or `CreateOrUpdateIfNeeded`. |
 | `BatchSize` | No | Positive batch size or `auto` (default). Auto tuning is capped at the invocation batch size and the connector limit of 1,000. |
 | `MaxConcurrency` | No | Positive per-target cap or `auto` (default). Auto mode shares an adaptive concurrency budget across all Dataverse targets using the same connection and is capped by `Invoke-Migration -MaxDegreeOfParallelism`. |
-| `Options` | No | `MatchOn` selects alternate-key matching; `LookupColumns` maps scalar lookup values to referenced-table key fields. A Join can use a Target's `MatchOn` key group to retrieve the mapped record after it is written. |
+| `Options` | No | `MatchOn` selects matching key groups for update, create/update-if-needed, and delete operations; it also identifies target parent keys for Joins. Upsert uses the alternate-key values in the mapped record. `LookupColumns` maps lookup columns to the key field used to resolve scalar lookup values. |
 
 ## Example
 
@@ -31,6 +31,29 @@ Target = @{
 ```
 
 Upstream Transform steps produce target fields; the engine initializes each record's `Id` from the GUID-valued source field named by `Source.Id`, unless a Transform output explicitly supplies `Id`. For scalar lookups configured with `LookupColumns`, provide the foreign-key value; the connector resolves it using the referenced table's configured key field.
+
+`Upsert` with `Options.MatchOn` uses the module's keyed create/update path; it queries existing values and skips unchanged updates. Without `MatchOn`, it uses `Set-DataverseRecord -Upsert`. `Create` uses `Set-DataverseRecord -CreateOnly`; `Update` uses `-NoCreate`; `Delete` uses `Remove-DataverseRecord`. Delete inputs must include `Id` or configure `Options.MatchOn`. Create does not accept `MatchOn`.
+
+`CreateOrUpdateIfNeeded` uses `Set-DataverseRecord`'s create/update path. With `MatchOn`, the module queries existing values and skips updates when the mapped values are unchanged. This is useful for tables where a direct upsert is slower. It supports `MatchOn` and `LookupColumns`.
+
+Use `LookupColumns` to resolve scalar foreign keys without a separate migration Source/Join that rereads the parent table:
+
+```powershell
+Target = @{
+    Type = 'dataverse'
+    ConnectionId = 'crm'
+    Table = 'contact'
+    Operation = 'Upsert'
+    Options = @{
+        MatchOn = ,@('new_salesforceid')
+        LookupColumns = @{
+            parentcustomerid = 'new_salesforceid'
+        }
+    }
+}
+```
+
+The Transform output should set `parentcustomerid` to the source parent's `new_salesforceid` value. The Dataverse module uses the configured lookup key to resolve those scalar values. Direct references to known records can continue to use `{ TableName, Id }`.
 
 To make a written parent record available to a mapping Transform, add a Join before the Transform. The Join retains the child row under its `As` alias and exposes each matched parent under the relationship alias:
 
@@ -78,4 +101,4 @@ Batch size and concurrency default to `auto`; setting either to a positive integ
 
 When an auto-tuned value is available, it is persisted in the migration SQLite database and reused by later runs. Batch sizes are keyed by target step `Id`; shared concurrency profiles are versioned and tied to the connection ID, and are reused only when the auto-concurrency targets on that connection have compatible profiles. Current invocation limits cap reused values. Use `Clear-MigrationTargetTuning -DatabasePath ... -StepId ...` to clear one profile, or `-All` to clear every profile in the database. Each `Set-DataverseRecord` invocation uses internal parallelism one. The normal retry policy remains enabled and retries are visible in dashboard telemetry when connection logs expose them. For diagnosis only, `Invoke-Migration -DataverseNoRetryDiagnosticMode` disables Dataverse connection retries, cmdlet retries, and scheduler retries for the run; this can cause transient failures to fail immediately. The connection's retry and log-collection settings are restored when the run ends. The caller owns connection creation, authentication, lifetime, and disposal.
 
-When downstream Joins require parent records, target outputs (including final IDs) are staged in the migration database until the Join completes. A completion-gated Dataverse Source can instead reread a completed Target from Dataverse and provide the parent rows, avoiding streamed Target outputs at the cost of additional reads; the sequential Dataverse example demonstrates this option. Protect the database file accordingly. Upsert supports replaying a batch after uncertain completion, but review alternate-key and target-side behavior for the Dataverse table being migrated. This proof-of-concept does not implement create/update/delete operation selection or advanced Dataverse connector options.
+When downstream Joins require parent records, target outputs (including final IDs) are staged in the migration database until the Join completes. A completion-gated Dataverse Source can instead reread a completed Target from Dataverse and provide the parent rows, avoiding streamed Target outputs at the cost of additional reads. Protect the database file accordingly. Review alternate-key and target-side behavior for the Dataverse table being migrated. Custom APIs can be called from a custom Target callback using its supplied connection; SQL4CDS is also available from a Dataverse-connected Transform script through `Invoke-DataverseSql`.

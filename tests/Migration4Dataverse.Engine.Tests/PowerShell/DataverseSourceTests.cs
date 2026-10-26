@@ -11,6 +11,33 @@ namespace Migration4Dataverse.Engine.Tests.PowerShell;
 public sealed class DataverseSourceTests
 {
     [Fact]
+    public async Task DataverseSourceUsesCaseInsensitiveKeyOrdering()
+    {
+        using var first = JsonDocument.Parse("""{"sourceid":"00100xOCMPIhMa1F2z"}""");
+        using var second = JsonDocument.Parse("""{"sourceid":"00100ZowrNrESxAljL"}""");
+        var rows = new[] { first.RootElement.Clone(), second.RootElement.Clone() };
+        var level = new HierarchySourceLevel(
+            "AccountsLookup",
+            "dataverse",
+            path: null,
+            keyProperty: "sourceid",
+            parentKeyProperty: null,
+            rowsPerParent: 0,
+            expectedRecordCount: 2);
+        var source = new HierarchyBatchSource(
+            level,
+            batchSize: 1,
+            _ => new InMemoryRecordReader(rows));
+
+        var batches = await ReadAllAsync(
+            source.CreateReader()(
+                new MigrationStepCheckpoint("run", "AccountsLookup", -1, null, null),
+                CancellationToken.None));
+
+        Assert.Equal(2, batches.Count);
+    }
+
+    [Fact]
     public void DataverseSourceAddsModuleToRunspaceImports()
     {
         var step = PSObject.AsPSObject(new
@@ -176,7 +203,7 @@ public sealed class DataverseSourceTests
     [Theory]
     [InlineData("simple")]
     [InlineData("fetchxml")]
-    public async Task DataverseSourceCountsWithTotalRecordCount(string queryType)
+    public async Task DataverseSourceCountsWithRecordCount(string queryType)
     {
         using var directory = new TemporaryDirectory();
         var modulePath = directory.WriteDataverseModule();
@@ -236,6 +263,36 @@ public sealed class DataverseSourceTests
         return batches;
     }
 
+    private sealed class InMemoryRecordReader(JsonElement[] records) : IHierarchyRecordReader
+    {
+        private JsonElement? _lookahead;
+        private int _nextRecord;
+
+        public long RecordCount { get; private set; }
+
+        public ValueTask<JsonElement?> PeekAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_lookahead.HasValue && _nextRecord < records.Length)
+            {
+                _lookahead = records[_nextRecord];
+            }
+            return ValueTask.FromResult(_lookahead);
+        }
+
+        public JsonElement Take()
+        {
+            var record = _lookahead
+                ?? throw new InvalidOperationException("No record is available to take.");
+            _lookahead = null;
+            _nextRecord++;
+            RecordCount++;
+            return record;
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     private sealed class TemporaryDirectory : IDisposable
     {
         public TemporaryDirectory()
@@ -260,7 +317,7 @@ public sealed class DataverseSourceTests
                         [string]$TableName,
                         [string]$FetchXml,
                         [object]$Connection,
-                        [switch]$TotalRecordCount,
+                        [switch]$RecordCount,
                         [string[]]$OrderBy,
                         [hashtable[]]$FilterValues,
                         [int]$PageSize
@@ -286,7 +343,7 @@ public sealed class DataverseSourceTests
                         else { throw 'TableName was not passed.' }
                     }
 
-                    if ($TotalRecordCount) {
+                    if ($RecordCount) {
                         2
                         return
                     }

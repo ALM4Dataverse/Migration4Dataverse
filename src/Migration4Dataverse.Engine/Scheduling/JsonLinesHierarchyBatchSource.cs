@@ -147,7 +147,7 @@ public class HierarchyBatchSource
                 rootReader.Take();
                 var rootKey = GetRequiredKey(rootRow, _root.KeyProperty, _root.StepId);
                 if (previousRootKey is not null &&
-                    string.CompareOrdinal(previousRootKey, rootKey) >= 0)
+                    string.Compare(previousRootKey, rootKey, _root.KeyComparison) >= 0)
                 {
                     throw new InvalidDataException(
                         $"Root source for job '{_root.StepId}' must be strictly ordered by '{_root.KeyProperty}'.");
@@ -157,7 +157,7 @@ public class HierarchyBatchSource
                 var includeRecord = true;
                 if (!cursorFound)
                 {
-                    var comparison = string.CompareOrdinal(rootKey, cursor);
+                    var comparison = string.Compare(rootKey, cursor, _root.KeyComparison);
                     if (comparison < 0)
                     {
                         includeRecord = false;
@@ -308,7 +308,7 @@ public class HierarchyBatchSource
                         ?? throw new InvalidOperationException(
                             $"Dependent source '{childLevel.StepId}' has no parent-key property."),
                     childLevel.StepId);
-                var comparison = string.CompareOrdinal(childParentKey, parentKey);
+                var comparison = string.Compare(childParentKey, parentKey, childLevel.KeyComparison);
                 if (comparison < 0)
                 {
                     throw new InvalidDataException(
@@ -321,9 +321,9 @@ public class HierarchyBatchSource
                 }
                 var childKey = GetRequiredKey(childRow, childLevel.KeyProperty, childLevel.StepId);
                 if (previousChildOrder.TryGetValue(childLevel.StepId, out var previous) &&
-                    (string.CompareOrdinal(previous.ParentKey, childParentKey) > 0 ||
-                     (string.Equals(previous.ParentKey, childParentKey, StringComparison.Ordinal) &&
-                      string.CompareOrdinal(previous.Key, childKey) >= 0)))
+                    (string.Compare(previous.ParentKey, childParentKey, childLevel.KeyComparison) > 0 ||
+                     (string.Equals(previous.ParentKey, childParentKey, childLevel.KeyComparison) &&
+                      string.Compare(previous.Key, childKey, childLevel.KeyComparison) >= 0)))
                 {
                     throw new InvalidDataException(
                         $"Source '{childLevel.Path}' must be ordered by ascending " +

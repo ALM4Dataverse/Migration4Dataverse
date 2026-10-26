@@ -101,7 +101,7 @@ AccountsSource -> NormalizeAccounts -> Accounts
 | Target | Example | Setup | What it demonstrates |
 | --- | --- | --- | --- |
 | Dataverse | [`example.ps1`](./examples/dataverse/example.ps1) | [`Setup-Example.ps1`](./examples/dataverse/Setup-Example.ps1) | Imports the 257,375-row [Sample Sales CRM Data](https://www.kaggle.com/datasets/sushicatsan/sample-sales-crm-data) dataset using independent sources and streaming joins to written parent records. |
-| Dataverse (sequential) | [`example-sequential.ps1`](./examples/dataverse/example-sequential.ps1) | [`Setup-Example.ps1`](./examples/dataverse/Setup-Example.ps1) | Runs dependent jobs after their parent targets finish, then re-reads parent records from Dataverse for joins. |
+| Dataverse (sequential) | [`example-sequential.ps1`](./examples/dataverse/example-sequential.ps1) | [`Setup-Example.ps1`](./examples/dataverse/Setup-Example.ps1) | Runs dependent jobs after their parent targets finish; alternate-key lookup columns avoid parent rereads where possible. |
 | JSON Lines | [`example.ps1`](./examples/jsonl/example.ps1) | [`Setup-Example.ps1`](./examples/jsonl/Setup-Example.ps1) | Writes migration batches as JSONL files. |
 | CSV | [`example.ps1`](./examples/csv/example.ps1) | [`Setup-Example.ps1`](./examples/csv/Setup-Example.ps1) | Defines step-keyed CSV columns and output options inline with the target connector. |
 | Parquet | [`example.ps1`](./examples/parquet/example.ps1) | [`Setup-Example.ps1`](./examples/parquet/Setup-Example.ps1) | Defines a step-keyed Parquet schema and output options inline with the target connector. |
@@ -129,7 +129,7 @@ pwsh ./examples/dataverse/example.ps1
 pwsh ./examples/dataverse/example-sequential.ps1
 ```
 
-`example-sequential.ps1` uses the same setup and connection profile, but records its run in `generated-data/migration-sequential.sqlite3`. `DependsOn` completion barriers keep each dependent source from starting until its parent target has finished; the join inputs re-read the completed parent records from Dataverse rather than consuming target output rows. Independent root jobs can still run concurrently. Set `$env:M4D_SEQUENTIAL_RUN_ID` to resume one of these sequential runs.
+`example-sequential.ps1` uses the same setup and connection profile, but records its run in `generated-data/migration-sequential.sqlite3`. `DependsOn` completion barriers keep dependent sources behind their parent targets. Contacts, opportunities, orders, and order items resolve lookup values through alternate keys without rereading those parent rows; activities still reread their polymorphic regarding records. Independent root jobs can still run concurrently. Opportunities use `CreateOrUpdateIfNeeded`, which skips unchanged records. Set `$env:M4D_SEQUENTIAL_RUN_ID` to resume one of these sequential runs.
 
 To resume an interrupted Dataverse run, set `$env:M4D_RUN_ID` to that run's stored ID before running `example.ps1`; this reuses the existing checkpoints and migration database.
 

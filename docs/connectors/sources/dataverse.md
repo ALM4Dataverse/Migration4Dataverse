@@ -28,11 +28,11 @@ Source = @{
 
 `Key` is a non-empty string property used for deterministic ordering and resume checkpoints. Prefer a unique, immutable text key; keep the GUID primary key separately in `Id`. `Id` names the source property converted to the target record GUID. The query must return both properties. Dataverse records are streamed with bounded buffering; on resume, the query is rerun and rows through the last completed key are skipped. Keep the query stable between runs.
 
-The source key must be a non-empty string in every output record. For a root source, keys must be unique and strictly increasing using ordinal comparison. Row-linked child records are staged and ordered by the engine; child keys must be unique within each non-null parent relationship.
+The source key must be a non-empty string in every output record. For a root source, keys must be unique and strictly increasing using case-insensitive ordinal comparison, matching Dataverse ordering. Row-linked child records are staged and ordered by the engine; child keys must be unique within each non-null parent relationship.
 
 The Simple query automatically requests ascending order by `Key` when `OrderBy` is omitted. If `OrderBy` is supplied, keep `Key` first and ascending so paged reads are stable; further sort fields may follow. FetchXML and SQL queries should explicitly order by `Key` ascending for stable paging. Row-linked child rows may arrive in any parent-key order because the engine stages them before release. The engine does not rewrite or parse those query languages.
 
-`Path` is not used and must be omitted. Dataverse connector settings belong in `Source.Options`. Unless a positive `ExpectedRecordCount` is configured, Simple and FetchXML sources request the matching count from `Get-DataverseRecord -TotalRecordCount` before row streaming; Cds4Sql sources do not have an automatic count provider. The count is checked against the returned rows. A positive `ExpectedRecordCount` takes precedence and skips the count request.
+`Path` is not used and must be omitted. Dataverse connector settings belong in `Source.Options`. Unless a positive `ExpectedRecordCount` is configured, Simple and FetchXML sources request the matching count from `Get-DataverseRecord -RecordCount` before row streaming; Cds4Sql sources do not have an automatic count provider. The count is checked against the returned rows. A positive `ExpectedRecordCount` takes precedence and skips the count request.
 
 ## Simple query
 

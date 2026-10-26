@@ -112,7 +112,8 @@ internal static partial class PowerShellMigrationStepFactory
                 }
             }
             'transform' {
-                $hasDatabaseTransform = -not [string]::IsNullOrWhiteSpace($context.TransformType)
+                $hasDatabaseTransform = $context.TransformType -in @('sqlite', 'duckdb')
+                $hasConnectedTransform = $hasDatabaseTransform -or $context.TransformType -eq 'dataverse'
                 $transformConnectionLease = $null
                 $openedTransformConnection = $false
                 if ($hasDatabaseTransform -and [string]::IsNullOrWhiteSpace($context.TransformSql)) {
@@ -151,7 +152,7 @@ internal static partial class PowerShellMigrationStepFactory
                         $script = [scriptblock]::Create($context.ScriptText)
                         for ($index = 0; $index -lt $inputRecords.Count; $index++) {
                             try {
-                                $values = if ($hasDatabaseTransform) {
+                                $values = if ($hasConnectedTransform) {
                                     @(& $script $inputRecords[$index] $transformConnection)
                                 }
                                 else {
@@ -293,17 +294,27 @@ internal static partial class PowerShellMigrationStepFactory
                             InitialRetryDelay = 2
                             ErrorAction = 'Stop'
                         }
-                        if ($targetOptions.Contains('MatchOn')) {
-                            $targetParameters.MatchOn = [string[][]]$targetOptions.MatchOn
+                        $targetOperation = $context.TargetOperation
+                        if ($targetOperation -eq 'Create') {
+                            $targetParameters.CreateOnly = $true
                         }
-                        else {
+                        elseif ($targetOperation -eq 'Update') {
+                            $targetParameters.NoCreate = $true
+                        }
+                        if ($targetOperation -eq 'Upsert' -and -not $targetOptions.Contains('MatchOn')) {
                             $targetParameters.Upsert = $true
+                        }
+                        elseif ($targetOptions.Contains('MatchOn') -and $targetOperation -notin @('Create', 'Delete')) {
+                            $targetParameters.MatchOn = [string[][]]$targetOptions.MatchOn
                         }
                         if ($targetOptions.Contains('LookupColumns')) {
                             $targetParameters.LookupColumns = $targetOptions.LookupColumns
                         }
                         $records = [object[]][Migration4Dataverse.Engine.PowerShell.DataverseLookupReferenceResolver]::Resolve($records)
 
+                        if ($targetOperation -eq 'Delete' -and $context.JoinInputConsumers.Count -gt 0) {
+                            throw "Dataverse Delete target step '$($context.StepId)' cannot provide parent records to Join steps."
+                        }
                         if ($context.JoinInputConsumers.Count -gt 0) {
                             if ($null -eq $context.Store) {
                                 throw "Target step '$($context.StepId)' must have a migration store to stage Join input records."
@@ -339,6 +350,26 @@ internal static partial class PowerShellMigrationStepFactory
                                 $recordFields.Id = $recordId
                                 $targetOutputRecords.Add([pscustomobject]$recordFields)
                             }
+                        }
+                        elseif ($targetOperation -eq 'Delete') {
+                            $deleteParameters = @{
+                                TableName = $context.TableName
+                                Connection = $targetConnection
+                                BatchSize = if ($null -ne $targetTuningLease) {
+                                    $targetTuningLease.BatchSize
+                                }
+                                else {
+                                    $context.BatchSize
+                                }
+                                MaxDegreeOfParallelism = 1
+                                Retries = if ($context.DisableDataverseRetriesForDiagnostics) { 0 } else { 5 }
+                                InitialRetryDelay = 2
+                                ErrorAction = 'Stop'
+                            }
+                            if ($targetOptions.Contains('MatchOn')) {
+                                $deleteParameters.MatchOn = [string[][]]$targetOptions.MatchOn
+                            }
+                            $null = $records | Remove-DataverseRecord @deleteParameters
                         }
                         else {
                             $null = $records | Set-DataverseRecord @targetParameters

@@ -28,18 +28,27 @@ internal static partial class PowerShellMigrationStepFactory
             var target = type == "target"
                 ? GetMap(GetProperty(step, "Target"), $"Target for step '{GetString(step, "Id", true)}")!
                 : null;
+            var transform = type == "transform"
+                ? GetMap(GetProperty(step, "Transform"), $"Transform for step '{GetString(step, "Id", true)}", required: false)
+                : null;
             var connector = source ?? target;
-            if (connector is null)
+            if (connector is not null)
             {
-                continue;
+                var connectorType = GetRequiredString(connector, "Type").ToLowerInvariant();
+                if (connectorType == "dataverse")
+                {
+                    modules.Add("Rnwood.Dataverse.Data.PowerShell");
+                }
+                AddCustomModules(modules, connector, "Custom");
             }
-
-            var connectorType = GetRequiredString(connector, "Type").ToLowerInvariant();
-            if (connectorType == "dataverse")
+            if (transform is not null &&
+                string.Equals(
+                    GetString(transform, "Type", required: false),
+                    "dataverse",
+                    StringComparison.OrdinalIgnoreCase))
             {
                 modules.Add("Rnwood.Dataverse.Data.PowerShell");
             }
-            AddCustomModules(modules, connector, "Custom");
         }
         return modules;
     }
@@ -287,6 +296,7 @@ internal static partial class PowerShellMigrationStepFactory
                     ["IdProperty"] = input.IdProperty,
                     ["ScriptText"] = input.ScriptText ?? string.Empty,
                     ["TargetType"] = input.TargetType ?? string.Empty,
+                    ["TargetOperation"] = input.TargetOperation ?? string.Empty,
                     ["TableName"] = input.TableName ?? string.Empty,
                     ["TargetConnectionId"] = input.TargetConnectionId ?? string.Empty,
                     ["TargetPath"] = input.TargetPath ?? string.Empty,
@@ -585,6 +595,7 @@ internal static partial class PowerShellMigrationStepFactory
         }
 
         string? targetType = null;
+        string? targetOperation = null;
         string? tableName = null;
         string? targetPath = null;
         string? targetOptionsJson = null;
@@ -661,10 +672,41 @@ internal static partial class PowerShellMigrationStepFactory
                 throw new ArgumentException($"Database target step '{id}' requires a Table.");
             }
             var operation = GetString(target, "Operation", required: false);
-            var expectedOperation = targetType == "dataverse" ? "Upsert" : "Write";
-            if (operation is not null && !string.Equals(operation, expectedOperation, StringComparison.OrdinalIgnoreCase))
+            targetOperation = targetType == "dataverse"
+                ? operation ?? "Upsert"
+                : operation ?? "Write";
+            var supportedDataverseOperations = new[]
             {
-                throw new ArgumentException($"Target operation for step '{id}' must be '{expectedOperation}'.");
+                "Upsert",
+                "Create",
+                "Update",
+                "Delete",
+                "CreateOrUpdateIfNeeded"
+            };
+            if (targetType == "dataverse" &&
+                !supportedDataverseOperations.Contains(targetOperation, StringComparer.OrdinalIgnoreCase))
+            {
+                throw new ArgumentException(
+                    $"Dataverse target operation for step '{id}' must be one of: {string.Join(", ", supportedDataverseOperations)}.");
+            }
+            if (targetType != "dataverse" &&
+                !string.Equals(targetOperation, "Write", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ArgumentException($"Target operation for step '{id}' must be 'Write'.");
+            }
+            if (targetType == "dataverse")
+            {
+                targetOperation = supportedDataverseOperations.Single(
+                    supportedOperation => string.Equals(
+                        supportedOperation,
+                        targetOperation,
+                        StringComparison.OrdinalIgnoreCase));
+                if (targetOperation == "Create" &&
+                    GetProperty(targetOptions, "MatchOn") is not null)
+                {
+                    throw new ArgumentException(
+                        $"Dataverse target operation '{targetOperation}' for step '{id}' cannot configure Options.MatchOn.");
+                }
             }
             if (targetType == "dataverse")
             {
@@ -709,28 +751,39 @@ internal static partial class PowerShellMigrationStepFactory
             if (transform is not null)
             {
                 transformType = GetRequiredString(transform, "Type").ToLowerInvariant();
-                if (transformType is not ("sqlite" or "duckdb"))
+                if (transformType is not ("sqlite" or "duckdb" or "dataverse"))
                 {
                     throw new ArgumentException(
                         $"Transform connector type '{transformType}' for step '{id}' is not supported.");
                 }
                 var mode = GetString(transform, "Mode", required: false);
-                if (mode is not null && !string.Equals(mode, "per_row", StringComparison.OrdinalIgnoreCase))
+                if (transformType != "dataverse" &&
+                    mode is not null &&
+                    !string.Equals(mode, "per_row", StringComparison.OrdinalIgnoreCase))
                 {
                     throw new NotSupportedException(
                         $"Database transform mode '{mode}' for step '{id}' is not yet supported; use 'per_row'.");
                 }
                 transformConnectionId = GetRequiredString(transform, "ConnectionId");
                 transformConnection = ResolveConnection(connections, transformConnectionId, id, "transform");
-                if (transformConnection is not DbConnection databaseConnection)
+                if (transformType == "dataverse" && transformConnection is null)
+                {
+                    throw new ArgumentException(
+                        $"Dataverse transform step '{id}' requires a non-null connection in -Connections.");
+                }
+                if (transformType is "sqlite" or "duckdb" &&
+                    transformConnection is not DbConnection)
                 {
                     throw new ArgumentException(
                         $"Database transform step '{id}' requires a DbConnection in -Connections.");
                 }
-                DatabaseConnectorSupport.ValidateConnection(
-                    transformType,
-                    databaseConnection,
-                    $"transform '{id}'");
+                if (transformType is "sqlite" or "duckdb")
+                {
+                    DatabaseConnectorSupport.ValidateConnection(
+                        transformType,
+                        (DbConnection)transformConnection!,
+                        $"transform '{id}'");
+                }
                 transformSql = GetString(transform, "Sql", required: false);
                 var transformParameters = GetProperty(transform, "Parameters");
                 if (transformSql is null && transformParameters is not null)
@@ -746,6 +799,12 @@ internal static partial class PowerShellMigrationStepFactory
                         $"DuckDB Transform.Parameters for step '{id}' must be an ordered hashtable.");
                 }
                 transformParametersJson = SerializeJson(transformParameters);
+                if (transformType == "dataverse" &&
+                    (transformSql is not null || transformParameters is not null))
+                {
+                    throw new ArgumentException(
+                        $"Dataverse transform step '{id}' supports PowerShell Script only; Transform.Sql and Transform.Parameters are not supported.");
+                }
                 if (transformSql is not null)
                 {
                     if (transformType != "duckdb")
@@ -825,6 +884,7 @@ internal static partial class PowerShellMigrationStepFactory
             dataverseSourceOptions,
             dataverseQueryType,
             targetType,
+            targetOperation,
             tableName,
             targetPath,
             targetOptionsJson,
@@ -1457,6 +1517,7 @@ internal static partial class PowerShellMigrationStepFactory
         IDictionary? DataverseSourceOptions,
         string? DataverseQueryType,
         string? TargetType,
+        string? TargetOperation,
         string? TableName,
         string? TargetPath,
         string? TargetOptionsJson,

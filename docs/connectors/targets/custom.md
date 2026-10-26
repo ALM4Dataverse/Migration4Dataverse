@@ -1,6 +1,6 @@
 # Custom PowerShell target
 
-The `custom` target calls a PowerShell callback once per mapped batch. The caller supplies any non-null runtime connection object; the callback is responsible for target-side replay safety.
+The `custom` target calls a PowerShell callback once per mapped batch. The caller supplies any non-null runtime connection object; the callback is responsible for target-side replay safety. For Dataverse custom APIs or operations not covered by the built-in target, use a Dataverse connection and invoke the required module/SDK operation in this callback.
 
 ## Configuration and callback example
 

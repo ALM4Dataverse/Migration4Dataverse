@@ -86,7 +86,7 @@ public sealed class PowerShellDataverseHierarchyRecordReader : IHierarchyRecordR
                     'LookupValuesReturnName', 'IncludeSystemColumns',
                     'IncludeFileAndImageMetadataColumns', 'Unpublished'
                 )
-                if ($CountOnly) { $parameters['TotalRecordCount'] = $true }
+                if ($CountOnly) { $parameters['RecordCount'] = $true }
                 Get-DataverseRecord @parameters | Write-QueryRecords
             }
             'fetchxml' {
@@ -98,7 +98,7 @@ public sealed class PowerShellDataverseHierarchyRecordReader : IHierarchyRecordR
                 Add-QueryOptions -Parameters $parameters -Names @(
                     'VerboseRecordCount', 'RecordCount', 'LookupValuesReturnName', 'Unpublished'
                 )
-                if ($CountOnly) { $parameters['TotalRecordCount'] = $true }
+                if ($CountOnly) { $parameters['RecordCount'] = $true }
                 Get-DataverseRecord @parameters | Write-QueryRecords
             }
             'cds4sql' {
@@ -194,14 +194,14 @@ public sealed class PowerShellDataverseHierarchyRecordReader : IHierarchyRecordR
             if (output.Count != 1)
             {
                 throw new InvalidDataException(
-                    $"Dataverse source '{stepId}' TotalRecordCount returned {output.Count} count values; expected exactly one.");
+                    $"Dataverse source '{stepId}' RecordCount returned {output.Count} count values; expected exactly one.");
             }
 
             var countValue = output[0].BaseObject;
             if (countValue is not (byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal))
             {
                 throw new InvalidDataException(
-                    $"Dataverse source '{stepId}' TotalRecordCount must return a non-negative integer.");
+                    $"Dataverse source '{stepId}' RecordCount must return a non-negative integer.");
             }
 
             decimal count;
@@ -213,14 +213,14 @@ public sealed class PowerShellDataverseHierarchyRecordReader : IHierarchyRecordR
                 exception is InvalidCastException or FormatException or OverflowException)
             {
                 throw new InvalidDataException(
-                    $"Dataverse source '{stepId}' TotalRecordCount must return a non-negative integer.",
+                    $"Dataverse source '{stepId}' RecordCount must return a non-negative integer.",
                     exception);
             }
 
             if (count < 0 || decimal.Truncate(count) != count || count > long.MaxValue)
             {
                 throw new InvalidDataException(
-                    $"Dataverse source '{stepId}' TotalRecordCount must return a non-negative integer.");
+                    $"Dataverse source '{stepId}' RecordCount must return a non-negative integer.");
             }
 
             return (long)count;

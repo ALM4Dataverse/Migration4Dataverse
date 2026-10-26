@@ -24,7 +24,7 @@ Transform is a standalone node; it is not an optional property on another step. 
 
 ## Database-backed migration graph transforms
 
-The separate `Invoke-Migration` graph also supports per-row database transforms. A SQLite Transform's inline `Script` receives both the current row and its named database connection:
+The separate `Invoke-Migration` graph also supports per-row connected transforms. A SQLite Transform's inline `Script` receives both the current row and its named database connection:
 
 ```powershell
 @{
@@ -51,4 +51,6 @@ The separate `Invoke-Migration` graph also supports per-row database transforms.
 
 DuckDB transforms can use the same connection-aware PowerShell `Script` contract, or configure `Transform.Sql` with an ordered `Transform.Parameters` hashtable to execute a prepared statement once per input row. DuckDB statements use positional `?` placeholders; parameter values bind to row fields in hashtable order. Statements returning rows emit those rows; side-effect statements with no result set pass through their input row.
 
-Database transforms currently run per row; whole-dataset and per-batch transform scopes are deferred. The connector requirements and full option tables are in [migration step configuration](../configuration.md#transform-and-filter-semantics).
+A Dataverse Transform uses `Transform = @{ Type = 'dataverse'; ConnectionId = 'crm' }`. Its `Script` receives `($row, $connection)` and can invoke `Invoke-DataverseSql -Connection $connection -Sql ... -Parameters ...` for SQL4CDS queries or updates. SQL4CDS is executed by the module; the Transform script determines which values are emitted downstream.
+
+Connected transforms currently run per row; whole-dataset and per-batch transform scopes are deferred. The connector requirements and full option tables are in [migration step configuration](../configuration.md#transform-and-filter-semantics).

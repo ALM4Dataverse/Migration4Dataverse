@@ -210,26 +210,6 @@ $steps = @(
             }
         }
     }
-    @{
-        # Re-reads completed lead records for joins after the lead target has finished.
-        Id = 'LeadsLookupSource'
-        Type = 'source'
-        Inputs = @()
-        DependsOn = @('LeadsTarget')
-        Source = @{
-            Type = 'dataverse'
-            ConnectionId = 'example-dataverse'
-            Key = 'new_salesforceid'
-            Id = 'leadid'
-            Options = @{
-                QueryType = 'Simple'
-                TableName = 'lead'
-                Columns = @('new_salesforceid', 'leadid')
-                FilterValues = @(@{ new_salesforceid = @{ operator = 'NotNull' } })
-                PageSize = 500
-            }
-        }
-    }
 )
 
 $steps += @(
@@ -248,49 +228,24 @@ $steps += @(
         }
     }
     @{
-        # Joins contacts to the completed account records while retaining contacts without an account key.
-        Id = 'JoinContacts'
-        Type = 'join'
-        Inputs = @(
-            @{ Job = 'ContactsSource'; As = 'Contact' }
-            @{
-                Job = 'AccountsLookupSource'
-                As = 'Account'
-                Keys = @(@{ Child = 'account_id'; Parent = 'new_salesforceid' })
-            }
-        )
-        JoinType = 'left'
-    }
-    @{
-        # Maps contact fields and attaches a Dataverse account reference when matched.
+        # Maps source account IDs directly to the account alternate key lookup.
         Id = 'MapContacts'
         Type = 'transform'
-        Inputs = @('JoinContacts')
+        Inputs = @('ContactsSource')
         Script = {
             param($row)
-            $sourceId = [string]$row.Contact.id
-            $accountId = [string]$row.Contact.account_id
-            $fields = [ordered]@{
-                new_salesforceid = $sourceId
-                new_sourceownerid = [string]$row.Contact.owner_id
-                new_sourcerowjson = ConvertTo-Json -InputObject $row.Contact -Depth 8 -Compress
-                firstname = [string]$row.Contact.first_name
-                lastname = [string]$row.Contact.last_name
-                emailaddress1 = [string]$row.Contact.email
-                telephone1 = [string]$row.Contact.phone
-                jobtitle = [string]$row.Contact.title
-                department = [string]$row.Contact.department
+            @{
+                new_salesforceid = [string]$row.id
+                new_sourceownerid = [string]$row.owner_id
+                new_sourcerowjson = ConvertTo-Json -InputObject $row -Depth 8 -Compress
+                firstname = [string]$row.first_name
+                lastname = [string]$row.last_name
+                emailaddress1 = [string]$row.email
+                telephone1 = [string]$row.phone
+                jobtitle = [string]$row.title
+                department = [string]$row.department
+                parentcustomerid = [string]$row.account_id
             }
-            if (-not [string]::IsNullOrWhiteSpace($accountId)) {
-                if ($null -eq $row.Account) {
-                    throw "Contact '$sourceId' references an account that was not matched by JoinContacts."
-                }
-                $fields.parentcustomerid = @{
-                    TableName = 'account'
-                    Id = [string]$row.Account.Id
-                }
-            }
-            $fields
         }
     }
     @{
@@ -307,6 +262,9 @@ $steps += @(
             BatchSize = 'auto'
             Options = @{
                 MatchOn = ,@('new_salesforceid')
+                LookupColumns = @{
+                    parentcustomerid = 'new_salesforceid'
+                }
             }
         }
     }
@@ -325,46 +283,16 @@ $steps += @(
         }
     }
     @{
-        # Resolves each opportunity's account while preserving unmatched opportunities.
-        Id = 'JoinOpportunityAccounts'
-        Type = 'join'
-        Inputs = @(
-            @{ Job = 'OpportunitiesSource'; As = 'Opportunity' }
-            @{
-                Job = 'AccountsLookupSource'
-                As = 'Account'
-                Keys = @(@{ Child = 'account_id'; Parent = 'new_salesforceid' })
-            }
-        )
-        JoinType = 'left'
-    }
-    @{
-        # Adds the opportunity's lead lookup to the already joined account data.
-        Id = 'JoinOpportunities'
-        Type = 'join'
-        Inputs = @(
-            @{ Job = 'JoinOpportunityAccounts'; As = 'OpportunityAccount' }
-            @{
-                Job = 'LeadsLookupSource'
-                As = 'Lead'
-                Keys = @(@{ Child = 'Opportunity.lead_source_id'; Parent = 'new_salesforceid' })
-            }
-        )
-        JoinType = 'left'
-    }
-    @{
-        # Maps opportunity fields and creates account and lead references when present.
+        # Maps account and lead source IDs directly to their alternate-key lookups.
         Id = 'MapOpportunities'
         Type = 'transform'
-        Inputs = @('JoinOpportunities')
+        Inputs = @('OpportunitiesSource')
         Script = {
             param($row)
-            $opportunity = $row.OpportunityAccount.Opportunity
-            $account = $row.OpportunityAccount.Account
-            $sourceId = [string]$opportunity.id
+            $opportunity = $row
             $accountId = [string]$opportunity.account_id
             $fields = [ordered]@{
-                new_salesforceid = $sourceId
+                new_salesforceid = [string]$opportunity.id
                 new_sourceownerid = [string]$opportunity.owner_id
                 new_sourcerowjson = ConvertTo-Json -InputObject $opportunity -Depth 8 -Compress
                 name = [string]$opportunity.name
@@ -373,29 +301,17 @@ $steps += @(
                 estimatedclosedate = [datetime]::ParseExact([string]$opportunity.close_date, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
             }
             if (-not [string]::IsNullOrWhiteSpace($accountId)) {
-                if ($null -eq $account) {
-                    throw "Opportunity '$sourceId' references an account that was not matched by JoinOpportunities."
-                }
-                $fields.accountid = @{
-                    TableName = 'account'
-                    Id = [string]$account.Id
-                }
+                $fields.accountid = $accountId
             }
             $leadId = [string]$opportunity.lead_source_id
             if (-not [string]::IsNullOrWhiteSpace($leadId)) {
-                if ($null -eq $row.Lead) {
-                    throw "Opportunity '$sourceId' references a lead that was not matched by JoinOpportunities."
-                }
-                $fields.originatingleadid = @{
-                    TableName = 'lead'
-                    Id = [string]$row.Lead.Id
-                }
+                $fields.originatingleadid = $leadId
             }
             $fields
         }
     }
     @{
-        # Completes the opportunity job before dependent jobs re-read its records.
+        # Uses comparison-based writes for the slower opportunity table.
         Id = 'OpportunitiesTarget'
         Type = 'target'
         Inputs = @('MapOpportunities')
@@ -404,10 +320,14 @@ $steps += @(
             ConnectionId = 'example-dataverse'
             MaxConcurrency = 'auto'
             Table = 'opportunity'
-            Operation = 'Upsert'
+            Operation = 'CreateOrUpdateIfNeeded'
             BatchSize = 'auto'
             Options = @{
                 MatchOn = ,@('new_salesforceid')
+                LookupColumns = @{
+                    accountid = 'new_salesforceid'
+                    originatingleadid = 'new_salesforceid'
+                }
             }
         }
     }
@@ -449,66 +369,28 @@ $steps += @(
         }
     }
     @{
-        # Resolves each order's account while preserving rows with no account match.
-        Id = 'JoinOrderAccounts'
-        Type = 'join'
-        Inputs = @(
-            @{ Job = 'OrdersSource'; As = 'Order' }
-            @{
-                Job = 'AccountsLookupSource'
-                As = 'Account'
-                Keys = @(@{ Child = 'account_id'; Parent = 'new_salesforceid' })
-            }
-        )
-        JoinType = 'left'
-    }
-    @{
-        # Adds the order's opportunity lookup to the joined account data.
-        Id = 'JoinOrders'
-        Type = 'join'
-        Inputs = @(
-            @{ Job = 'JoinOrderAccounts'; As = 'OrderAccount' }
-            @{
-                Job = 'OpportunitiesLookupSource'
-                As = 'Opportunity'
-                Keys = @(@{ Child = 'Order.opportunity_id'; Parent = 'new_salesforceid' })
-            }
-        )
-        JoinType = 'left'
-    }
-    @{
-        # Maps order fields and creates references to the matched account and opportunity.
+        # Maps account and opportunity source IDs directly to alternate-key lookups.
         Id = 'MapOrders'
         Type = 'transform'
-        Inputs = @('JoinOrders')
+        Inputs = @('OrdersSource')
         Script = {
             param($row)
-            $order = $row.OrderAccount.Order
-            $account = $row.OrderAccount.Account
+            $order = $row
             $sourceId = [string]$order.id
             $accountId = [string]$order.account_id
             if ([string]::IsNullOrWhiteSpace($accountId)) {
                 throw "Salesforce order '$sourceId' has no account_id and cannot be mapped to a Dataverse order."
-            }
-            if ($null -eq $account) {
-                throw "Salesforce order '$sourceId' references an account that was not matched by JoinOrders."
             }
             $orderFields = [ordered]@{
                 new_salesforceid = $sourceId
                 new_sourceownerid = [string]$order.owner_id
                 new_sourcerowjson = ConvertTo-Json -InputObject $order -Depth 8 -Compress
                 name = [string]$order.order_number
-                customerid = @{
-                    TableName = 'account'
-                    Id = [string]$account.Id
-                }
+                customerid = $accountId
             }
             $opportunityId = [string]$order.opportunity_id
-            if ($null -ne $row.Opportunity) {
-                $orderFields.opportunityid = @{
-                    TableName = 'opportunity'
-                    Id = [string]$row.Opportunity.Id
-                }
+            if (-not [string]::IsNullOrWhiteSpace($opportunityId)) {
+                $orderFields.opportunityid = $opportunityId
             }
             # The configured Dataverse organization has one active price list.
             $priceListId = [guid]::Parse('65029c08-f01f-eb11-a812-000d3a33e825')
@@ -533,26 +415,10 @@ $steps += @(
             BatchSize = 'auto'
             Options = @{
                 MatchOn = ,@('new_salesforceid')
-            }
-        }
-    }
-    @{
-        # Re-reads completed orders for the order-item join after the target has finished.
-        Id = 'OrdersLookupSource'
-        Type = 'source'
-        Inputs = @()
-        DependsOn = @('OrdersTarget')
-        Source = @{
-            Type = 'dataverse'
-            ConnectionId = 'example-dataverse'
-            Key = 'new_salesforceid'
-            Id = 'salesorderid'
-            Options = @{
-                QueryType = 'Simple'
-                TableName = 'salesorder'
-                Columns = @('new_salesforceid', 'salesorderid')
-                FilterValues = @(@{ new_salesforceid = @{ operator = 'NotNull' } })
-                PageSize = 500
+                LookupColumns = @{
+                    customerid = 'new_salesforceid'
+                    opportunityid = 'new_salesforceid'
+                }
             }
         }
     }
@@ -574,38 +440,21 @@ $steps += @(
         }
     }
     @{
-        # Keeps only order items whose parent order was successfully written.
-        Id = 'JoinOrderItems'
-        Type = 'join'
-        Inputs = @(
-            @{ Job = 'OrderItemsSource'; As = 'OrderItem' }
-            @{
-                Job = 'OrdersLookupSource'
-                As = 'Order'
-                Keys = @(@{ Child = 'order_id'; Parent = 'new_salesforceid' })
-            }
-        )
-        JoinType = 'inner'
-    }
-    @{
-        # Maps each order item and adds the matched Dataverse sales-order reference.
+        # Maps the order source ID directly to the sales-order alternate-key lookup.
         Id = 'MapOrderItems'
         Type = 'transform'
-        Inputs = @('JoinOrderItems')
+        Inputs = @('OrderItemsSource')
         Script = {
             param($row)
-            $sourceId = [string]$row.OrderItem.id
+            $sourceId = [string]$row.id
             @{
                 new_salesforceid = $sourceId
-                new_sourcerowjson = ConvertTo-Json -InputObject $row.OrderItem -Depth 8 -Compress
-                salesorderid = @{
-                    TableName = 'salesorder'
-                    Id = [string]$row.Order.Id
-                }
+                new_sourcerowjson = ConvertTo-Json -InputObject $row -Depth 8 -Compress
+                salesorderid = [string]$row.order_id
                 isproductoverridden = $true
-                productdescription = [string]$row.OrderItem.product_name
-                quantity = [decimal]$row.OrderItem.quantity
-                priceperunit = [decimal]$row.OrderItem.unit_price
+                productdescription = [string]$row.product_name
+                quantity = [decimal]$row.quantity
+                priceperunit = [decimal]$row.unit_price
             }
         }
     }
@@ -623,6 +472,9 @@ $steps += @(
             BatchSize = 'auto'
             Options = @{
                 MatchOn = ,@('new_salesforceid')
+                LookupColumns = @{
+                    salesorderid = 'new_salesforceid'
+                }
             }
         }
     }

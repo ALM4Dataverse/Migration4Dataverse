@@ -76,6 +76,9 @@ public sealed class HierarchySourceLevel
 
     public string KeyProperty { get; }
 
+    public StringComparison KeyComparison =>
+        Type == "dataverse" ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
     public string? ParentKeyProperty { get; }
 
     public int RowsPerParent { get; }

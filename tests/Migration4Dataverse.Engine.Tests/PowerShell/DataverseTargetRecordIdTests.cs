@@ -435,6 +435,7 @@ public sealed class DataverseTargetParentRecordTests
                         [int] $InitialRetryDelay,
                         [string[][]] $MatchOn,
                         [hashtable] $LookupColumns,
+                        [switch] $Upsert,
                         [switch] $PassThru
                     )
                     process {
