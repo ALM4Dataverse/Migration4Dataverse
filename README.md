@@ -41,7 +41,16 @@ The setup script prepares the sample input; the example reads it, transforms eac
 
 ## Define a migration
 
-Steps are ordinary PowerShell hashtables. This abbreviated graph reads a CSV file, maps its rows, and upserts them to Dataverse:
+Think of a migration as rows moving from a source, through optional processing, to a target:
+
+| Part | In simple terms |
+|---|---|
+| **Source** | Reads rows from somewhere, such as a file, database, or Dataverse. |
+| **Transform** | Changes the values or shape of a row, for example renaming fields or converting a date. |
+| **Filter** | Decides whether a row should continue. Rows that pass keep their original values. |
+| **Target** | Writes the rows to somewhere, such as another file, database, or Dataverse. |
+
+Steps are ordinary PowerShell hashtables. `Inputs` connects steps and says where their rows come from. A simple migration might read a CSV, map its rows, and upsert them to Dataverse:
 
 ```powershell
 $steps = @(
@@ -93,7 +102,9 @@ Invoke-Migration -DatabasePath './migration.sqlite3' `
 
 Create `$dataverseConnection` with `Rnwood.Dataverse.Data.PowerShell`; the Dataverse example below shows how to load a saved connection profile.
 
-The [step configuration guide](./docs/configuration.md) explains the supported graph shape. For Dataverse-specific query, write, authentication, and connection options, use the [Dataverse connector guides](./docs/connectors/sources/dataverse.md) and [upstream module documentation](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell).
+The `ConnectionId` values in the steps are names, not credentials or open connections. The actual values are passed separately in `-Connections`: here, `files` points to a folder and `crm` is an authenticated Dataverse connection. This keeps runtime connection details separate from the migration definition.
+
+Start with the [migration basics](./docs/concepts/migration-basics.md) for a plain-language overview. The [step configuration guide](./docs/configuration.md) explains the supported graph shape and exact behavior; the [source](./docs/connectors/sources/README.md) and [target](./docs/connectors/targets/README.md) connector guides describe where rows can come from and go. For Dataverse-specific query, write, authentication, and connection options, see the [Dataverse connector guides](./docs/connectors/sources/dataverse.md) and [upstream module documentation](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell).
 
 ## Example migrations
 
@@ -155,6 +166,7 @@ Open the printed `http://127.0.0.1:5180` URL while the sample runs. See the [das
 - [PowerShell cmdlets](./docs/cmdlets/README.md) — command syntax and behavior.
 - [Step configuration](./docs/configuration.md) — graph shape, connections, callbacks, and step behavior.
 - [Connectors](./docs/connectors/sources/README.md) — source and target connector guides.
+- [Migration basics](./docs/concepts/migration-basics.md) — sources, transforms, filters, targets, and connections in plain language.
 - [Concepts](./docs/concepts/README.md) — dependencies, batching, recovery, and connections.
 
 ## For contributors

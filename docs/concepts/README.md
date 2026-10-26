@@ -1,6 +1,6 @@
 # Migration concepts
 
-Read these guides after the [step configuration reference](../configuration.md), or use them to answer a specific operational question:
+Start with [Migration basics](./migration-basics.md) for a plain-language explanation of sources, transforms, filters, targets, and connections. Use the [step configuration reference](../configuration.md) for exact properties, then use these guides for specific operational questions:
 
 - [Dependencies](./dependencies.md) — when rows flow, when steps wait, and how keyed source relationships and joins behave.
 - [Batching and backpressure](./batching.md) — batch sizes, queue limits, and concurrency.

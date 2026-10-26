@@ -8,6 +8,7 @@ Start with the [repository README](../README.md) to build the module and run an 
 
 ### Define a migration
 
+- [Migration basics](./concepts/migration-basics.md) — what sources, transforms, filters, targets, and connections mean.
 - [Step configuration](./configuration.md) — supported step types, common properties, connections, and callback shapes.
 - [Dependencies](./concepts/dependencies.md) — row flow, keyed source relationships, joins, and completion barriers.
 - [Recovery and replay](./concepts/recovery-and-replay.md) — run IDs, checkpoints, retries, and side-effect safety.
