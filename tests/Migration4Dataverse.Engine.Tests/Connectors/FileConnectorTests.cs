@@ -194,6 +194,95 @@ public sealed class FileConnectorTests
     }
 
     [Fact]
+    public async Task SingleFileTargetsAggregateOrderedBatchesForAllFormats()
+    {
+        using var files = new TemporaryFiles();
+        var firstId = Guid.NewGuid();
+        var secondId = Guid.NewGuid();
+        var firstBatch = JsonSerializer.Serialize(new[] { new { Id = firstId, Name = "First" } });
+        var secondBatch = JsonSerializer.Serialize(new[] { new { Id = secondId, Name = "Second" } });
+
+        var jsonLinesPath = files.GetPath("accounts.jsonl");
+        FileBatchTargetWriter.WriteSingleFileTargetBatch(
+            jsonLinesPath, "run", "Accounts", "batch-2", 1, secondBatch);
+        FileBatchTargetWriter.WriteSingleFileTargetBatch(
+            jsonLinesPath, "run", "Accounts", "batch-1", 0, firstBatch);
+        FileBatchTargetWriter.FinalizeSingleFileTarget(jsonLinesPath, "run", "Accounts", "jsonl", "{}");
+        var jsonLines = File.ReadLines(jsonLinesPath)
+            .Select(line => JsonDocument.Parse(line))
+            .ToArray();
+        try
+        {
+            Assert.Equal(
+                new[] { firstId, secondId },
+                jsonLines.Select(document => document.RootElement.GetProperty("Id").GetGuid()).ToArray());
+        }
+        finally
+        {
+            foreach (var document in jsonLines)
+            {
+                document.Dispose();
+            }
+        }
+
+        var csvPath = files.GetPath("accounts.csv");
+        var csvOptions = JsonSerializer.Serialize(new CsvConnectorOptions
+        {
+            ColumnsByStep = new Dictionary<string, string[]>
+            {
+                ["Accounts"] = ["Id", "Name"]
+            }
+        });
+        FileBatchTargetWriter.WriteSingleFileTargetBatch(
+            csvPath, "run", "Accounts", "batch-1", 0, firstBatch);
+        FileBatchTargetWriter.WriteSingleFileTargetBatch(
+            csvPath, "run", "Accounts", "batch-2", 1, secondBatch);
+        FileBatchTargetWriter.FinalizeSingleFileTarget(csvPath, "run", "Accounts", "csv", csvOptions);
+        var csvLines = File.ReadAllLines(csvPath);
+        Assert.Equal(3, csvLines.Length);
+        Assert.Equal("Id,Name", csvLines[0]);
+
+        var parquetPath = files.GetPath("accounts.parquet");
+        var parquetOptions = JsonSerializer.Serialize(new ParquetConnectorOptions
+        {
+            TargetRowGroupSize = 1,
+            SchemaByStep = new Dictionary<string, ParquetFieldSchema[]>
+            {
+                ["Accounts"] =
+                [
+                    new() { Name = "Id", Type = "guid", Nullable = false },
+                    new() { Name = "Name", Type = "string", Nullable = false }
+                ]
+            }
+        });
+        FileBatchTargetWriter.WriteSingleFileTargetBatch(
+            parquetPath, "run", "Accounts", "batch-2", 1, secondBatch);
+        FileBatchTargetWriter.WriteSingleFileTargetBatch(
+            parquetPath, "run", "Accounts", "batch-1", 0, firstBatch);
+        FileBatchTargetWriter.FinalizeSingleFileTarget(
+            parquetPath, "run", "Accounts", "parquet", parquetOptions);
+        var parquetLevel = new HierarchySourceLevel(
+            "Accounts",
+            "parquet",
+            parquetPath,
+            "Id",
+            parentKeyProperty: null,
+            rowsPerParent: 0,
+            expectedRecordCount: 2,
+            optionsJson: parquetOptions);
+        await using var parquetReader = new ParquetHierarchyRecordReader(
+            parquetLevel,
+            JsonSerializer.Deserialize<ParquetConnectorOptions>(parquetOptions)!);
+        var parquetIds = new List<Guid>();
+        while (await parquetReader.PeekAsync(CancellationToken.None) is JsonElement row)
+        {
+            parquetIds.Add(row.GetProperty("Id").GetGuid());
+            parquetReader.Take();
+        }
+        Assert.Equal(new[] { firstId, secondId }, parquetIds);
+    }
+
+    [Fact]
     public async Task ParquetSourceConverterWritesBoundedRowGroupsThatCanBeReadBack()
     {
         using var files = new TemporaryFiles();

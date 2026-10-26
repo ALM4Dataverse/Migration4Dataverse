@@ -12,7 +12,7 @@ This page indexes the supported PowerShell migration contract. Use the linked pa
 | Step type | Purpose |
 |---|---|
 | `source` | Read rows from a built-in or custom connector. |
-| `transform` | Map each input row with a PowerShell script or supported database-backed transform. |
+| `transform` | Map each input row with PowerShell or an engine-managed SQLite/DuckDB transform; both database providers support per-batch and whole-dataset SQL. |
 | `filter` | Keep or discard each input row. |
 | `append` | Concatenate two or more row streams without deduplicating. |
 | `join` | Match a child stream to a keyed source or Dataverse target stream. |
@@ -28,7 +28,6 @@ Start with [step configuration](./configuration.md). For keyed dependencies, joi
 - [`Get-MigrationRun`](./cmdlets/get-migration-run.md) — list or inspect saved runs.
 - [Migration dashboard](./cmdlets/migration-dashboard.md) — view run history, progress, and optional row lineage.
 - [`Start-MigrationDatabaseServer`](./cmdlets/migration-database-server.md) — keep a local database owner available to multiple PowerShell processes.
-- [`New-MigrationDatabaseConnection`](./cmdlets/new-migration-database-connection.md) — create SQLite or DuckDB ADO.NET connections.
 - [`Clear-MigrationTargetTuning`](./cmdlets/clear-migration-target-tuning.md) — clear saved Dataverse tuning profiles.
 
 The lower-level store functions are listed in the [cmdlet index](./cmdlets/README.md); ordinary migrations do not need to call them directly.
@@ -37,9 +36,12 @@ The lower-level store functions are listed in the [cmdlet index](./cmdlets/READM
 
 - [Source connectors](./connectors/sources/README.md)
 - [Target connectors](./connectors/targets/README.md)
+- [SQLite source SQL and parameters](./connectors/sources/sqlite.md)
+- [SQLite target schema, keys, indexes, and upsert](./connectors/targets/sqlite.md)
 - [Custom source callbacks](./connectors/sources/custom.md)
 - [Custom target callbacks](./connectors/targets/custom.md)
 - [Connections and callback execution](./concepts/connections-and-callbacks.md)
+- [Database-backed SQLite and DuckDB transforms](./dev/transformations/transform.md#database-backed-migration-graph-transforms)
 
 For Dataverse, these pages describe the Migration4Dataverse adapter only:
 

@@ -10,17 +10,20 @@ namespace Migration4Dataverse.Engine.PowerShell;
 internal sealed class MigrationStepSet : IDisposable
 {
     private readonly IReadOnlyList<SemaphoreSlim> _semaphores;
+    private readonly IReadOnlyList<System.Data.Common.DbConnection> _ownedConnections;
 
     public MigrationStepSet(
         IReadOnlyList<MigrationStepDefinition> steps,
         IReadOnlyList<SemaphoreSlim> semaphores,
         IReadOnlyList<PipelineAdaptiveDataverseConnectionController> targetControllers,
-        PipelineThroughputMeter throughputMeter)
+        PipelineThroughputMeter throughputMeter,
+        IReadOnlyList<System.Data.Common.DbConnection> ownedConnections)
     {
         Steps = steps;
         _semaphores = semaphores;
         TargetControllers = targetControllers;
         ThroughputMeter = throughputMeter;
+        _ownedConnections = ownedConnections;
     }
 
     public IReadOnlyList<MigrationStepDefinition> Steps { get; }
@@ -46,6 +49,10 @@ internal sealed class MigrationStepSet : IDisposable
         foreach (var semaphore in _semaphores)
         {
             semaphore.Dispose();
+        }
+        foreach (var connection in _ownedConnections)
+        {
+            connection.Dispose();
         }
     }
 }
@@ -74,11 +81,11 @@ internal static partial class PowerShellMigrationStepFactory
             throw "Transform step '$StepId' must emit a dictionary or custom object."
         }
 
-        function ConvertTo-JsonLinesBatch {
-            param($Records, [string]$Directory, [string]$RunId, [string]$BatchId, [long]$Sequence)
+        function ConvertTo-FileTargetBatch {
+            param($Records, [string]$TargetPath, [string]$StepId, [string]$RunId, [string]$BatchId, [long]$Sequence)
             $recordsJson = ConvertTo-Json -InputObject $Records -Depth 100 -Compress -ErrorAction Stop
-            [Migration4Dataverse.Engine.Connectors.FileBatchTargetWriter]::WriteJsonLinesBatch(
-                $Directory, $RunId, $BatchId, $Sequence, $recordsJson)
+            [Migration4Dataverse.Engine.Connectors.FileBatchTargetWriter]::WriteSingleFileTargetBatch(
+                $TargetPath, $RunId, $StepId, $BatchId, $Sequence, $recordsJson)
         }
 
         $payload = ConvertFrom-Json -InputObject $batch.PayloadJson -AsHashtable -Depth 100 -ErrorAction Stop
@@ -127,17 +134,56 @@ internal static partial class PowerShellMigrationStepFactory
                         $transformConnection.Open()
                         $openedTransformConnection = $true
                     }
-                    if (-not [string]::IsNullOrWhiteSpace($context.TransformSql)) {
+                    if ($context.TransformMode -eq 'whole_dataset') {
+                        for ($index = 0; $index -lt $inputRecords.Count; $index++) {
+                            $record = $inputRecords[$index]
+                            if ($record -is [System.Collections.IDictionary] -and
+                                $record.Contains('Source')) {
+                                $record = $record.Source
+                            }
+                            $fields = ConvertTo-MigrationFields -Value $record -StepId $context.StepId
+                            $outputRecords.Add([pscustomobject]$fields)
+                            $parentRecordIndices.Add([int[]]@($index))
+                        }
+                    }
+                    elseif (-not [string]::IsNullOrWhiteSpace($context.TransformSql)) {
                         $recordsJson = ConvertTo-Json -InputObject $inputRecords -Depth 100 -Compress -ErrorAction Stop
-                        $outputsJson = [Migration4Dataverse.Engine.Connectors.PreparedDatabaseTransformRunner]::ExecutePreparedBatch(
-                            $transformConnection,
-                            $context.TransformType,
-                            $context.TransformSql,
-                            $context.TransformParametersJson,
-                            $recordsJson)
+                        if ($context.TransformMode -eq 'per_batch') {
+                            if ($context.TransformType -eq 'sqlite') {
+                                $outputsJson = [Migration4Dataverse.Engine.Connectors.PreparedDatabaseTransformRunner]::ExecuteSqliteBatch(
+                                    $transformConnection,
+                                    $context.TransformSql,
+                                    $context.TransformParametersJson,
+                                    $recordsJson,
+                                    $context.TransformCommandTimeoutSeconds)
+                            }
+                            else {
+                                $outputsJson = [Migration4Dataverse.Engine.Connectors.PreparedDatabaseTransformRunner]::ExecuteDuckDbBatch(
+                                    $transformConnection,
+                                    $context.TransformSql,
+                                    $context.TransformParametersJson,
+                                    $recordsJson,
+                                    $context.TransformCommandTimeoutSeconds)
+                            }
+                        }
+                        else {
+                            $outputsJson = [Migration4Dataverse.Engine.Connectors.PreparedDatabaseTransformRunner]::ExecutePreparedBatch(
+                                $transformConnection,
+                                $context.TransformType,
+                                $context.TransformSql,
+                                $context.TransformParametersJson,
+                                $recordsJson)
+                        }
                         $preparedOutputs = ConvertFrom-Json -InputObject $outputsJson -AsHashtable -Depth 100 -ErrorAction Stop
                         foreach ($preparedOutput in $preparedOutputs) {
-                            $parentIndex = [int]$preparedOutput.ParentIndex
+                            if ($preparedOutput -is [System.Collections.IDictionary] -and
+                                $preparedOutput.Contains('ParentIndices')) {
+                                $parentIndices = [int[]]@($preparedOutput['ParentIndices'])
+                            }
+                            else {
+                                $parentIndices = [int[]]@([int]$preparedOutput.ParentIndex)
+                            }
+                            $parentIndex = $parentIndices[0]
                             $fields = ConvertTo-MigrationFields -Value $preparedOutput.Record -StepId $context.StepId
                             if (-not $fields.Contains('Id') -and
                                 $inputRecords[$parentIndex] -is [System.Collections.IDictionary] -and
@@ -145,7 +191,7 @@ internal static partial class PowerShellMigrationStepFactory
                                 $fields = [ordered]@{ Id = $inputRecords[$parentIndex].Id } + $fields
                             }
                             $outputRecords.Add([pscustomobject]$fields)
-                            $parentRecordIndices.Add([int[]]@($parentIndex))
+                            $parentRecordIndices.Add([int[]]@($parentIndices))
                         }
                     }
                     else {
@@ -392,20 +438,19 @@ internal static partial class PowerShellMigrationStepFactory
                         }
                     }
                     'jsonl' {
-                        ConvertTo-JsonLinesBatch -Records $records -Directory $context.TargetPath `
-                            -RunId $batch.RunId -BatchId $batch.BatchId -Sequence $batch.Sequence
+                        ConvertTo-FileTargetBatch -Records $records -TargetPath $context.TargetPath `
+                            -StepId $context.StepId -RunId $batch.RunId `
+                            -BatchId $batch.BatchId -Sequence $batch.Sequence
                     }
                     'csv' {
-                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
-                        [Migration4Dataverse.Engine.Connectors.FileBatchTargetWriter]::WriteCsvBatch(
-                            $context.TargetPath, $batch.RunId, $context.StepId, $batch.BatchId,
-                            $batch.Sequence, $recordsJson, $context.TargetOptionsJson)
+                        ConvertTo-FileTargetBatch -Records $records -TargetPath $context.TargetPath `
+                            -StepId $context.StepId -RunId $batch.RunId `
+                            -BatchId $batch.BatchId -Sequence $batch.Sequence
                     }
                     'parquet' {
-                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
-                        [Migration4Dataverse.Engine.Connectors.FileBatchTargetWriter]::WriteParquetBatch(
-                            $context.TargetPath, $batch.RunId, $context.StepId, $batch.BatchId,
-                            $batch.Sequence, $recordsJson, $context.TargetOptionsJson)
+                        ConvertTo-FileTargetBatch -Records $records -TargetPath $context.TargetPath `
+                            -StepId $context.StepId -RunId $batch.RunId `
+                            -BatchId $batch.BatchId -Sequence $batch.Sequence
                     }
                     'sqlite' {
                         $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
@@ -859,19 +904,69 @@ internal static partial class PowerShellMigrationStepFactory
         string connectorType,
         string role)
     {
+        if (connectorType is "sqlite" or "duckdb")
+        {
+            if (connection is FileInfo databaseFile)
+            {
+                if (!string.IsNullOrWhiteSpace(configuredPath))
+                {
+                    throw new ArgumentException($"{role} must omit Path when its connection is a FileInfo.");
+                }
+                return Path.GetFullPath(databaseFile.FullName);
+            }
+
+            if (connection is not DirectoryInfo databaseDirectory)
+            {
+                throw new ArgumentException(
+                    $"The {connectorType} connector requires a DirectoryInfo or FileInfo connection for {role}.");
+            }
+            if (string.IsNullOrWhiteSpace(configuredPath))
+            {
+                throw new ArgumentException($"{role} must declare Path when its connection is a DirectoryInfo.");
+            }
+
+            return ResolveRelativePath(databaseDirectory, configuredPath, role);
+        }
+
+        if (connectorType is "jsonl" or "csv" or "parquet")
+        {
+            if (connection is FileInfo file)
+            {
+                if (!string.IsNullOrWhiteSpace(configuredPath))
+                {
+                    throw new ArgumentException(
+                        $"{role} must omit Path when its connection is a FileInfo.");
+                }
+                return Path.GetFullPath(file.FullName);
+            }
+
+            if (connection is not DirectoryInfo fileDirectory)
+            {
+                throw new ArgumentException(
+                    $"The {connectorType} connector requires a DirectoryInfo or FileInfo connection for {role}.");
+            }
+            if (string.IsNullOrWhiteSpace(configuredPath))
+            {
+                throw new ArgumentException($"{role} must declare Path when its connection is a DirectoryInfo.");
+            }
+
+            return ResolveRelativePath(fileDirectory, configuredPath, role);
+        }
+
         if (string.IsNullOrWhiteSpace(configuredPath))
         {
             return string.Empty;
         }
         if (connection is not DirectoryInfo directory)
         {
-            if (connectorType is "jsonl" or "csv" or "parquet")
-            {
-                throw new ArgumentException(
-                    $"The {connectorType} connector requires a DirectoryInfo connection for {role}.");
-            }
             return configuredPath;
         }
+
+        return ResolveRelativePath(directory, configuredPath, role);
+    }
+
+    private static string ResolveRelativePath(DirectoryInfo directory, string configuredPath, string role)
+    {
         if (Path.IsPathRooted(configuredPath))
         {
             throw new ArgumentException($"{role} must be relative to its directory connection.");
@@ -935,7 +1030,7 @@ internal static partial class PowerShellMigrationStepFactory
             throw new ArgumentException(
                 $"Step '{stepId}' references unknown {role} connection ID '{connectionId}'.");
         }
-        return connections[connectionId]
+        return Unwrap(connections[connectionId])
             ?? throw new ArgumentException(
                 $"Connection ID '{connectionId}' for step '{stepId}' resolved to null.");
     }

@@ -64,20 +64,18 @@ public sealed class ExampleScriptTests
     }
 
     [Theory]
-    [InlineData("sqlite", "SQLite", "Microsoft.Data.Sqlite.SqliteConnection")]
-    [InlineData("duckdb", "DuckDB", "DuckDB.NET.Data.DuckDBConnection")]
-    public void DatabaseExamplesUseEngineConnectionFactory(
-        string folder,
-        string provider,
-        string providerConnectionType)
+    [InlineData("sqlite")]
+    [InlineData("duckdb")]
+    public void DatabaseExamplesUsePathConnections(string folder)
     {
         var exampleDirectory = Path.Combine(FindRepositoryRoot(), "examples", folder);
-        foreach (var fileName in new[] { "Setup-Example.ps1", "example.ps1" })
-        {
-            var script = File.ReadAllText(Path.Combine(exampleDirectory, fileName));
-            Assert.Contains($"New-MigrationDatabaseConnection -Provider {provider}", script, StringComparison.Ordinal);
-            Assert.DoesNotContain(providerConnectionType, script, StringComparison.Ordinal);
-        }
+        var migrationScript = File.ReadAllText(Path.Combine(exampleDirectory, "example.ps1"));
+        Assert.Contains("System.IO.FileInfo", migrationScript, StringComparison.Ordinal);
+        Assert.DoesNotContain("New-MigrationDatabaseConnection", migrationScript, StringComparison.Ordinal);
+
+        var setupScript = File.ReadAllText(Path.Combine(exampleDirectory, "Setup-Example.ps1"));
+        Assert.Contains("MigrationDatabaseConnectionFactory", setupScript, StringComparison.Ordinal);
+        Assert.DoesNotContain("New-MigrationDatabaseConnection", setupScript, StringComparison.Ordinal);
     }
 
     [Fact]

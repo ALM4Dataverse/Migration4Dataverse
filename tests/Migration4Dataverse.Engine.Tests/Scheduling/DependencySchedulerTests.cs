@@ -40,6 +40,32 @@ public sealed class DependencySchedulerTests
     }
 
     [Fact]
+    public async Task CompletionHookFailureMarksTheRunFailed()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        var step = new MigrationStepDefinition(
+            "Root",
+            inputs: null,
+            (checkpoint, token) => SingleBatch("{}", token),
+            (_, _) => Task.FromResult(new MigrationBatchResult("{}")))
+        {
+            CompleteAsync = _ => Task.FromException(new IOException("file finalization failed"))
+        };
+
+        var exception = await Assert.ThrowsAsync<IOException>(() =>
+            new DependencyScheduler(store).ExecuteAsync(
+                "completion-hook-run",
+                "completion-hook-test",
+                "hash-1",
+                [step],
+                CreateOptions(maxDegreeOfParallelism: 1, maxQueuedBatches: 1)));
+
+        Assert.Equal("file finalization failed", exception.Message);
+        Assert.Equal("Failed", store.GetDashboardRun("completion-hook-run").Status);
+    }
+
+    [Fact]
     public void HigherPipelineImpactGetsMoreDispatchesWithoutStarvingOtherTargets()
     {
         var candidates = new[]

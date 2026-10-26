@@ -2,6 +2,8 @@
 
 Runs a PowerShell-defined migration graph. Use [step configuration](../configuration.md) for the graph shape and the [connector guides](../connectors/sources/README.md) for connector-specific options.
 
+SQLite and DuckDB Sources and Targets use `FileInfo` or `DirectoryInfo` plus a step `Path`; the engine creates their database connections and loads the providers automatically. SQLite and DuckDB Transforms use separate engine-managed, run-and-step-specific databases; do not provide a `ConnectionId` for these transforms. `Transform.InitializeSql` runs before record or batch processing. Both providers support per-batch SQL and whole-dataset SQL after an explicit matching staging Target completes. File targets publish one complete JSONL, CSV, or Parquet file only after all batches succeed. SQLite Targets validate declared schemas and keys by default; set `CreateTable = $true` only when the run should create missing target objects. See the [transform guide](../dev/transformations/transform.md#database-backed-migration-graph-transforms) and [SQLite target guide](../connectors/targets/sqlite.md).
+
 > [!NOTE]
 > Dataverse source and target steps load `Rnwood.Dataverse.Data.PowerShell` automatically. You create and own the connection object. For its complete authentication, connection, query, and write options, see the upstream [module documentation](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell), including [connections](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/core-concepts/connections.md) and [authentication](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/getting-started/authentication.md).
 

@@ -65,6 +65,8 @@ public sealed class MigrationStepDefinition
 
     public Func<CancellationToken, Task<long>>? ResolveExpectedRecordCountAsync { get; init; }
 
+    public Func<CancellationToken, Task>? CompleteAsync { get; init; }
+
     public bool WaitForInputCompletion { get; init; } = true;
 
     public SourceKeyCoordinator? SourceKeyCoordinator { get; init; }

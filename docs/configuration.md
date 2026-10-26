@@ -66,7 +66,7 @@ Each node has a unique `Id`, a `Type`, and an `Inputs` array. `Inputs` names the
 | `filter` | Exactly one | Inline `Script`; truthy output retains the row. |
 | `append` | Two or more | Concatenates the input streams without matching or deduplicating rows. |
 | `join` | Exactly two, ordered child/left then parent/right | `JoinType`, aliases, and ordered key pairs. |
-| `target` | Exactly one | `Target`. A target can feed a `join`, not an ordinary transform. |
+| `target` | Exactly one | `Target`. A target can feed a `join`, or a matching SQLite/DuckDB `transform` in `whole_dataset` mode as a completion barrier. |
 | `callback` | Root or one or more | Root callbacks also define `ReadBatches`; every callback defines `ExecuteBatch`. |
 
 Every referenced step ID must exist. A node may have multiple consumers. `sort` and `merge` are not supported `Invoke-Migration` step types and are rejected during configuration validation.
@@ -94,7 +94,9 @@ The full rules for null keys, unmatched parents, fixed child counts, join orderi
 - A Filter script uses PowerShell output truthiness. A truthy result passes the original row unchanged; no output or a falsey result drops it.
 - Scripts run as source text in engine-owned runspaces. They do not capture variables from the caller's interactive scope.
 
-A connected Transform can use a `Transform` map whose `Type` is `sqlite`, `duckdb`, or `dataverse` and whose `ConnectionId` names the connection. Its PowerShell script receives `($row, $connection)` and runs once per row. DuckDB can instead use a prepared `Transform.Sql` statement with ordered `Transform.Parameters`; the statement's result rows become Transform output, while a statement without a result set passes through the input row. Per-batch and whole-dataset database transforms are not supported.
+A database-backed Transform can use a `Transform` map whose `Type` is `sqlite` or `duckdb`; do not set `ConnectionId`. The engine creates a database file beside `-DatabasePath` for each provider, run ID, and transform step ID. `Transform.InitializeSql` runs on that database before any source records or target batches are processed; make it safe to rerun when resuming a run. A PowerShell `Script` receives `($row, $connection)` and runs once per row. DuckDB can instead use a prepared per-row `Transform.Sql` statement with ordered `Transform.Parameters`; result rows become Transform output, while a statement without a result set passes through the input row. Dataverse transforms remain connection-backed and require `ConnectionId`.
+
+SQLite and DuckDB both support set-based SQL transforms. `Mode = 'per_batch'` stages the current bounded input batch in a temporary table named `__migration4dataverse_input`, executes `Transform.Sql`, and requires the result to include either `__migration_parent_index` or `__migration_parent_indices` (a JSON array) so output lineage is explicit. These lineage columns are removed from emitted rows. SQLite uses named `Transform.Parameters`; DuckDB uses an ordered `Transform.Parameters` map bound to positional `?` placeholders. `Mode = 'whole_dataset'` requires one `Inputs` step that is a matching SQLite or DuckDB Target; omit `ConnectionId` and `Path` from the staging Target and `ConnectionId` from the Transform so the engine can share their managed database. The target must finish staging the rows before the transform's query is read. Configure `Transform.Key` as the stable result key. The query is a single read-only `SELECT` or `WITH` statement. Whole-dataset mode reads the staged table(s) as a source after the barrier; it does not consume the target's batch payloads directly. SQLite uses named `Transform.Parameters` for whole-dataset queries; DuckDB uses an ordered parameter map and positional `?` placeholders. See the [database SQL transform guide](./dev/transformations/transform.md#database-backed-migration-graph-transforms).
 
 ## Source properties
 
@@ -103,8 +105,8 @@ Every source has a `Source` hashtable. See the [source connector index](./connec
 | Property | Required | Description |
 |---|---:|---|
 | `Type` | Yes | `jsonl`, `csv`, `parquet`, `sqlite`, `duckdb`, `dataverse`, or `custom`. |
-| `ConnectionId` | Yes | Key in `-Connections`. File connectors expect a `System.IO.DirectoryInfo`; database connectors use an ADO.NET connection. |
-| `Path` | File sources | Path relative to the source directory. Database and Dataverse sources omit it. |
+| `ConnectionId` | Yes | Key in `-Connections`. File and SQLite/DuckDB database connectors expect a `DirectoryInfo` or `FileInfo`; database connections are created by the engine. |
+| `Path` | Directory-based file or database sources | Exact filename relative to the source directory. Omit it for a `FileInfo`. Dataverse sources omit it. |
 | `Key` | Yes | Stable field used to order and checkpoint source rows. Root source keys must be non-empty, unique, and strictly increasing. Dataverse uses case-insensitive ordinal order. |
 | `Id` | No | Source field copied to the row's `Id`, commonly the target record GUID. |
 | `ExpectedRecordCount` | No | Positive expected row count. It takes precedence over a connector's count provider and is checked when reading completes. |
@@ -120,13 +122,13 @@ Every target has a `Target` hashtable. See the [target connector index](./connec
 | Property | Required | Description |
 |---|---:|---|
 | `Type` | Yes | `dataverse`, `jsonl`, `csv`, `parquet`, `sqlite`, `duckdb`, or `custom`. |
-| `ConnectionId` | Yes | Key in `-Connections`. File targets expect a `System.IO.DirectoryInfo`; database targets use an ADO.NET connection. |
-| `Path` | File targets | Output path relative to the target directory. |
+| `ConnectionId` | Yes | Key in `-Connections`. File and SQLite/DuckDB database connectors expect a `DirectoryInfo` or `FileInfo`; database connections are created by the engine. |
+| `Path` | Directory-based file or database targets | Exact filename relative to the target directory. Omit it for a `FileInfo`. Whole-dataset database staging targets omit both `ConnectionId` and `Path`. |
 | `Table` | Dataverse and database targets | Dataverse logical table or database table name. |
 | `Operation` | No | Defaults to `Upsert` for Dataverse and `Write` for other targets. |
 | `BatchSize` | No | Positive override for `Invoke-Migration -BatchSize`; Dataverse also accepts `auto`. |
 | `MaxConcurrency` | Dataverse only | Positive per-target limit or `auto`; the default is `auto`. |
-| `Options` | No | Connector-specific settings, such as database schemas or Dataverse matching keys. |
+| `Options` | No | Connector-specific settings, such as SQLite schema/key/index definitions or Dataverse matching keys. SQLite targets validate declared objects by default; see the [SQLite target guide](./connectors/targets/sqlite.md). |
 | `Custom` | Custom target | Callback definition; see [custom targets](./connectors/targets/custom.md). |
 
 ## Callback nodes
@@ -139,6 +141,6 @@ A callback can return `MigrationDependencyOutput` values with `RequiredBatchIds`
 
 ## Connection map and history
 
-Connection IDs resolve against the `-Connections` map. Reusing an ID shares the same runtime object. The caller owns connection creation, credentials, lifetime, and disposal. File paths are resolved below their `DirectoryInfo` connection roots.
+Connection IDs resolve against the `-Connections` map. Reusing an ID shares the same runtime object; database connection IDs must resolve consistently to the same provider and database path. The engine creates and disposes SQLite/DuckDB source and target connections and loads the required providers automatically. The caller owns custom and Dataverse connection creation, credentials, lifetime, and disposal. File targets stage batches and atomically publish one complete file before the run is marked successful. SQLite and DuckDB transform connections are engine-owned and are stored under `.migration-transforms` beside the migration database.
 
 The store records a sanitized snapshot of the graph and safe connection properties for run history and configuration previews. Redaction is best-effort; do not put credentials or secrets in step definitions. See [`Get-MigrationRun`](./cmdlets/get-migration-run.md), the [dashboard guide](./cmdlets/migration-dashboard.md), and [connections and callbacks](./concepts/connections-and-callbacks.md).

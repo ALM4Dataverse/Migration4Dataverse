@@ -10,9 +10,18 @@ public sealed class DatabaseBatchTargetOptions
 {
     public Dictionary<string, string>? Schema { get; init; }
 
-    public bool CreateTable { get; init; } = true;
+    public bool? CreateTable { get; init; }
+
+    public string[]? KeyColumns { get; init; }
+
+    public DatabaseIndexDefinition[]? Indexes { get; init; }
 
     public int CommandTimeoutSeconds { get; init; } = 30;
+
+    public bool ShouldCreateTable(string connectorType)
+    {
+        return CreateTable ?? !string.Equals(connectorType, "sqlite", StringComparison.Ordinal);
+    }
 
     public void Validate(string connectorType, string stepId)
     {
@@ -25,15 +34,77 @@ public sealed class DatabaseBatchTargetOptions
 
         if (Schema is null)
         {
-            return;
+            if (connectorType == "sqlite")
+            {
+                throw new ArgumentException(
+                    $"Database target '{stepId}' requires an explicit Schema for SQLite.");
+            }
         }
-        if (Schema.Count == 0)
+        else
         {
-            throw new ArgumentException($"Database target '{stepId}' Schema must not be empty.");
+            if (Schema.Count == 0)
+            {
+                throw new ArgumentException($"Database target '{stepId}' Schema must not be empty.");
+            }
+            foreach (var (name, type) in Schema)
+            {
+                DatabaseConnectorSupport.ValidateSqlType(connectorType, name, type);
+            }
         }
-        foreach (var (name, type) in Schema)
+
+        if (connectorType == "sqlite")
         {
-            DatabaseConnectorSupport.ValidateSqlType(connectorType, name, type);
+            if (KeyColumns is not { Length: > 0 })
+            {
+                throw new ArgumentException(
+                    $"Database target '{stepId}' requires KeyColumns for SQLite upserts.");
+            }
+            var columnNames = Schema!.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (KeyColumns.Any(string.IsNullOrWhiteSpace) ||
+                KeyColumns.Distinct(StringComparer.OrdinalIgnoreCase).Count() != KeyColumns.Length ||
+                KeyColumns.Any(key => !columnNames.Contains(key)))
+            {
+                throw new ArgumentException(
+                    $"Database target '{stepId}' KeyColumns must be distinct columns declared in Schema.");
+            }
+
+            var indexNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var index in Indexes ?? Array.Empty<DatabaseIndexDefinition>())
+            {
+                index.Validate(stepId, columnNames);
+                if (!indexNames.Add(index.Name))
+                {
+                    throw new ArgumentException(
+                        $"Database target '{stepId}' declares duplicate index name '{index.Name}'.");
+                }
+            }
+        }
+        else if (KeyColumns is { Length: > 0 } || Indexes is { Length: > 0 })
+        {
+            throw new NotSupportedException(
+                $"Database target '{stepId}' KeyColumns and Indexes are currently supported only for SQLite.");
+        }
+    }
+}
+
+public sealed class DatabaseIndexDefinition
+{
+    public string Name { get; init; } = string.Empty;
+
+    public string[] Columns { get; init; } = Array.Empty<string>();
+
+    public bool Unique { get; init; }
+
+    internal void Validate(string stepId, IReadOnlySet<string> schemaColumns)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(Name);
+        if (Columns.Length == 0 ||
+            Columns.Any(string.IsNullOrWhiteSpace) ||
+            Columns.Distinct(StringComparer.OrdinalIgnoreCase).Count() != Columns.Length ||
+            Columns.Any(column => !schemaColumns.Contains(column)))
+        {
+            throw new ArgumentException(
+                $"Database target '{stepId}' index '{Name}' must declare distinct columns from Schema.");
         }
     }
 }
@@ -66,7 +137,8 @@ public static class DatabaseBatchTargetWriter
 
         var options = DeserializeOptions(optionsJson);
         options.Validate(connectorType, stepId);
-        if (options.Schema is null && options.CreateTable)
+        var createTable = options.ShouldCreateTable(connectorType);
+        if (options.Schema is null && createTable)
         {
             return;
         }
@@ -88,7 +160,7 @@ public static class DatabaseBatchTargetWriter
                 options.CommandTimeoutSeconds);
             if (actualSchema.Count == 0)
             {
-                if (!options.CreateTable)
+                if (!createTable)
                 {
                     throw new InvalidOperationException(
                         $"Database target table '{tableName}' does not exist and CreateTable is false.");
@@ -120,6 +192,13 @@ public static class DatabaseBatchTargetWriter
                     CreateExplicitSchema(connectorType, options.Schema),
                     actualSchema);
             }
+            EnsureTargetIndexes(
+                connection,
+                transaction,
+                connectorType,
+                tableName,
+                options,
+                createTable);
             transaction.Commit();
         }
         finally
@@ -153,6 +232,7 @@ public static class DatabaseBatchTargetWriter
 
         var options = DeserializeOptions(optionsJson);
         options.Validate(connectorType, stepId);
+        var createTable = options.ShouldCreateTable(connectorType);
         var records = ParseRecords(recordsJson, stepId);
         if (records.Count == 0)
         {
@@ -185,7 +265,7 @@ public static class DatabaseBatchTargetWriter
 
             if (tableSchema.Count == 0)
             {
-                if (!options.CreateTable)
+                if (!createTable)
                 {
                     throw new InvalidOperationException(
                         $"Database target table '{tableName}' does not exist and CreateTable is false.");
@@ -205,7 +285,14 @@ public static class DatabaseBatchTargetWriter
             }
 
             ValidateSchema(connectorType, tableName, schema, tableSchema);
-            ValidateRecords(tableName, records, tableSchema);
+            EnsureTargetIndexes(
+                connection,
+                transaction,
+                connectorType,
+                tableName,
+                options,
+                createTable);
+            ValidateRecords(tableName, records, tableSchema, options.KeyColumns);
             var existingHash = FindBatchHash(
                 connection,
                 transaction,
@@ -232,6 +319,7 @@ public static class DatabaseBatchTargetWriter
                 quotedTable,
                 tableSchema,
                 records,
+                connectorType == "sqlite" ? options.KeyColumns : null,
                 options.CommandTimeoutSeconds);
             InsertBatchMarker(
                 connection,
@@ -399,7 +487,8 @@ public static class DatabaseBatchTargetWriter
     private static void ValidateRecords(
         string tableName,
         IReadOnlyList<JsonElement> records,
-        IReadOnlyList<DatabaseColumn> schema)
+        IReadOnlyList<DatabaseColumn> schema,
+        IReadOnlyList<string>? keyColumns)
     {
         var expectedNames = schema.Select(column => column.Name).ToHashSet(StringComparer.Ordinal);
         foreach (var record in records)
@@ -410,7 +499,168 @@ public static class DatabaseBatchTargetWriter
                 throw new InvalidDataException(
                     $"Database target record fields do not match table '{tableName}'.");
             }
+
+            foreach (var keyColumn in keyColumns ?? Array.Empty<string>())
+            {
+                if (record.GetProperty(keyColumn).ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+                {
+                    throw new InvalidDataException(
+                        $"Database target record for table '{tableName}' has a null key column '{keyColumn}'.");
+                }
+            }
         }
+    }
+
+    private static void EnsureTargetIndexes(
+        DbConnection connection,
+        DbTransaction transaction,
+        string connectorType,
+        string tableName,
+        DatabaseBatchTargetOptions options,
+        bool createMissing)
+    {
+        if (connectorType != "sqlite")
+        {
+            return;
+        }
+
+        var indexes = ReadSqliteIndexes(connection, transaction, tableName);
+        var keyColumns = options.KeyColumns!;
+        if (!indexes.Values.Any(index =>
+                index.Unique &&
+                !index.IsPartial &&
+                !index.HasExpression &&
+                index.Columns.SequenceEqual(keyColumns, StringComparer.OrdinalIgnoreCase)))
+        {
+            if (!createMissing)
+            {
+                throw new InvalidOperationException(
+                    $"SQLite target table '{tableName}' is missing a unique index for KeyColumns " +
+                    $"[{string.Join(", ", keyColumns)}].");
+            }
+
+            CreateSqliteIndex(
+                connection,
+                transaction,
+                tableName,
+                CreateKeyIndexName(tableName, keyColumns),
+                keyColumns,
+                unique: true,
+                options.CommandTimeoutSeconds);
+            indexes = ReadSqliteIndexes(connection, transaction, tableName);
+        }
+
+        foreach (var definition in options.Indexes ?? Array.Empty<DatabaseIndexDefinition>())
+        {
+            if (indexes.TryGetValue(definition.Name, out var existing))
+            {
+                ValidateIndexDefinition(tableName, definition, existing);
+                continue;
+            }
+            if (!createMissing)
+            {
+                throw new InvalidOperationException(
+                    $"SQLite target table '{tableName}' is missing declared index '{definition.Name}'.");
+            }
+
+            CreateSqliteIndex(
+                connection,
+                transaction,
+                tableName,
+                definition.Name,
+                definition.Columns,
+                definition.Unique,
+                options.CommandTimeoutSeconds);
+            indexes = ReadSqliteIndexes(connection, transaction, tableName);
+        }
+    }
+
+    private static Dictionary<string, SqliteIndex> ReadSqliteIndexes(
+        DbConnection connection,
+        DbTransaction transaction,
+        string tableName)
+    {
+        var (schemaName, actualTableName) = DatabaseConnectorSupport.SplitTableName("sqlite", tableName);
+        var indexNames = new List<(string Name, bool Unique, bool IsPartial)>();
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText =
+                $"PRAGMA {QuoteIdentifier(schemaName)}.index_list({QuoteIdentifier(actualTableName)})";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                indexNames.Add((reader.GetString(1), reader.GetInt64(2) != 0, reader.GetInt64(4) != 0));
+            }
+        }
+
+        var indexes = new Dictionary<string, SqliteIndex>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, unique, isPartial) in indexNames)
+        {
+            var columns = new List<string>();
+            var hasExpression = false;
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText =
+                    $"PRAGMA {QuoteIdentifier(schemaName)}.index_info({QuoteIdentifier(name)})";
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    if (reader.IsDBNull(2))
+                    {
+                        hasExpression = true;
+                        continue;
+                    }
+                    columns.Add(reader.GetString(2));
+                }
+            }
+
+            indexes.Add(name, new SqliteIndex(unique, isPartial, hasExpression, columns.ToArray()));
+        }
+        return indexes;
+    }
+
+    private static void ValidateIndexDefinition(
+        string tableName,
+        DatabaseIndexDefinition definition,
+        SqliteIndex actual)
+    {
+        if (actual.Unique != definition.Unique ||
+            actual.IsPartial ||
+            actual.HasExpression ||
+            !actual.Columns.SequenceEqual(definition.Columns, StringComparer.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"SQLite target table '{tableName}' index '{definition.Name}' is incompatible with its declaration.");
+        }
+    }
+
+    private static void CreateSqliteIndex(
+        DbConnection connection,
+        DbTransaction transaction,
+        string tableName,
+        string indexName,
+        IReadOnlyList<string> columns,
+        bool unique,
+        int commandTimeoutSeconds)
+    {
+        var (schemaName, actualTableName) = DatabaseConnectorSupport.SplitTableName("sqlite", tableName);
+        var qualifiedIndex = $"{QuoteIdentifier(schemaName)}.{QuoteIdentifier(indexName)}";
+        var columnNames = string.Join(", ", columns.Select(QuoteIdentifier));
+        Execute(
+            connection,
+            transaction,
+            $"CREATE {(unique ? "UNIQUE " : string.Empty)}INDEX {qualifiedIndex} " +
+            $"ON {QuoteIdentifier(actualTableName)} ({columnNames})",
+            commandTimeoutSeconds);
+    }
+
+    private static string CreateKeyIndexName(string tableName, IReadOnlyList<string> keyColumns)
+    {
+        var identity = $"{tableName}\0{string.Join("\0", keyColumns)}";
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)))[..16].ToLowerInvariant();
+        return $"UX_m4d_{hash}";
     }
 
     private static void InsertRecords(
@@ -420,6 +670,7 @@ public static class DatabaseBatchTargetWriter
         string quotedTable,
         IReadOnlyList<DatabaseColumn> schema,
         IReadOnlyList<JsonElement> records,
+        IReadOnlyList<string>? keyColumns,
         int commandTimeoutSeconds)
     {
         using var command = connection.CreateCommand();
@@ -429,6 +680,21 @@ public static class DatabaseBatchTargetWriter
         var parameterNames = schema.Select((_, index) => ParameterName(connectorType, $"p{index}")).ToArray();
         command.CommandText =
             $"INSERT INTO {quotedTable} ({string.Join(", ", names)}) VALUES ({string.Join(", ", parameterNames)})";
+        if (connectorType == "sqlite" && keyColumns is { Count: > 0 })
+        {
+            var conflictColumns = string.Join(", ", keyColumns.Select(QuoteIdentifier));
+            var updateColumns = schema
+                .Where(column => !keyColumns.Contains(column.Name, StringComparer.OrdinalIgnoreCase))
+                .Select(column =>
+                {
+                    var quotedColumn = QuoteIdentifier(column.Name);
+                    return $"{quotedColumn} = excluded.{quotedColumn}";
+                })
+                .ToArray();
+            command.CommandText += updateColumns.Length == 0
+                ? $" ON CONFLICT ({conflictColumns}) DO NOTHING"
+                : $" ON CONFLICT ({conflictColumns}) DO UPDATE SET {string.Join(", ", updateColumns)}";
+        }
         var parameters = schema.Select((_, index) =>
         {
             var parameter = command.CreateParameter();
@@ -552,4 +818,6 @@ public static class DatabaseBatchTargetWriter
     }
 
     private sealed record DatabaseColumn(string Name, string SqlType);
+
+    private sealed record SqliteIndex(bool Unique, bool IsPartial, bool HasExpression, string[] Columns);
 }

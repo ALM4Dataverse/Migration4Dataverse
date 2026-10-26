@@ -9,7 +9,6 @@ Use `Invoke-Migration` to run a migration. The remaining commands inspect runs, 
 | `Invoke-Migration` | Binary cmdlet | [Invoke-Migration](./invoke-migration.md) |
 | `Get-MigrationRun` | Binary cmdlet | [Get-MigrationRun](./get-migration-run.md) |
 | `Clear-MigrationTargetTuning` | Binary cmdlet | [Clear-MigrationTargetTuning](./clear-migration-target-tuning.md) |
-| `New-MigrationDatabaseConnection` | Binary cmdlet | [New-MigrationDatabaseConnection](./new-migration-database-connection.md) |
 | `Start-MigrationDatabaseServer` | Binary cmdlet | [Start-MigrationDatabaseServer](./migration-database-server.md) |
 | `Start-MigrationDashboard` | Function | [Migration dashboard](./migration-dashboard.md) |
 | `Stop-MigrationDashboard` | Function | [Migration dashboard](./migration-dashboard.md) |

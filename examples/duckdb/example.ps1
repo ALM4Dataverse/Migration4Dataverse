@@ -11,12 +11,8 @@ $moduleManifest = Join-Path $repositoryRoot 'src/Migration4Dataverse.PowerShell/
 Import-Module -Name $moduleManifest -Force -ErrorAction Stop
 
 $connections = @{
-    'source-db' = New-MigrationDatabaseConnection -Provider DuckDB -ConnectionString `
-        "Data Source=$(Join-Path $dataDirectory 'source.duckdb')"
-    'transform-db' = New-MigrationDatabaseConnection -Provider DuckDB -ConnectionString `
-        "Data Source=$(Join-Path $dataDirectory 'transform.duckdb')"
-    'target-db' = New-MigrationDatabaseConnection -Provider DuckDB -ConnectionString `
-        "Data Source=$(Join-Path $dataDirectory 'output.duckdb')"
+    'source-db' = [System.IO.FileInfo]::new((Join-Path $dataDirectory 'source.duckdb'))
+    'target-db' = [System.IO.FileInfo]::new((Join-Path $dataDirectory 'output.duckdb'))
 }
 
 $steps = @(
@@ -35,14 +31,18 @@ $steps = @(
         }
     }
     @{
-        # Adds an audit row for each input record in the transform database.
+        # Runs one prepared SQL statement for each record.
         Id = 'RecordTransform'
         Type = 'transform'
         Inputs = @('RecordsSource')
         Transform = @{
             Type = 'duckdb'
-            ConnectionId = 'transform-db'
-            Sql = 'INSERT INTO audit VALUES (?, ?)'
+            InitializeSql = @'
+CREATE TABLE IF NOT EXISTS row_rules (suffix VARCHAR);
+DELETE FROM row_rules;
+INSERT INTO row_rules VALUES ('!');
+'@
+            Sql = 'SELECT ? AS Id, upper(?) || (SELECT suffix FROM row_rules) AS Name'
             Parameters = [ordered]@{
                 id = 'Id'
                 name = 'Name'
@@ -50,10 +50,69 @@ $steps = @(
         }
     }
     @{
-        # Persists the records in the target DuckDB accounts table.
+        # Normalizes each bounded batch with set-based DuckDB SQL.
+        Id = 'BatchTransform'
+        Type = 'transform'
+        Inputs = @('RecordTransform')
+        Transform = @{
+            Type = 'duckdb'
+            Mode = 'per_batch'
+            InitializeSql = @'
+CREATE TABLE IF NOT EXISTS batch_rules (minimum_length INTEGER);
+DELETE FROM batch_rules;
+INSERT INTO batch_rules VALUES (4);
+'@
+            Sql = @'
+SELECT __migration_parent_index, Id, upper(Name) AS Name
+FROM __migration4dataverse_input
+WHERE length(Name) >= ?
+ORDER BY Id
+'@
+            Parameters = [ordered]@{
+                minimumLength = 4
+            }
+        }
+    }
+    @{
+        # Stages rows in the same engine-managed database as the whole-dataset transform.
+        Id = 'StagedRecords'
+        Type = 'target'
+        Inputs = @('BatchTransform')
+        Target = @{
+            Type = 'duckdb'
+            Table = 'staged_accounts'
+        }
+    }
+    @{
+        # Reads the completed staged dataset after its target barrier.
+        Id = 'WholeDatasetTransform'
+        Type = 'transform'
+        Inputs = @('StagedRecords')
+        Transform = @{
+            Type = 'duckdb'
+            Mode = 'whole_dataset'
+            Key = 'Id'
+            InitializeSql = @'
+CREATE TABLE IF NOT EXISTS dataset_rules (suffix VARCHAR);
+DELETE FROM dataset_rules;
+INSERT INTO dataset_rules VALUES ('!');
+'@
+            Sql = @'
+SELECT Id, upper(Name) || (SELECT suffix FROM dataset_rules) AS Name
+FROM staged_accounts
+WHERE length(Name) >= ?
+ORDER BY Id
+'@
+            Parameters = [ordered]@{
+                minimumLength = 4
+            }
+        }
+    }
+    @{
+        # Writes completed records to the configured DuckDB database file.
         Id = 'RecordsTarget'
         Type = 'target'
-        Inputs = @('RecordTransform')
+        Inputs = @('WholeDatasetTransform')
         Target = @{
             Type = 'duckdb'
             ConnectionId = 'target-db'

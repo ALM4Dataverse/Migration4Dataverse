@@ -139,8 +139,6 @@ public sealed class InvokeMigrationCommandTests
 
         try
         {
-            using var targetDatabase = new SqliteConnection("Data Source=:memory:");
-            targetDatabase.Open();
             var steps = new Hashtable[]
             {
                 new(StringComparer.OrdinalIgnoreCase)
@@ -221,7 +219,7 @@ public sealed class InvokeMigrationCommandTests
                 {
                     ["source"] = new DirectoryInfo(sourceDirectory),
                     ["target"] = new DirectoryInfo(targetDirectory),
-                    ["database"] = targetDatabase
+                    ["database"] = new FileInfo(Path.Combine(temporaryDirectory, "whatif.sqlite"))
                 })
                 .AddParameter("WhatIf", true)
                 .Invoke();
@@ -233,11 +231,7 @@ public sealed class InvokeMigrationCommandTests
             Assert.Equal(0, result.TargetRowsSucceeded);
             Assert.Empty(Directory.GetFiles(targetDirectory, "*", SearchOption.AllDirectories));
             Assert.False(File.Exists(callbackPath));
-            using (var command = targetDatabase.CreateCommand())
-            {
-                command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'preview_rows'";
-                Assert.Equal(0L, command.ExecuteScalar());
-            }
+            Assert.False(File.Exists(Path.Combine(temporaryDirectory, "whatif.sqlite")));
             Assert.Contains(powershell.Streams.Warning, warning =>
                 warning.Message.Contains("WhatIf preview", StringComparison.Ordinal));
 
@@ -453,8 +447,98 @@ public sealed class InvokeMigrationCommandTests
 
             Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
             Assert.IsType<DependencySchedulerResult>(Assert.Single(output).BaseObject);
-            var rows = ReadJsonLines(Path.Combine(targetDirectory, "accounts", "hashtable-step-definitions"));
+            var rows = ReadJsonLines(Path.Combine(targetDirectory, "accounts"));
             Assert.Equal("Ada", Assert.Single(rows).RootElement.GetProperty("name").GetString());
+        }
+        finally
+        {
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void BinaryCmdletUsesFileInfoConnectionsAndWritesOneCompleteOutputFile()
+    {
+        var temporaryDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"migration4dataverse-fileinfo-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(temporaryDirectory);
+        var sourcePath = Path.Combine(temporaryDirectory, "source.jsonl");
+        var targetPath = Path.Combine(temporaryDirectory, "target.jsonl");
+        WriteJsonLines(
+            sourcePath,
+            """
+            {"Id":"A001","Name":"Account One"}
+            {"Id":"A002","Name":"Account Two"}
+            """);
+
+        try
+        {
+            var steps = new[]
+            {
+                PSObject.AsPSObject(new
+                {
+                    Id = "Source",
+                    Type = "source",
+                    Inputs = Array.Empty<string>(),
+                    Source = new Hashtable(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["Type"] = "jsonl",
+                        ["ConnectionId"] = "source",
+                        ["Key"] = "Id",
+                        ["Options"] = new Hashtable()
+                    }
+                }),
+                PSObject.AsPSObject(new
+                {
+                    Id = "Target",
+                    Type = "target",
+                    Inputs = new[] { "Source" },
+                    Target = new Hashtable(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["Type"] = "jsonl",
+                        ["ConnectionId"] = "target",
+                        ["Operation"] = "Write",
+                        ["Options"] = new Hashtable()
+                    }
+                })
+            };
+
+            using var powershell = System.Management.Automation.PowerShell.Create();
+            powershell.AddCommand("Import-Module")
+                .AddParameter("Name", typeof(InvokeMigrationCommand).Assembly.Location);
+            powershell.Invoke();
+            Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
+
+            powershell.Commands.Clear();
+            var output = powershell.AddCommand("Invoke-Migration")
+                .AddParameter("DatabasePath", Path.Combine(temporaryDirectory, "migration.sqlite3"))
+                .AddParameter("RunName", "FileInfoConnections")
+                .AddParameter("RunId", "fileinfo-connections")
+                .AddParameter("BatchSize", 1)
+                .AddParameter("Steps", steps)
+                .AddParameter("Connections", new Hashtable(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["source"] = new FileInfo(sourcePath),
+                    ["target"] = new FileInfo(targetPath)
+                })
+                .AddParameter("MaxAttempts", 1)
+                .Invoke();
+
+            Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
+            Assert.IsType<DependencySchedulerResult>(Assert.Single(output).BaseObject);
+            Assert.True(File.Exists(targetPath));
+            var rows = ReadJsonLines(targetPath);
+            Assert.Equal(2, rows.Count);
+            Assert.Equal(
+                new[] { "A001", "A002" },
+                rows.Select(row => row.RootElement.GetProperty("Id").GetString())
+                    .OrderBy(id => id, StringComparer.Ordinal)
+                    .ToArray());
+            Assert.DoesNotContain(
+                Directory.EnumerateFiles(temporaryDirectory, "*.jsonl"),
+                path => !string.Equals(path, sourcePath, StringComparison.Ordinal) &&
+                        !string.Equals(path, targetPath, StringComparison.Ordinal));
         }
         finally
         {
@@ -482,6 +566,7 @@ public sealed class InvokeMigrationCommandTests
                 """;
             command.ExecuteNonQuery();
         }
+        sourceConnection.Close();
 
         try
         {
@@ -542,7 +627,7 @@ public sealed class InvokeMigrationCommandTests
                 .AddParameter("Steps", steps)
                 .AddParameter("Connections", new Hashtable(StringComparer.OrdinalIgnoreCase)
                 {
-                    ["source-db"] = sourceConnection,
+                    ["source-db"] = new FileInfo(Path.Combine(temporaryDirectory, "source.sqlite")),
                     ["target-files"] = new DirectoryInfo(targetDirectory)
                 })
                 .Invoke();
@@ -1057,11 +1142,11 @@ public sealed class InvokeMigrationCommandTests
                 Assert.Equal(8, result.TargetRowsSucceeded);
                 Assert.Equal(8, result.TargetRowsExpected);
                 Assert.Equal(2, result.FilteredRows);
-                Assert.Single(ReadJsonLines(Path.Combine(targetDirectory, "Accounts", "typed-connector-test")));
-                Assert.Equal(2, ReadJsonLines(Path.Combine(targetDirectory, "Contacts", "typed-connector-test")).Count);
-                Assert.Equal(2, ReadJsonLines(Path.Combine(targetDirectory, "Products", "typed-connector-test")).Count);
-                Assert.Single(ReadJsonLines(Path.Combine(targetDirectory, "ProductSummary", "typed-connector-test")));
-                Assert.Equal(2, ReadJsonLines(Path.Combine(targetDirectory, "AccountAudit", "typed-connector-test")).Count);
+                Assert.Single(ReadJsonLines(Path.Combine(targetDirectory, "Accounts")));
+                Assert.Equal(2, ReadJsonLines(Path.Combine(targetDirectory, "Contacts")).Count);
+                Assert.Equal(2, ReadJsonLines(Path.Combine(targetDirectory, "Products")).Count);
+                Assert.Single(ReadJsonLines(Path.Combine(targetDirectory, "ProductSummary")));
+                Assert.Equal(2, ReadJsonLines(Path.Combine(targetDirectory, "AccountAudit")).Count);
 
                 var debugStore = new SqliteMigrationStore(databasePath);
                 Assert.Equal(
@@ -1180,12 +1265,12 @@ public sealed class InvokeMigrationCommandTests
                 Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
                 Assert.IsType<DependencySchedulerResult>(Assert.Single(output).BaseObject);
                 var childRows = ReadJsonLines(
-                    Path.Combine(targetDirectory, "Children", "row-linked-source-test"));
+                    Path.Combine(targetDirectory, "Children"));
                 Assert.Single(childRows);
                 Assert.Contains(childRows, row => row.RootElement.GetProperty("name").GetString() == "Child 1");
                 Assert.Equal(
                     2,
-                    ReadJsonLines(Path.Combine(targetDirectory, "Parents", "row-linked-source-test")).Count);
+                    ReadJsonLines(Path.Combine(targetDirectory, "Parents")).Count);
             }
             finally
             {
@@ -1298,10 +1383,8 @@ public sealed class InvokeMigrationCommandTests
                 Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
                 Assert.IsType<DependencySchedulerResult>(Assert.Single(output).BaseObject);
 
-                var childOutputDirectory = Path.Combine(targetDirectory, "Children", "multi-parent-source-test");
-                var childRows = Directory.EnumerateFiles(childOutputDirectory, "*.jsonl")
-                    .OrderBy(path => path, StringComparer.Ordinal)
-                    .SelectMany(File.ReadLines)
+                var childOutputFile = Path.Combine(targetDirectory, "Children");
+                var childRows = File.ReadLines(childOutputFile)
                     .Select(line => JsonDocument.Parse(line))
                     .ToArray();
                 try
@@ -1464,7 +1547,7 @@ public sealed class InvokeMigrationCommandTests
                 Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
                 Assert.IsType<DependencySchedulerResult>(Assert.Single(output).BaseObject);
                 var joinedRows = ReadJsonLines(
-                    Path.Combine(targetDirectory, "JoinResults", "single-join-output-test"));
+                    Path.Combine(targetDirectory, "JoinResults"));
                 try
                 {
                     var joinedRow = Assert.Single(joinedRows);
@@ -1526,15 +1609,12 @@ public sealed class InvokeMigrationCommandTests
             File.WriteAllText(path, content + Environment.NewLine, new UTF8Encoding(false));
         }
 
-        private static List<JsonDocument> ReadJsonLines(string directory)
+        private static List<JsonDocument> ReadJsonLines(string filePath)
         {
             var documents = new List<JsonDocument>();
-            foreach (var path in Directory.EnumerateFiles(directory, "*.jsonl"))
+            foreach (var line in File.ReadLines(filePath))
             {
-                foreach (var line in File.ReadLines(path))
-                {
-                    documents.Add(JsonDocument.Parse(line));
-                }
+                documents.Add(JsonDocument.Parse(line));
             }
             return documents;
         }

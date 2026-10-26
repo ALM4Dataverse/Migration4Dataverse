@@ -1,6 +1,6 @@
 # CSV source
 
-The `csv` source reads records incrementally using CSV parsing rules. Option names are case-insensitive when deserialized. A `System.IO.DirectoryInfo` connection supplies the root directory; `Path` is resolved relative to it.
+The `csv` source reads records incrementally using CSV parsing rules. Option names are case-insensitive when deserialized. A `DirectoryInfo` connection supplies the root directory and requires a relative `Path`; a `FileInfo` names the exact input file and does not use `Path`.
 
 ## Configuration example
 

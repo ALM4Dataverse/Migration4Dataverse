@@ -6,6 +6,23 @@ namespace Migration4Dataverse.Engine.Connectors;
 
 internal static class DatabaseConnectorSupport
 {
+    public static string GetConnectorType(DbConnection connection)
+    {
+        var connectionType = connection.GetType().FullName ?? connection.GetType().Name;
+        if (connectionType.Contains("SqliteConnection", StringComparison.OrdinalIgnoreCase))
+        {
+            return "sqlite";
+        }
+        if (connectionType.Contains("DuckDBConnection", StringComparison.OrdinalIgnoreCase))
+        {
+            return "duckdb";
+        }
+
+        throw new ArgumentException(
+            $"Unsupported database connection type '{connectionType}'.",
+            nameof(connection));
+    }
+
     public static void ValidateConnection(string type, DbConnection connection, string description)
     {
         var connectionType = connection.GetType().FullName ?? connection.GetType().Name;
@@ -128,6 +145,30 @@ internal static class DatabaseConnectorSupport
             JsonValueKind.Array or JsonValueKind.Object => value.GetRawText(),
             _ => throw new InvalidDataException($"Unsupported JSON value kind '{value.ValueKind}'.")
         };
+    }
+
+    public static void AddQueryParameters(
+        DbCommand command,
+        string connectorType,
+        IReadOnlyDictionary<string, JsonElement>? parameters)
+    {
+        if (parameters is null)
+        {
+            return;
+        }
+
+        foreach (var (name, value) in parameters)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(name);
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = connectorType == "duckdb"
+                ? (command.Parameters.Count + 1).ToString(CultureInfo.InvariantCulture)
+                : name[0] is '@' or ':' or '$'
+                    ? name
+                    : $"@{name}";
+            parameter.Value = ToDatabaseValue(value, connectorType, string.Empty);
+            command.Parameters.Add(parameter);
+        }
     }
 
     public static string NormalizeSqlType(string value)

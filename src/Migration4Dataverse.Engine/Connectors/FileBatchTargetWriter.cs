@@ -180,6 +180,262 @@ public static class FileBatchTargetWriter
                 .GetResult());
     }
 
+    public static void WriteSingleFileTargetBatch(
+        string targetFilePath,
+        string runId,
+        string stepId,
+        string batchId,
+        long sequence,
+        string recordsJson)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetFilePath);
+        WriteJsonLinesBatch(
+            GetSingleFileBatchDirectory(targetFilePath, stepId),
+            GetSingleFileRunDirectoryName(runId),
+            batchId,
+            sequence,
+            recordsJson);
+    }
+
+    public static void FinalizeSingleFileTarget(
+        string targetFilePath,
+        string runId,
+        string stepId,
+        string targetType,
+        string optionsJson)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetFilePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetType);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+
+        var batchDirectory = Path.Combine(
+            GetSingleFileBatchDirectory(targetFilePath, stepId),
+            GetSingleFileRunDirectoryName(runId));
+        var batchFiles = Directory.Exists(batchDirectory)
+            ? Directory.GetFiles(batchDirectory, "*.jsonl").OrderBy(path => path, StringComparer.Ordinal).ToArray()
+            : Array.Empty<string>();
+
+        switch (targetType.Trim().ToLowerInvariant())
+        {
+            case "jsonl":
+                StreamingSourceFileConverter.WriteAtomically(targetFilePath, output =>
+                {
+                    foreach (var batchFile in batchFiles)
+                    {
+                        using var input = new FileStream(
+                            batchFile,
+                            FileMode.Open,
+                            FileAccess.Read,
+                            FileShare.Read,
+                            bufferSize: 1024 * 1024,
+                            FileOptions.SequentialScan);
+                        input.CopyTo(output);
+                    }
+                });
+                break;
+            case "csv":
+                FinalizeCsvTarget(targetFilePath, batchFiles, stepId, optionsJson);
+                break;
+            case "parquet":
+                FinalizeParquetTarget(targetFilePath, batchFiles, stepId, optionsJson);
+                break;
+            default:
+                throw new ArgumentException($"File target type '{targetType}' is not supported.");
+        }
+    }
+
+    private static void FinalizeCsvTarget(
+        string targetFilePath,
+        IReadOnlyList<string> batchFiles,
+        string stepId,
+        string optionsJson)
+    {
+        var options = DeserializeOptions<CsvConnectorOptions>(optionsJson, "CSV");
+        options.Validate();
+        if (options.ColumnsByStep is null ||
+            !options.ColumnsByStep.TryGetValue(stepId, out var columns) ||
+            columns is null ||
+            columns.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"CSV target options must declare ColumnsByStep.{stepId}.");
+        }
+
+        var configuration = options.CreateConfiguration();
+        configuration.HasHeaderRecord = false;
+        StreamingSourceFileConverter.WriteAtomically(targetFilePath, stream =>
+        {
+            using var textWriter = new StreamWriter(
+                stream,
+                options.CreateEncoding(),
+                bufferSize: 1024 * 1024,
+                leaveOpen: true);
+            using var csv = new CsvWriter(textWriter, configuration);
+            if (options.WriteHeaderRecord)
+            {
+                foreach (var column in columns)
+                {
+                    csv.WriteField(column);
+                }
+                csv.NextRecord();
+            }
+
+            foreach (var record in ReadSingleFileTargetRecords(batchFiles, stepId))
+            {
+                foreach (var column in columns)
+                {
+                    if (!record.TryGetProperty(column, out var value))
+                    {
+                        throw new InvalidDataException(
+                            $"CSV target record for step '{stepId}' is missing configured column '{column}'.");
+                    }
+                    csv.WriteField(ToCsvValue(value, options.NullValue));
+                }
+                csv.NextRecord();
+            }
+            csv.Flush();
+            textWriter.Flush();
+        });
+    }
+
+    private static void FinalizeParquetTarget(
+        string targetFilePath,
+        IReadOnlyList<string> batchFiles,
+        string stepId,
+        string optionsJson)
+    {
+        var options = DeserializeOptions<ParquetConnectorOptions>(optionsJson, "Parquet");
+        options.Validate();
+        var schema = options.GetSchema(stepId).ToArray();
+        if (batchFiles.Count == 0)
+        {
+            var parquetSchema = new ParquetSchema(schema.Select(ParquetConnectorOptions.CreateDataField));
+            var parquetOptions = options.CreateParquetOptions(forWriting: true);
+            StreamingSourceFileConverter.WriteAtomically(targetFilePath, stream =>
+                ParquetSerializer.SerializeUntypedAsync(
+                        Array.Empty<IDictionary<string, object?>>(),
+                        parquetSchema,
+                        stream,
+                        parquetOptions,
+                        new Dictionary<string, string>(StringComparer.Ordinal),
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult());
+            return;
+        }
+
+        var fullTargetPath = Path.GetFullPath(targetFilePath);
+        var targetDirectory = Path.GetDirectoryName(fullTargetPath)
+            ?? throw new InvalidOperationException($"Target file '{fullTargetPath}' has no parent directory.");
+        Directory.CreateDirectory(targetDirectory);
+        var mergedJsonLinesPath = Path.Combine(
+            targetDirectory,
+            $".{Path.GetFileName(fullTargetPath)}.{Guid.NewGuid():N}.jsonl.tmp");
+        try
+        {
+            using (var merged = new FileStream(
+                       mergedJsonLinesPath,
+                       FileMode.CreateNew,
+                       FileAccess.Write,
+                       FileShare.None,
+                       bufferSize: 1024 * 1024,
+                       FileOptions.SequentialScan))
+            {
+                foreach (var batchFile in batchFiles)
+                {
+                    using var input = new FileStream(
+                        batchFile,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.Read,
+                        bufferSize: 1024 * 1024,
+                        FileOptions.SequentialScan);
+                    input.CopyTo(merged);
+                }
+            }
+
+            var sourceOptions = new ParquetConnectorOptions
+            {
+                CompressionMethod = options.CompressionMethod,
+                CompressionLevel = options.CompressionLevel,
+                TargetRowGroupSize = options.TargetRowGroupSize,
+                MaxSourceRowGroupRows = options.MaxSourceRowGroupRows,
+                DictionaryEncodingThreshold = options.DictionaryEncodingThreshold,
+                DictionaryEncodingSampleSize = options.DictionaryEncodingSampleSize,
+                TreatByteArrayAsString = options.TreatByteArrayAsString,
+                TreatBigIntegersAsDates = options.TreatBigIntegersAsDates,
+                UseDateOnlyTypeForDates = options.UseDateOnlyTypeForDates,
+                SourceSchemaByStep = new Dictionary<string, ParquetFieldSchema[]>(StringComparer.Ordinal)
+                {
+                    [stepId] = schema
+                }
+            };
+            StreamingSourceFileConverter.ConvertJsonLinesToParquet(
+                mergedJsonLinesPath,
+                targetFilePath,
+                stepId,
+                JsonSerializer.Serialize(sourceOptions, JsonOptions));
+        }
+        finally
+        {
+            if (File.Exists(mergedJsonLinesPath))
+            {
+                File.Delete(mergedJsonLinesPath);
+            }
+        }
+    }
+
+    private static IEnumerable<JsonElement> ReadSingleFileTargetRecords(
+        IReadOnlyList<string> batchFiles,
+        string stepId)
+    {
+        foreach (var batchFile in batchFiles)
+        {
+            using var stream = new FileStream(
+                batchFile,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 1024 * 1024,
+                FileOptions.SequentialScan);
+            using var reader = new StreamReader(
+                stream,
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true),
+                detectEncodingFromByteOrderMarks: true,
+                bufferSize: 1024 * 1024);
+            long recordNumber = 0;
+            while (reader.ReadLine() is { } line)
+            {
+                recordNumber++;
+                using var document = JsonDocument.Parse(line);
+                if (document.RootElement.ValueKind != JsonValueKind.Object)
+                {
+                    throw new InvalidDataException(
+                        $"Staged file target batch '{batchFile}' contains a non-object record at line {recordNumber}.");
+                }
+                yield return document.RootElement.Clone();
+            }
+        }
+    }
+
+    private static string GetSingleFileBatchDirectory(string targetFilePath, string stepId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
+        var fullPath = Path.GetFullPath(targetFilePath);
+        var directory = Path.GetDirectoryName(fullPath)
+            ?? throw new InvalidOperationException($"Target file '{fullPath}' has no parent directory.");
+        var stepHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(stepId))).ToLowerInvariant();
+        return Path.Combine(directory, $".{Path.GetFileName(fullPath)}.migration-batches", stepHash);
+    }
+
+    private static string GetSingleFileRunDirectoryName(string runId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(runId));
+        return $"run-{Convert.ToHexString(hash).ToLowerInvariant()}";
+    }
+
     private static T DeserializeOptions<T>(string optionsJson, string formatName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(optionsJson);

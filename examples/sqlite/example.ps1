@@ -11,17 +11,13 @@ $moduleManifest = Join-Path $repositoryRoot 'src/Migration4Dataverse.PowerShell/
 Import-Module -Name $moduleManifest -Force -ErrorAction Stop
 
 $connections = @{
-    'source-db' = New-MigrationDatabaseConnection -Provider SQLite -ConnectionString `
-        "Data Source=$(Join-Path $dataDirectory 'source.sqlite')"
-    'transform-db' = New-MigrationDatabaseConnection -Provider SQLite -ConnectionString `
-        "Data Source=$(Join-Path $dataDirectory 'transform.sqlite')"
-    'target-db' = New-MigrationDatabaseConnection -Provider SQLite -ConnectionString `
-        "Data Source=$(Join-Path $dataDirectory 'output.sqlite')"
+    'source-db' = [System.IO.FileInfo]::new((Join-Path $dataDirectory 'source.sqlite'))
+    'target-db' = [System.IO.FileInfo]::new((Join-Path $dataDirectory 'output.sqlite'))
 }
 
 $steps = @(
     @{
-        # Reads ordered records from the source SQLite database.
+        # Reads a parameterized, read-only query in stable key order.
         Id = 'RecordsSource'
         Type = 'source'
         Inputs = @()
@@ -30,46 +26,101 @@ $steps = @(
             ConnectionId = 'source-db'
             Key = 'Id'
             Options = @{
-                Query = 'SELECT Id, Name FROM records ORDER BY Id'
+                Query = 'SELECT Id, Name FROM records WHERE Id >= @minimumId ORDER BY Id'
+                Parameters = @{
+                    minimumId = 'A001'
+                }
             }
         }
     }
     @{
-        # Writes an audit row for each record and uppercases its name.
-        Id = 'RecordTransform'
+        # Runs one set-based SQL transform for each bounded input batch.
+        Id = 'NormalizeBatch'
         Type = 'transform'
         Inputs = @('RecordsSource')
         Transform = @{
             Type = 'sqlite'
-            ConnectionId = 'transform-db'
+            Mode = 'per_batch'
+            InitializeSql = @'
+CREATE TABLE IF NOT EXISTS batch_rules (minimum_length INTEGER NOT NULL);
+DELETE FROM batch_rules;
+INSERT INTO batch_rules VALUES (4);
+'@
+            Sql = @'
+SELECT __migration_parent_index, Id, upper(Name) AS Name
+FROM __migration4dataverse_input
+WHERE length(Name) >= (SELECT minimum_length FROM batch_rules)
+ORDER BY Id
+'@
         }
-        Script = {
-            param($row, $connection)
-            $command = $connection.CreateCommand()
-            try {
-                $command.CommandText = 'INSERT INTO audit (Id, OriginalName) VALUES (@id, @name)'
-                $null = $command.Parameters.AddWithValue('@id', $row.Id)
-                $null = $command.Parameters.AddWithValue('@name', $row.Name)
-                $null = $command.ExecuteNonQuery()
-            }
-            finally {
-                $command.Dispose()
-            }
-            @{
-                Id = [string]$row.Id
-                Name = ([string]$row.Name).ToUpperInvariant()
+    }
+    @{
+        # Stages all normalized rows for a whole-dataset SQL join.
+        Id = 'StagedRecords'
+        Type = 'target'
+        Inputs = @('NormalizeBatch')
+        Target = @{
+            Type = 'sqlite'
+            Table = 'staged_records'
+            Options = @{
+                CreateTable = $true
+                Schema = [ordered]@{
+                    Id = 'TEXT'
+                    Name = 'TEXT'
+                }
+                KeyColumns = @('Id')
+                Indexes = @(
+                    @{
+                        Name = 'IX_staged_records_name'
+                        Columns = @('Name')
+                    }
+                )
             }
         }
     }
     @{
-        # Persists the transformed records in the target SQLite accounts table.
+        # Waits for staging to finish, then runs one SQL query across the full dataset.
+        Id = 'EnrichedRecords'
+        Type = 'transform'
+        Inputs = @('StagedRecords')
+        Transform = @{
+            Type = 'sqlite'
+            Mode = 'whole_dataset'
+            Key = 'Id'
+            InitializeSql = @'
+CREATE TABLE IF NOT EXISTS dataset_rules (suffix TEXT NOT NULL);
+DELETE FROM dataset_rules;
+INSERT INTO dataset_rules VALUES ('!');
+'@
+            Sql = @'
+SELECT s.Id, upper(s.Name) || (SELECT suffix FROM dataset_rules) AS Name
+FROM staged_records AS s
+ORDER BY s.Id
+'@
+        }
+    }
+    @{
+        # Upserts the fully enriched output using the declared stable key.
         Id = 'RecordsTarget'
         Type = 'target'
-        Inputs = @('RecordTransform')
+        Inputs = @('EnrichedRecords')
         Target = @{
             Type = 'sqlite'
             ConnectionId = 'target-db'
             Table = 'accounts'
+            Options = @{
+                Schema = [ordered]@{
+                    Id = 'TEXT'
+                    Name = 'TEXT'
+                }
+                KeyColumns = @('Id')
+                Indexes = @(
+                    @{
+                        Name = 'IX_accounts_name'
+                        Columns = @('Name')
+                    }
+                )
+            }
         }
     }
 )

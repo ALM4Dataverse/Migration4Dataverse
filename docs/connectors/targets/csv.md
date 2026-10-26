@@ -1,6 +1,6 @@
 # CSV target
 
-The `csv` target writes one CSV file per batch. Configure `ColumnsByStep` to define the output columns and their order for every CSV target step. Option names are case-insensitive when deserialized.
+The `csv` target writes the complete step output to one CSV file. Batches are staged separately and combined in sequence after the migration succeeds, with at most one header row. Configure `ColumnsByStep` to define the output columns and their order for every CSV target step. Option names are case-insensitive when deserialized.
 
 ## Configuration example
 
@@ -8,7 +8,7 @@ The `csv` target writes one CSV file per batch. Configure `ColumnsByStep` to def
 Target = @{
     Type = 'csv'
     ConnectionId = 'output-files'
-    Path = 'customers'
+    Path = 'customers.csv'
     Operation = 'Write'
     Options = @{
         ColumnsByStep = @{
@@ -34,7 +34,7 @@ Defaults are shown below. `ColumnTypes` accepts `string` (default), `bool`/`bool
 | `DetectEncodingFromByteOrderMarks` | `true` | Source-reader option; does not change target encoding. |
 | `EmitByteOrderMark` | `false` | Emit the selected encoding's preamble when enabled. |
 | `HasHeaderRecord` | `true` | Source-reader option; target header output is controlled by `WriteHeaderRecord`. |
-| `WriteHeaderRecord` | `true` | Include the configured column names in each batch file. |
+| `WriteHeaderRecord` | `true` | Include one configured column-name header at the beginning of the output file. |
 | `Headers` | `null` | Source-reader option for inputs without a header row. |
 | `Columns` | `null` | Source projection; not a target schema. |
 | `ColumnTypes` | `{}` | Source conversion map; target fields are formatted from mapped values. |
@@ -52,4 +52,4 @@ Defaults are shown below. `ColumnTypes` accepts `string` (default), `bool`/`bool
 | `ColumnsByStep` | `null` | Required output schema: step ID maps to ordered output field names. |
 | `SourceColumnsByStep` | `null` | Fixture-conversion helper schema; not used by the runtime CSV target. |
 
-`ColumnsByStep` must contain a non-empty, unique column list for each step written by the CSV target. A missing target step entry fails the write. The target serializes mapped records in the declared column order.
+`ConnectionId` must resolve to a `DirectoryInfo` or `FileInfo`. With a directory, `Path` names the exact output file relative to that directory; with a `FileInfo`, omit `Path`. `ColumnsByStep` must contain a non-empty, unique column list for each step written by the CSV target. A missing target step entry fails finalization. The target serializes mapped records in the declared column order and atomically replaces its destination during the scheduler's completion phase; multiple file targets are not a cross-file transaction.

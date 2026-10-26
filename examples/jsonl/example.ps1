@@ -15,7 +15,7 @@ Import-Module -Name $moduleManifest -Force -ErrorAction Stop
 $null = [System.IO.Directory]::CreateDirectory($targetDirectory)
 $connections = @{
     'example-files' = [System.IO.DirectoryInfo]::new($dataDirectory)
-    'example-jsonl' = [System.IO.DirectoryInfo]::new($targetDirectory)
+    'example-jsonl' = [System.IO.FileInfo]::new((Join-Path $targetDirectory 'accounts.jsonl'))
 }
 
 $steps = @(
@@ -56,7 +56,6 @@ $steps = @(
         Target = @{
             Type = 'jsonl'
             ConnectionId = 'example-jsonl'
-            Path = 'accounts'
             Operation = 'Write'
             BatchSize = 100
             Options = @{}

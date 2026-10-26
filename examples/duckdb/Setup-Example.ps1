@@ -7,10 +7,9 @@ $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'
 $moduleManifest = Join-Path $repositoryRoot 'src/Migration4Dataverse.PowerShell/Migration4Dataverse.PowerShell.psd1'
 Import-Module -Name $moduleManifest -Force -ErrorAction Stop
 
-$source = New-MigrationDatabaseConnection -Provider DuckDB -ConnectionString `
-    "Data Source=$(Join-Path $dataDirectory 'source.duckdb')"
-$transform = New-MigrationDatabaseConnection -Provider DuckDB -ConnectionString `
-    "Data Source=$(Join-Path $dataDirectory 'transform.duckdb')"
+$source = [Migration4Dataverse.Engine.Connectors.MigrationDatabaseConnectionFactory]::Create(
+    'DuckDB',
+    "Data Source=$(Join-Path $dataDirectory 'source.duckdb')")
 try {
     $source.Open()
     $command = $source.CreateCommand()
@@ -25,22 +24,9 @@ try {
     finally {
         $command.Dispose()
     }
-
-    $transform.Open()
-    $command = $transform.CreateCommand()
-    try {
-        $command.CommandText = 'DROP TABLE IF EXISTS audit'
-        $null = $command.ExecuteNonQuery()
-        $command.CommandText = 'CREATE TABLE audit (Id VARCHAR, OriginalName VARCHAR)'
-        $null = $command.ExecuteNonQuery()
-    }
-    finally {
-        $command.Dispose()
-    }
 }
 finally {
     $source.Dispose()
-    $transform.Dispose()
 }
 
-Write-Host "DuckDB source and transform databases are ready in '$dataDirectory'."
+Write-Host "DuckDB source database is ready in '$dataDirectory'. The transform database is managed by Invoke-Migration."

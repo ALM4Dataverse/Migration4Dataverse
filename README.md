@@ -37,7 +37,7 @@ pwsh ./examples/csv/example.ps1
 > [!NOTE]
 > The examples import the PowerShell module from this checkout. Build the solution in Release configuration before running them.
 
-The setup script prepares the sample input; the example reads it, transforms each row, and writes a CSV batch output. For a different connector, choose one of the examples below.
+The setup script prepares the sample input; the example reads it, transforms each row, and publishes one complete CSV output file after the run succeeds. For a different connector, choose one of the examples below.
 
 ## Define a migration
 
@@ -103,11 +103,11 @@ Each target folder contains its own `Setup-Example.ps1` and `example.ps1`. The D
 |---|---|---|---|
 | Dataverse | [example.ps1](./examples/dataverse/example.ps1) | [Setup-Example.ps1](./examples/dataverse/Setup-Example.ps1) | Imports a multi-table dataset with keyed joins to parent records. |
 | Dataverse (sequential) | [example-sequential.ps1](./examples/dataverse/example-sequential.ps1) | [Setup-Example.ps1](./examples/dataverse/Setup-Example.ps1) | Uses completion dependencies and alternate keys for lookups. |
-| JSON Lines | [example.ps1](./examples/jsonl/example.ps1) | [Setup-Example.ps1](./examples/jsonl/Setup-Example.ps1) | Writes JSON Lines output by migration batch. |
-| CSV | [example.ps1](./examples/csv/example.ps1) | [Setup-Example.ps1](./examples/csv/Setup-Example.ps1) | Reads and writes CSV with explicit column and type settings. |
-| Parquet | [example.ps1](./examples/parquet/example.ps1) | [Setup-Example.ps1](./examples/parquet/Setup-Example.ps1) | Writes Parquet using an explicit output schema. |
-| SQLite | [example.ps1](./examples/sqlite/example.ps1) | [Setup-Example.ps1](./examples/sqlite/Setup-Example.ps1) | Reads and writes SQLite, including a per-row database transform. |
-| DuckDB | [example.ps1](./examples/duckdb/example.ps1) | [Setup-Example.ps1](./examples/duckdb/Setup-Example.ps1) | Reads and writes DuckDB using a prepared transform statement. |
+| JSON Lines | [example.ps1](./examples/jsonl/example.ps1) | [Setup-Example.ps1](./examples/jsonl/Setup-Example.ps1) | Uses a `FileInfo` output connection to publish one complete JSON Lines file. |
+| CSV | [example.ps1](./examples/csv/example.ps1) | [Setup-Example.ps1](./examples/csv/Setup-Example.ps1) | Reads and writes CSV with explicit column and type settings; outputs one complete file. |
+| Parquet | [example.ps1](./examples/parquet/example.ps1) | [Setup-Example.ps1](./examples/parquet/Setup-Example.ps1) | Writes one complete Parquet file using an explicit output schema. |
+| SQLite | [example.ps1](./examples/sqlite/example.ps1) | [Setup-Example.ps1](./examples/sqlite/Setup-Example.ps1) | File-path connections, parameterized queries, upfront SQL, per-batch and whole-dataset transforms with managed staging, schema/index validation, and keyed upserts. |
+| DuckDB | [example.ps1](./examples/duckdb/example.ps1) | [Setup-Example.ps1](./examples/duckdb/Setup-Example.ps1) | File-path connections and upfront SQL with per-row, per-batch, and whole-dataset transforms. |
 | Custom PowerShell | [example.ps1](./examples/custom/example.ps1) | [Setup-Example.ps1](./examples/custom/Setup-Example.ps1) | Writes a batch with a custom PowerShell callback. |
 
 Run setup and migration from the repository root. For example:

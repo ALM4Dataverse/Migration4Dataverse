@@ -62,7 +62,50 @@ internal static partial class PowerShellMigrationStepFactory
         IMigrationStore? store = null,
         int maxTargetConcurrency = 32,
         bool disableDataverseRetriesForDiagnostics = false,
-        bool whatIf = false)
+        bool whatIf = false,
+        string? runId = null,
+        string? migrationDatabasePath = null)
+    {
+        var ownedConnections = new List<DbConnection>();
+        try
+        {
+            return CreateGraphCore(
+                stepObjects,
+                connections,
+                executor,
+                defaultBatchSize,
+                captureDebugData,
+                store,
+                maxTargetConcurrency,
+                disableDataverseRetriesForDiagnostics,
+                whatIf,
+                runId,
+                migrationDatabasePath,
+                ownedConnections);
+        }
+        catch
+        {
+            foreach (var connection in ownedConnections)
+            {
+                connection.Dispose();
+            }
+            throw;
+        }
+    }
+
+    private static MigrationStepSet CreateGraphCore(
+        IEnumerable<PSObject> stepObjects,
+        IDictionary connections,
+        PowerShellScriptExecutor executor,
+        int defaultBatchSize,
+        bool captureDebugData,
+        IMigrationStore? store,
+        int maxTargetConcurrency,
+        bool disableDataverseRetriesForDiagnostics,
+        bool whatIf,
+        string? runId,
+        string? migrationDatabasePath,
+        List<DbConnection> ownedConnections)
     {
         ArgumentNullException.ThrowIfNull(stepObjects);
         ArgumentNullException.ThrowIfNull(connections);
@@ -70,13 +113,27 @@ internal static partial class PowerShellMigrationStepFactory
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(defaultBatchSize);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxTargetConcurrency);
 
-        var inputs = stepObjects
-            .Select(step => ParseGraphStep(step, connections, defaultBatchSize))
+        var graphSteps = stepObjects.ToArray();
+        var wholeDatasetStageTargetIds = GetWholeDatasetStageTargetIds(graphSteps);
+        var inputs = graphSteps
+            .Select(step => ParseGraphStep(
+                step,
+                connections,
+                defaultBatchSize,
+                wholeDatasetStageTargetIds))
             .ToArray();
         if (inputs.Length == 0)
         {
             throw new ArgumentException("At least one migration step must be provided.", nameof(stepObjects));
         }
+        ValidateGraph(inputs);
+        ValidateFileTargetPaths(inputs);
+        inputs = ConfigureDatabaseConnectorConnections(inputs, ownedConnections);
+        inputs = ConfigureManagedTransformConnections(
+            inputs,
+            runId,
+            migrationDatabasePath,
+            ownedConnections);
         ValidateGraph(inputs);
         ValidateDatabaseSourceConnections(inputs);
         var dispatchWeights = CalculatePipelineDispatchWeights(inputs);
@@ -243,6 +300,14 @@ internal static partial class PowerShellMigrationStepFactory
                         input.BatchSize,
                         readerFactory.CreateDelegate()).CreateReader();
                 }
+                else if (input.Type == "transform" && input.TransformMode == "whole_dataset")
+                {
+                    sourceLevel = CreateGraphWholeDatasetTransformSourceLevel(input);
+                    sourceReader = new HierarchyBatchSource(
+                        sourceLevel,
+                        input.BatchSize,
+                        readerFactory.CreateDelegate()).CreateReader();
+                }
                 else if (input.Type == "join")
                 {
                     if (store is null)
@@ -279,6 +344,7 @@ internal static partial class PowerShellMigrationStepFactory
                 var childContexts = consumers.TryGetValue(input.Id, out var childSteps)
                     ? childSteps.Where(child =>
                             child.Type != "join" &&
+                            !(child.Type == "transform" && child.TransformMode == "whole_dataset") &&
                             !(child.Type == "source" && child.RowDependencies.Length > 0))
                         .Select(child => new Hashtable(StringComparer.Ordinal)
                     {
@@ -308,9 +374,11 @@ internal static partial class PowerShellMigrationStepFactory
                     ["PipelineThroughputMeter"] = throughputMeter,
                     ["DisableDataverseRetriesForDiagnostics"] = disableDataverseRetriesForDiagnostics,
                     ["TransformType"] = input.TransformType ?? string.Empty,
+                    ["TransformMode"] = input.TransformMode ?? string.Empty,
                     ["TransformConnectionId"] = input.TransformConnectionId ?? string.Empty,
                     ["TransformSql"] = input.TransformSql ?? string.Empty,
                     ["TransformParametersJson"] = input.TransformParametersJson ?? "{}",
+                    ["TransformCommandTimeoutSeconds"] = input.TransformCommandTimeoutSeconds,
                     ["Store"] = store,
                     ["BatchSize"] = input.BatchSize,
                     ["Children"] = childContexts,
@@ -388,6 +456,22 @@ internal static partial class PowerShellMigrationStepFactory
                     StepCompletionCoordinator = stepCompletionCoordinator,
                     TryAcquireExecutionLease = tryAcquireExecutionLease,
                     ExecuteBatchWithExecutionLeaseAsync = handlerWithLease,
+                    CompleteAsync = !whatIf &&
+                                    input.Type == "target" &&
+                                    input.TargetType is "jsonl" or "csv" or "parquet"
+                        ? cancellationToken =>
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            FileBatchTargetWriter.FinalizeSingleFileTarget(
+                                input.TargetPath!,
+                                runId ?? throw new InvalidOperationException(
+                                    $"File target '{input.Id}' requires a run ID for finalization."),
+                                input.Id,
+                                input.TargetType!,
+                                input.TargetOptionsJson ?? "{}");
+                            return Task.CompletedTask;
+                        }
+                        : null,
                     DispatchWeight = dispatchWeights[input.Id]
                 });
             }
@@ -409,13 +493,223 @@ internal static partial class PowerShellMigrationStepFactory
             definitions,
             semaphores.Values.Select(value => value.Semaphore).ToArray(),
             targetControllers,
-            throughputMeter);
+            throughputMeter,
+            ownedConnections);
+    }
+
+    private static GraphStepInput[] ConfigureDatabaseConnectorConnections(
+        IReadOnlyList<GraphStepInput> inputs,
+        ICollection<DbConnection> ownedConnections)
+    {
+        var connectionsById = new Dictionary<string, (string Provider, string Path, DbConnection Connection)>(
+            StringComparer.OrdinalIgnoreCase);
+
+        DbConnection GetConnection(
+            string connectionId,
+            object? pathConnection,
+            string databasePath,
+            string provider,
+            string stepId,
+            string role)
+        {
+            if (connectionsById.TryGetValue(connectionId, out var existing))
+            {
+                if (!string.Equals(existing.Provider, provider, StringComparison.Ordinal) ||
+                    !string.Equals(existing.Path, databasePath, OperatingSystem.IsWindows()
+                        ? StringComparison.OrdinalIgnoreCase
+                        : StringComparison.Ordinal))
+                {
+                    throw new ArgumentException(
+                        $"Database {role} steps using connection ID '{connectionId}' must use the same provider and database path.");
+                }
+                return existing.Connection;
+            }
+
+            if (pathConnection is not (FileInfo or DirectoryInfo))
+            {
+                throw new ArgumentException(
+                    $"Database {role} step '{stepId}' requires a FileInfo or DirectoryInfo in -Connections.");
+            }
+            var connection = MigrationDatabaseConnectionFactory.CreateForPath(provider, databasePath);
+            DatabaseConnectorSupport.ValidateConnection(provider, connection, $"{role} '{stepId}'");
+            ownedConnections.Add(connection);
+            connectionsById.Add(connectionId, (provider, databasePath, connection));
+            return connection;
+        }
+
+        return inputs.Select(input =>
+        {
+            if (input.Type == "source" && input.SourceType is "sqlite" or "duckdb")
+            {
+                var connection = GetConnection(
+                    input.SourceConnectionId!,
+                    input.SourceConnection,
+                    input.SourcePath,
+                    input.SourceType,
+                    input.Id,
+                    "source");
+                return input with { SourceConnection = connection };
+            }
+            if (input.Type == "target" &&
+                input.TargetType is "sqlite" or "duckdb" &&
+                input.TargetConnection is not null)
+            {
+                var connection = GetConnection(
+                    input.TargetConnectionId!,
+                    input.TargetConnection,
+                    input.TargetPath!,
+                    input.TargetType,
+                    input.Id,
+                    "target");
+                return input with { TargetConnection = connection };
+            }
+            return input;
+        }).ToArray();
+    }
+
+    private static HashSet<string> GetWholeDatasetStageTargetIds(IReadOnlyList<PSObject> steps)
+    {
+        var stageTargetIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var step in steps)
+        {
+            if (!string.Equals(
+                    GetString(step, "Type", required: false),
+                    "transform",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var transform = GetMap(GetProperty(step, "Transform"), "Transform", required: false);
+            if (transform is null || !string.Equals(
+                    GetString(transform, "Mode", required: false),
+                    "whole_dataset",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var stepId = GetString(step, "Id", required: true)!;
+            var inputs = ParseInputDefinitions(GetProperty(step, "Inputs"), stepId);
+            if (inputs.Length == 1)
+            {
+                stageTargetIds.Add(inputs[0].Job);
+            }
+        }
+        return stageTargetIds;
+    }
+
+    private static void ValidateFileTargetPaths(IReadOnlyList<GraphStepInput> inputs)
+    {
+        var pathComparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        var duplicatePath = inputs
+            .Where(input => input.Type == "target" && input.TargetType is "jsonl" or "csv" or "parquet")
+            .GroupBy(input => Path.GetFullPath(input.TargetPath!), pathComparer)
+            .FirstOrDefault(group => group.Count() > 1);
+        if (duplicatePath is not null)
+        {
+            throw new ArgumentException(
+                $"File target steps cannot share output path '{duplicatePath.Key}'.");
+        }
+    }
+
+    private static GraphStepInput[] ConfigureManagedTransformConnections(
+        IReadOnlyList<GraphStepInput> inputs,
+        string? runId,
+        string? migrationDatabasePath,
+        ICollection<DbConnection> ownedConnections)
+    {
+        var transforms = inputs
+            .Where(input => input.Type == "transform" && input.TransformType is "sqlite" or "duckdb")
+            .ToArray();
+        if (transforms.Length == 0)
+        {
+            return inputs.ToArray();
+        }
+        if (string.IsNullOrWhiteSpace(runId) || string.IsNullOrWhiteSpace(migrationDatabasePath))
+        {
+            throw new ArgumentException(
+                "Database transforms require a migration run ID and -DatabasePath so the engine can manage their database files.");
+        }
+
+        var byId = inputs.ToDictionary(input => input.Id, StringComparer.Ordinal);
+        var managedStageTargetIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var transform in transforms)
+        {
+            string databaseStepId;
+            if (transform.TransformMode == "whole_dataset")
+            {
+                if (transform.Inputs.Length != 1 ||
+                    !byId.TryGetValue(transform.Inputs[0], out var stageTarget) ||
+                    stageTarget.Type != "target" ||
+                    stageTarget.TargetType != transform.TransformType)
+                {
+                    throw new ArgumentException(
+                        $"Whole-dataset {transform.TransformType} transform '{transform.Id}' must depend on one matching database staging Target.");
+                }
+                if (!managedStageTargetIds.Add(stageTarget.Id))
+                {
+                    throw new ArgumentException(
+                        $"Database staging Target '{stageTarget.Id}' cannot be shared by multiple whole-dataset transforms.");
+                }
+                databaseStepId = transform.Id;
+            }
+            else
+            {
+                databaseStepId = transform.Id;
+            }
+
+            var connection = MigrationDatabaseConnectionFactory.CreateManagedTransformConnection(
+                transform.TransformType!,
+                migrationDatabasePath,
+                runId,
+                databaseStepId);
+            ownedConnections.Add(connection);
+            if (!string.IsNullOrWhiteSpace(transform.TransformInitializeSql))
+            {
+                var openedConnection = connection.State != System.Data.ConnectionState.Open;
+                if (openedConnection)
+                {
+                    connection.Open();
+                }
+                try
+                {
+                    using var command = connection.CreateCommand();
+                    command.CommandText = transform.TransformInitializeSql;
+                    command.CommandTimeout = transform.TransformCommandTimeoutSeconds;
+                    command.ExecuteNonQuery();
+                }
+                finally
+                {
+                    if (openedConnection)
+                    {
+                        connection.Close();
+                    }
+                }
+            }
+            DatabaseConnectorSupport.ValidateConnection(
+                transform.TransformType!,
+                connection,
+                $"transform '{transform.Id}'");
+
+            if (transform.TransformMode == "whole_dataset")
+            {
+                var stageTarget = byId[transform.Inputs[0]];
+                byId[stageTarget.Id] = stageTarget with { TargetConnection = connection };
+            }
+            byId[transform.Id] = transform with { TransformConnection = connection };
+        }
+
+        return inputs.Select(input => byId[input.Id]).ToArray();
     }
 
     private static GraphStepInput ParseGraphStep(
         PSObject step,
         IDictionary connections,
-        int defaultBatchSize)
+        int defaultBatchSize,
+        IReadOnlySet<string> wholeDatasetStageTargetIds)
     {
         ArgumentNullException.ThrowIfNull(step);
         var id = GetString(step, "Id", required: true)!;
@@ -552,22 +846,20 @@ internal static partial class PowerShellMigrationStepFactory
             }
             sourceConnectionId = GetRequiredString(source, "ConnectionId");
             sourceConnection = ResolveConnection(connections, sourceConnectionId, id, "source");
-            if (sourceType is "sqlite" or "duckdb")
+            if (sourceType is "sqlite" or "duckdb" &&
+                sourceConnection is not (FileInfo or DirectoryInfo))
             {
-                if (sourceConnection is not DbConnection databaseConnection)
-                {
-                    throw new ArgumentException(
-                        $"Database source step '{id}' requires a DbConnection in -Connections.");
-                }
-                DatabaseConnectorSupport.ValidateConnection(sourceType, databaseConnection, $"source '{id}'");
-                if (!string.IsNullOrWhiteSpace(GetString(source, "Path", required: false)))
-                {
-                    throw new ArgumentException($"Database source step '{id}' must not declare a Path.");
-                }
+                throw new ArgumentException(
+                    $"Database source step '{id}' requires a FileInfo or DirectoryInfo in -Connections.");
             }
+            var configuredSourcePath = GetString(
+                source,
+                "Path",
+                required: sourceConnection is DirectoryInfo &&
+                          sourceType is "jsonl" or "csv" or "parquet" or "sqlite" or "duckdb");
             sourcePath = ResolveConnectorPath(
                 sourceConnection,
-                GetString(source, "Path", required: sourceType is "jsonl" or "csv" or "parquet") ?? string.Empty,
+                configuredSourcePath ?? string.Empty,
                 sourceType,
                 $"Source path for step '{id}'");
             if (sourceType == "dataverse")
@@ -589,12 +881,27 @@ internal static partial class PowerShellMigrationStepFactory
             {
                 var databaseSourceOptions = DatabaseSourceOptions.FromJson(sourceOptionsJson, id);
                 databaseSourceOptions.Validate(id);
+                if (sourceType == "sqlite")
+                {
+                    ReadOnlySqlValidator.ValidateSelect(
+                        databaseSourceOptions.Query,
+                        $"SQLite source query for step '{id}'");
+                }
                 if (databaseSourceOptions.CountQuery is not null)
                 {
-                    ValidateReadOnlySql(
-                        databaseSourceOptions.CountQuery,
-                        id,
-                        "Database count query for source step");
+                    if (sourceType == "sqlite")
+                    {
+                        ReadOnlySqlValidator.ValidateSelect(
+                            databaseSourceOptions.CountQuery,
+                            $"SQLite count query for source step '{id}'");
+                    }
+                    else
+                    {
+                        ValidateReadOnlySql(
+                            databaseSourceOptions.CountQuery,
+                            id,
+                            "Database count query for source step");
+                    }
                 }
             }
             expectedRecordCount = GetLong(source, "ExpectedRecordCount", 0);
@@ -642,27 +949,53 @@ internal static partial class PowerShellMigrationStepFactory
                 throw new ArgumentException(
                     $"MaxConcurrency is only supported for Dataverse target steps; '{id}' uses '{targetType}'.");
             }
-            targetConnectionId = GetRequiredString(target, "ConnectionId");
-            targetConnection = ResolveConnection(connections, targetConnectionId, id, "target")
-                ?? throw new ArgumentException($"Target connection '{targetConnectionId}' for step '{id}' resolved to null.");
-            if (targetType is "sqlite" or "duckdb")
+            var managedStageTarget = wholeDatasetStageTargetIds.Contains(id);
+            var configuredTargetConnectionId = GetString(
+                target,
+                "ConnectionId",
+                required: !managedStageTarget);
+            if (managedStageTarget)
             {
-                if (targetConnection is not DbConnection databaseConnection)
+                if (!string.IsNullOrWhiteSpace(configuredTargetConnectionId))
                 {
                     throw new ArgumentException(
-                        $"Database target step '{id}' requires a DbConnection in -Connections.");
+                        $"Database staging Target '{id}' for a whole-dataset transform must omit ConnectionId; its database is managed by the engine.");
                 }
-                DatabaseConnectorSupport.ValidateConnection(targetType, databaseConnection, $"target '{id}'");
-                if (!string.IsNullOrWhiteSpace(GetString(target, "Path", required: false)))
+                if (GetProperty(target, "Path") is not null)
                 {
-                    throw new ArgumentException($"Database target step '{id}' must not declare a Path.");
+                    throw new ArgumentException(
+                        $"Database staging Target '{id}' for a whole-dataset transform must omit Path; its database is managed by the engine.");
+                }
+                targetConnectionId = $"managed-stage:{id}";
+            }
+            else
+            {
+                targetConnectionId = configuredTargetConnectionId!;
+                targetConnection = ResolveConnection(connections, targetConnectionId, id, "target")
+                    ?? throw new ArgumentException(
+                        $"Target connection '{targetConnectionId}' for step '{id}' resolved to null.");
+            }
+            if (targetType is "sqlite" or "duckdb")
+            {
+                if (!managedStageTarget && targetConnection is not (FileInfo or DirectoryInfo))
+                {
+                    throw new ArgumentException(
+                        $"Database target step '{id}' requires a FileInfo or DirectoryInfo in -Connections.");
                 }
             }
-            targetPath = ResolveConnectorPath(
-                targetConnection,
-                GetString(target, "Path", required: targetType is "jsonl" or "csv" or "parquet") ?? string.Empty,
-                targetType,
-                $"Target path for step '{id}'");
+            var configuredTargetPath = GetString(
+                target,
+                "Path",
+                required: !managedStageTarget &&
+                          targetConnection is DirectoryInfo &&
+                          targetType is "jsonl" or "csv" or "parquet" or "sqlite" or "duckdb");
+            targetPath = managedStageTarget
+                ? string.Empty
+                : ResolveConnectorPath(
+                    targetConnection,
+                    configuredTargetPath ?? string.Empty,
+                    targetType,
+                    $"Target path for step '{id}'");
             var targetOptions = GetMap(
                 GetProperty(target, "Options"),
                 $"Options for target step '{id}'",
@@ -771,7 +1104,12 @@ internal static partial class PowerShellMigrationStepFactory
         string? transformConnectionId = null;
         object? transformConnection = null;
         string? transformSql = null;
+        string? transformInitializeSql = null;
+        string? transformMode = null;
+        string transformKey = string.Empty;
         string? transformParametersJson = null;
+        string? transformSourceOptionsJson = null;
+        var transformCommandTimeoutSeconds = 30;
         string? scriptText = null;
         if (type is "transform" or "filter")
         {
@@ -786,72 +1124,139 @@ internal static partial class PowerShellMigrationStepFactory
                     throw new ArgumentException(
                         $"Transform connector type '{transformType}' for step '{id}' is not supported.");
                 }
-                var mode = GetString(transform, "Mode", required: false);
-                if (transformType != "dataverse" &&
-                    mode is not null &&
-                    !string.Equals(mode, "per_row", StringComparison.OrdinalIgnoreCase))
+                transformSql = GetString(transform, "Sql", required: false);
+                transformInitializeSql = GetString(transform, "InitializeSql", required: false);
+                if (transformInitializeSql is not null && string.IsNullOrWhiteSpace(transformInitializeSql))
                 {
-                    throw new NotSupportedException(
-                        $"Database transform mode '{mode}' for step '{id}' is not yet supported; use 'per_row'.");
+                    throw new ArgumentException(
+                        $"Transform.InitializeSql for step '{id}' must not be empty.");
                 }
-                transformConnectionId = GetRequiredString(transform, "ConnectionId");
-                transformConnection = ResolveConnection(connections, transformConnectionId, id, "transform");
+                var configuredMode = GetString(transform, "Mode", required: false);
+                transformMode = (configuredMode ??
+                    (transformType == "sqlite" && transformSql is not null ? "per_batch" : "per_row"))
+                    .ToLowerInvariant();
+                if (transformMode is not ("per_row" or "per_batch" or "whole_dataset"))
+                {
+                    throw new ArgumentException(
+                        $"Transform.Mode for step '{id}' must be 'per_row', 'per_batch', or 'whole_dataset'.");
+                }
+                if (transformType is not ("sqlite" or "duckdb") && transformMode != "per_row")
+                {
+                    throw new ArgumentException(
+                        $"Transform.Mode '{transformMode}' for step '{id}' is supported only by SQLite and DuckDB.");
+                }
+                if (transformType is "sqlite" or "duckdb")
+                {
+                    if (GetProperty(transform, "ConnectionId") is not null)
+                    {
+                        throw new ArgumentException(
+                            $"Database Transform step '{id}' must not declare ConnectionId; its database is managed by the engine.");
+                    }
+                }
+                else
+                {
+                    transformConnectionId = GetRequiredString(transform, "ConnectionId");
+                    transformConnection = ResolveConnection(connections, transformConnectionId, id, "transform");
+                }
                 if (transformType == "dataverse" && transformConnection is null)
                 {
                     throw new ArgumentException(
                         $"Dataverse transform step '{id}' requires a non-null connection in -Connections.");
                 }
-                if (transformType is "sqlite" or "duckdb" &&
-                    transformConnection is not DbConnection)
+                transformCommandTimeoutSeconds = GetInt(transform, "CommandTimeoutSeconds", 30);
+                if (transformCommandTimeoutSeconds < 0)
                 {
-                    throw new ArgumentException(
-                        $"Database transform step '{id}' requires a DbConnection in -Connections.");
+                    throw new ArgumentOutOfRangeException(
+                        nameof(transformCommandTimeoutSeconds),
+                        $"Transform.CommandTimeoutSeconds for step '{id}' cannot be negative.");
                 }
-                if (transformType is "sqlite" or "duckdb")
-                {
-                    DatabaseConnectorSupport.ValidateConnection(
-                        transformType,
-                        (DbConnection)transformConnection!,
-                        $"transform '{id}'");
-                }
-                transformSql = GetString(transform, "Sql", required: false);
                 var transformParameters = GetProperty(transform, "Parameters");
                 if (transformSql is null && transformParameters is not null)
                 {
                     throw new ArgumentException(
                         $"Transform.Parameters for step '{id}' requires Transform.Sql.");
                 }
-                if (transformSql is not null &&
+                if (transformType == "duckdb" &&
+                    transformSql is not null &&
                     transformParameters is IDictionary parameterMap &&
                     parameterMap is not System.Collections.Specialized.IOrderedDictionary)
                 {
                     throw new ArgumentException(
                         $"DuckDB Transform.Parameters for step '{id}' must be an ordered hashtable.");
                 }
-                transformParametersJson = SerializeJson(transformParameters);
+                transformParametersJson = SerializeJson(
+                    transformSql is not null && transformParameters is null
+                        ? new Hashtable()
+                        : transformParameters);
                 if (transformType == "dataverse" &&
-                    (transformSql is not null || transformParameters is not null))
+                    (transformSql is not null ||
+                     transformParameters is not null ||
+                     transformInitializeSql is not null))
                 {
                     throw new ArgumentException(
-                        $"Dataverse transform step '{id}' supports PowerShell Script only; Transform.Sql and Transform.Parameters are not supported.");
+                        $"Dataverse transform step '{id}' supports PowerShell Script only; database SQL options are not supported.");
                 }
                 if (transformSql is not null)
                 {
-                    if (transformType != "duckdb")
+                    if (transformType == "dataverse")
                     {
-                        throw new ArgumentException($"Only DuckDB transforms can declare Sql; step '{id}' uses '{transformType}'.");
+                        throw new ArgumentException(
+                            $"Dataverse transform step '{id}' supports PowerShell Script only.");
                     }
-
                     if (GetProperty(step, "Script") is not null)
                     {
                         throw new ArgumentException(
-                            $"DuckDB transform step '{id}' must use either Script or Transform.Sql, not both.");
+                            $"Database transform step '{id}' must use either Script or Transform.Sql, not both.");
                     }
+                    if (transformType == "sqlite" && transformMode == "per_row")
+                    {
+                        throw new ArgumentException(
+                            $"SQLite Transform.Sql for step '{id}' requires Mode 'per_batch' or 'whole_dataset'.");
+                    }
+                    if (transformMode != "per_row")
+                    {
+                        ReadOnlySqlValidator.ValidateSelect(
+                            transformSql,
+                            $"{transformType} Transform.Sql for step '{id}'");
+                    }
+                }
+                else if (transformMode is "per_batch" or "whole_dataset")
+                {
+                    throw new ArgumentException(
+                        $"{transformType} Transform.Mode '{transformMode}' for step '{id}' requires Transform.Sql.");
                 }
                 else if (GetProperty(step, "Script") is null)
                 {
                     throw new ArgumentException(
-                        $"Database transform step '{id}' must declare Script or a DuckDB Transform.Sql statement.");
+                        $"Database transform step '{id}' must declare Script or a database Transform.Sql statement.");
+                }
+
+                if (transformMode == "whole_dataset")
+                {
+                    transformKey = GetRequiredString(transform, "Key");
+                    var transformSourceOptions = new Hashtable(StringComparer.Ordinal)
+                    {
+                        ["Query"] = transformSql!,
+                        ["Parameters"] = transformParameters ?? new Hashtable(),
+                        ["CommandTimeoutSeconds"] = transformCommandTimeoutSeconds
+                    };
+                    var countQuery = GetString(transform, "CountQuery", required: false);
+                    if (countQuery is not null)
+                    {
+                        throw new ArgumentException(
+                            $"Whole-dataset transform '{id}' cannot use CountQuery because its staged input is not complete during run initialization; use ExpectedRecordCount if known.");
+                    }
+                    transformSourceOptionsJson = SerializeJson(transformSourceOptions);
+                    var databaseOptions = DatabaseSourceOptions.FromJson(transformSourceOptionsJson, id);
+                    databaseOptions.Validate(id);
+                    expectedRecordCount = GetLong(transform, "ExpectedRecordCount", 0);
+                }
+                else if (GetProperty(transform, "Key") is not null ||
+                         GetProperty(transform, "CountQuery") is not null ||
+                         GetProperty(transform, "ExpectedRecordCount") is not null)
+                {
+                    throw new ArgumentException(
+                        $"Transform.Key, CountQuery, and ExpectedRecordCount are only supported with Mode 'whole_dataset' on step '{id}'.");
                 }
             }
             if (GetProperty(step, "Script") is { } transformScript)
@@ -929,7 +1334,12 @@ internal static partial class PowerShellMigrationStepFactory
             transformConnectionId,
             transformConnection,
             transformSql,
+            transformInitializeSql,
+            transformMode,
+            transformKey,
             transformParametersJson,
+            transformSourceOptionsJson,
+            transformCommandTimeoutSeconds,
             scriptText,
             callbackScriptText,
             readBatchesScriptText,
@@ -1103,6 +1513,23 @@ internal static partial class PowerShellMigrationStepFactory
                     throw new ArgumentException($"Step '{step.Id}' references unknown input step '{inputId}'.");
                 }
             }
+            if (step.Type == "transform" && step.TransformMode == "whole_dataset")
+            {
+                if (step.Inputs.Length != 1)
+                {
+                    throw new ArgumentException(
+                        $"Whole-dataset {step.TransformType} transform '{step.Id}' must declare one staged Target input.");
+                }
+                var stagedInput = byId[step.Inputs[0]];
+                if (stagedInput.Type != "target" ||
+                    stagedInput.TargetType != step.TransformType ||
+                    (!ReferenceEquals(stagedInput.TargetConnection, step.TransformConnection) &&
+                     (stagedInput.TargetConnection is not null || step.TransformConnection is not null)))
+                {
+                    throw new ArgumentException(
+                        $"Whole-dataset {step.TransformType} transform '{step.Id}' must depend on a matching database Target using its managed database.");
+                }
+            }
             if (step.Type == "source" && step.RowDependencies.Length == 0 && step.Inputs.Length != 0)
             {
                 throw new ArgumentException($"Root source step '{step.Id}' must not declare Inputs.");
@@ -1139,13 +1566,14 @@ internal static partial class PowerShellMigrationStepFactory
                 steps.Any(consumer =>
                     consumer.Inputs.Contains(step.Id, StringComparer.Ordinal) &&
                     (consumer.Type != "join" ||
-                    !string.Equals(
-                        consumer.InputDefinitions[1].Job,
-                        step.Id,
-                        StringComparison.Ordinal))))
+                     !string.Equals(
+                         consumer.InputDefinitions[1].Job,
+                         step.Id,
+                         StringComparison.Ordinal)) &&
+                     !(consumer.Type == "transform" && consumer.TransformMode == "whole_dataset")))
             {
                 throw new ArgumentException(
-                    $"Target step '{step.Id}' can only be consumed by Join relationship inputs.");
+                    $"Target step '{step.Id}' can only be consumed by Join relationship inputs or whole-dataset database transforms.");
             }
             foreach (var rowDependency in step.RowDependencies)
             {
@@ -1271,12 +1699,32 @@ internal static partial class PowerShellMigrationStepFactory
             databaseConnection: input.SourceConnection as DbConnection);
     }
 
+    private static HierarchySourceLevel CreateGraphWholeDatasetTransformSourceLevel(GraphStepInput input)
+    {
+        return new HierarchySourceLevel(
+            input.Id,
+            input.TransformType!,
+            path: null,
+            keyProperty: input.TransformKey,
+            parentKeyProperty: null,
+            rowsPerParent: 0,
+            expectedRecordCount: input.ExpectedRecordCount,
+            children: null,
+            optionsJson: input.TransformSourceOptionsJson
+                ?? throw new InvalidOperationException(
+                    $"Whole-dataset {input.TransformType} transform '{input.Id}' has no source options."),
+            connectionId: input.TransformConnectionId,
+            databaseConnection: input.TransformConnection as DbConnection);
+    }
+
     private static Func<CancellationToken, Task<long>>? CreateExpectedRecordCountResolver(
         GraphStepInput input,
         PowerShellScriptExecutor executor,
         HierarchySourceLevel? sourceLevel)
     {
-        if (input.Type != "source" || input.ExpectedRecordCount > 0 || sourceLevel is null)
+        if (input.Type != "source" ||
+            input.ExpectedRecordCount > 0 ||
+            sourceLevel is null)
         {
             return null;
         }
@@ -1562,7 +2010,12 @@ internal static partial class PowerShellMigrationStepFactory
         string? TransformConnectionId,
         object? TransformConnection,
         string? TransformSql,
+        string? TransformInitializeSql,
+        string? TransformMode,
+        string TransformKey,
         string? TransformParametersJson,
+        string? TransformSourceOptionsJson,
+        int TransformCommandTimeoutSeconds,
         string? ScriptText,
         string? CallbackScriptText,
         string? ReadBatchesScriptText,

@@ -241,7 +241,7 @@ public static class StreamingSourceFileConverter
             .GetResult();
     }
 
-    private static void WriteAtomically(string targetPath, Action<FileStream> write)
+    internal static void WriteAtomically(string targetPath, Action<FileStream> write)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(targetPath);
         ArgumentNullException.ThrowIfNull(write);

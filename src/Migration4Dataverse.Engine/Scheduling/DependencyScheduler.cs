@@ -270,6 +270,14 @@ public sealed class DependencyScheduler
                 $"{finalProgress.BatchesWithErrors} failed batches.");
         }
 
+        foreach (var step in steps.Values
+                     .Where(step => step.CompleteAsync is not null)
+                     .OrderBy(step => step.Id, StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await step.CompleteAsync!(cancellationToken).ConfigureAwait(false);
+        }
+
         if (steps.Values.Any(step => string.Equals(step.Type, "join", StringComparison.Ordinal)))
         {
             _store.ClearJoinStaging(runId);
@@ -1463,11 +1471,12 @@ public sealed class DependencyScheduler
                 }
                 if (step.ReadSourceBatches is not null &&
                     stepMap[dependency].ReadSourceBatches is null &&
-                    !string.Equals(step.Type, "join", StringComparison.Ordinal))
+                    !string.Equals(step.Type, "join", StringComparison.Ordinal) &&
+                    !step.WaitForInputCompletion)
                 {
                     throw new ArgumentException(
-                        $"Source-driven step '{step.Id}' can only wait for source-driven step dependencies; " +
-                        $"'{dependency}' receives dependency-event work.",
+                        $"Source-driven step '{step.Id}' can only wait for dependency-driven step '{dependency}' " +
+                        "when WaitForInputCompletion is enabled.",
                         nameof(steps));
                 }
             }

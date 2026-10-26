@@ -1,10 +1,9 @@
 # DuckDB target
 
-The `duckdb` target writes each non-empty input batch to a table through a named `DuckDB.NET.Data.DuckDBConnection`. The engine includes the DuckDB.NET provider. `Path` is omitted. A missing output table is created automatically from the first batch, allowing a direct source-transform-target flow without a separate table-creation step. Supply `Options.Schema` to create and validate the table before source readers start.
+The `duckdb` target writes each non-empty input batch to a table in a database file. Its `ConnectionId` resolves to a `System.IO.FileInfo` naming the database, or a `System.IO.DirectoryInfo` with `Path` naming the database file relative to that directory. The engine creates and owns the DuckDB connection and loads its provider and native library automatically. A missing output table is created automatically from the first batch, allowing a direct source-transform-target flow without a separate table-creation step. Supply `Options.Schema` to create and validate the table before source readers start.
 
 ```powershell
-$targetConnection = [DuckDB.NET.Data.DuckDBConnection]::new(
-    "Data Source=$PWD/output.duckdb")
+$targetFile = [System.IO.FileInfo]::new((Join-Path $PWD 'output.duckdb'))
 
 $steps = @(
     @{
@@ -25,7 +24,7 @@ $steps = @(
 
 Invoke-Migration -DatabasePath './migration.sqlite3' `
     -RunName 'DuckDB write' -Steps $steps `
-    -Connections @{ 'duckdb-target' = $targetConnection }
+    -Connections @{ 'duckdb-target' = $targetFile }
 ```
 
 | Option | Default | Description |
@@ -38,6 +37,6 @@ Without `Schema`, DuckDB types are inferred from the first batch. Every batch mu
 
 Writes and a per-batch replay marker are committed in one transaction. An identical retry is ignored; retrying the same batch identity with different records fails. The engine reserves the internal table name `__migration4dataverse_batches`.
 
-Database connections are serialized while in use. A connection that was closed before the write is opened and closed by the engine; an already-open connection stays open.
+Database connections are serialized while in use. Each database connection is opened and disposed by the engine.
 
 See [DuckDB source](../sources/duckdb.md) and [migration step configuration](../../configuration.md).

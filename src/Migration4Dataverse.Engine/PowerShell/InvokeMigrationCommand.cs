@@ -165,7 +165,9 @@ public sealed class InvokeMigrationCommand : PSCmdlet
             store,
             MaxDegreeOfParallelism,
             DataverseNoRetryDiagnosticMode.IsPresent,
-            WhatIf.IsPresent);
+            WhatIf.IsPresent,
+            effectiveRunId,
+            DatabasePath);
         var configurationJson = MigrationConfigurationSnapshot.CreateJson(
             Steps,
             Connections,

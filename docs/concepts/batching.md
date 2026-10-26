@@ -11,7 +11,7 @@ Root source readers produce durable work in batches. The scheduler persists a ba
 - `MaxAttempts` bounds retries for handler failures.
 - Dataverse target batches can run concurrently up to their configured limits. Targets using the same connection share the automatic concurrency budget, capped by `MaxDegreeOfParallelism`.
 - Custom target callbacks use their configured `MaxConcurrency`; callbacks sharing a target connection must use the same value.
-- File target batches are written as separate files. They are not concatenated into one table file.
+- Built-in file targets stage batches and publish one complete output file per target during the scheduler's completion phase. Replacement is atomic per destination; multiple target files are not committed as a cross-file transaction.
 
 The scheduler prioritizes ready dependency batches over queued root batches. This lets consumer steps process batches while source readers are still producing data. Callback multi-parent prerequisites wait until each required batch has completed successfully.
 

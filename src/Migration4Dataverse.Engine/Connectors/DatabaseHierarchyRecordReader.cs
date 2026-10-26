@@ -20,6 +20,7 @@ public sealed class DatabaseHierarchyRecordReader : IHierarchyRecordReader
     private DbDataReader? _reader;
     private JsonElement? _lookahead;
     private IDisposable? _connectionLease;
+    private DatabaseReadOnlyScope? _readOnlyScope;
     private bool _openedConnection;
     private bool _initialized;
     private bool _disposed;
@@ -56,6 +57,17 @@ public sealed class DatabaseHierarchyRecordReader : IHierarchyRecordReader
         ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
         ArgumentNullException.ThrowIfNull(options);
         options.Validate(stepId);
+        var connectorType = DatabaseConnectorSupport.GetConnectorType(connection);
+        if (connectorType == "sqlite")
+        {
+            ReadOnlySqlValidator.ValidateSelect(options.Query, $"Database source '{stepId}' Query");
+            if (options.CountQuery is not null)
+            {
+                ReadOnlySqlValidator.ValidateSelect(
+                    options.CountQuery,
+                    $"Database source '{stepId}' CountQuery");
+            }
+        }
         var countQuery = options.GetCountQuery();
 
         using var connectionLease = await DatabaseConnectionGate.AcquireAsync(
@@ -70,9 +82,17 @@ public sealed class DatabaseHierarchyRecordReader : IHierarchyRecordReader
                 openedConnection = true;
             }
 
+            using var readOnlyScope = await DatabaseReadOnlyScope.EnterAsync(
+                connection,
+                connectorType,
+                cancellationToken).ConfigureAwait(false);
             await using var command = connection.CreateCommand();
             command.CommandText = countQuery;
             command.CommandTimeout = options.CommandTimeoutSeconds;
+            DatabaseConnectorSupport.AddQueryParameters(
+                command,
+                connectorType,
+                options.Parameters);
             var value = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
             if (value is null or DBNull)
             {
@@ -170,15 +190,22 @@ public sealed class DatabaseHierarchyRecordReader : IHierarchyRecordReader
             {
                 try
                 {
-                    if (_openedConnection)
-                    {
-                        await _connection.CloseAsync().ConfigureAwait(false);
-                    }
+                    _readOnlyScope?.Dispose();
                 }
                 finally
                 {
-                    _connectionLease?.Dispose();
-                    _disposed = true;
+                    try
+                    {
+                        if (_openedConnection)
+                        {
+                            await _connection.CloseAsync().ConfigureAwait(false);
+                        }
+                    }
+                    finally
+                    {
+                        _connectionLease?.Dispose();
+                        _disposed = true;
+                    }
                 }
             }
         }
@@ -200,9 +227,23 @@ public sealed class DatabaseHierarchyRecordReader : IHierarchyRecordReader
             _openedConnection = true;
         }
 
+        _readOnlyScope = await DatabaseReadOnlyScope.EnterAsync(
+            _connection,
+            _level.Type,
+            cancellationToken).ConfigureAwait(false);
+        if (_level.Type == "sqlite")
+        {
+            ReadOnlySqlValidator.ValidateSelect(
+                _options.Query,
+                $"Database source '{_level.StepId}' Query");
+        }
         _command = _connection.CreateCommand();
         _command.CommandText = _options.Query;
         _command.CommandTimeout = _options.CommandTimeoutSeconds;
+        DatabaseConnectorSupport.AddQueryParameters(
+            _command,
+            _level.Type,
+            _options.Parameters);
         _reader = await _command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         if (_reader.FieldCount == 0)
         {
@@ -234,6 +275,8 @@ public sealed class DatabaseSourceOptions
     public string Query { get; init; } = string.Empty;
 
     public string? CountQuery { get; init; }
+
+    public Dictionary<string, JsonElement>? Parameters { get; init; }
 
     public int CommandTimeoutSeconds { get; init; } = 30;
 
@@ -269,6 +312,10 @@ public sealed class DatabaseSourceOptions
             throw new ArgumentOutOfRangeException(
                 nameof(CommandTimeoutSeconds),
                 $"Database source '{stepId}' CommandTimeoutSeconds cannot be negative.");
+        }
+        if (Parameters is not null && Parameters.Keys.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException($"Database source '{stepId}' parameter names must not be empty.");
         }
     }
 

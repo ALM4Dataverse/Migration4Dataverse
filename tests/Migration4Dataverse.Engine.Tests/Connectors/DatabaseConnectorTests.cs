@@ -33,25 +33,6 @@ public sealed class DatabaseConnectorTests
     }
 
     [Fact]
-    public void NewMigrationDatabaseConnectionCmdletCreatesProviderConnection()
-    {
-        using var powershell = PS.Create();
-        powershell.AddCommand("Import-Module")
-            .AddParameter("Name", typeof(InvokeMigrationCommand).Assembly.Location);
-        powershell.Invoke();
-        Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
-
-        powershell.Commands.Clear();
-        var output = powershell.AddCommand("New-MigrationDatabaseConnection")
-            .AddParameter("Provider", "SQLite")
-            .AddParameter("ConnectionString", "Data Source=:memory:")
-            .Invoke();
-
-        Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
-        using var connection = Assert.IsType<SqliteConnection>(Assert.Single(output).BaseObject);
-    }
-
-    [Fact]
     public async Task SqliteSourceExecutesConfiguredQueryAndStreamsRows()
     {
         using var files = new TemporaryDirectory();
@@ -61,11 +42,16 @@ public sealed class DatabaseConnectorTests
         Execute(connection, "INSERT INTO records VALUES (1, 'first'), (2, 'second')");
         var options = new DatabaseSourceOptions
         {
-            Query = "SELECT id, name FROM records ORDER BY id"
+            Query = "SELECT id, name FROM records WHERE id >= @minimumId ORDER BY id",
+            Parameters = new Dictionary<string, JsonElement>
+            {
+                ["minimumId"] = JsonSerializer.SerializeToElement(1)
+            }
         };
         Assert.Equal(
             2,
             await DatabaseHierarchyRecordReader.CountRecordsAsync(connection, "Source", options));
+        Execute(connection, "CREATE TABLE read_only_restored (id INTEGER)");
         Assert.Equal(
             1,
             await DatabaseHierarchyRecordReader.CountRecordsAsync(
@@ -83,7 +69,8 @@ public sealed class DatabaseConnectorTests
                 new DatabaseSourceOptions
                 {
                     Query = options.Query,
-                    CountQuery = "SELECT COUNT(*) FROM records WHERE id = 1"
+                    CountQuery = "SELECT COUNT(*) FROM records WHERE id = @minimumId",
+                    Parameters = options.Parameters
                 }));
         var level = new HierarchySourceLevel(
             "Source",
@@ -110,15 +97,37 @@ public sealed class DatabaseConnectorTests
         Assert.Equal(2, second.Value.GetProperty("id").GetInt64());
         reader.Take();
         Assert.Null(await reader.PeekAsync(CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => DatabaseHierarchyRecordReader.CountRecordsAsync(
+            connection,
+            "UnsafeSource",
+            new DatabaseSourceOptions { Query = "DELETE FROM records" }));
     }
 
     [Fact]
-    public void SqliteTargetInfersSchemaIsReplaySafeAndRejectsMismatchedSchema()
+    public void SqliteTargetUsesDeclaredSchemaAndKeyAndUpsertsReplaySafely()
     {
         using var files = new TemporaryDirectory();
         using var connection = new SqliteConnection($"Data Source={files.GetPath("target.sqlite")}");
         connection.Open();
         var records = """[{"id":1,"name":"one"},{"id":2,"name":"two"}]""";
+        var options = JsonSerializer.Serialize(new DatabaseBatchTargetOptions
+        {
+            CreateTable = true,
+            Schema = new Dictionary<string, string>
+            {
+                ["id"] = "INTEGER",
+                ["name"] = "TEXT"
+            },
+            KeyColumns = ["id"],
+            Indexes =
+            [
+                new DatabaseIndexDefinition
+                {
+                    Name = "IX_copied_records_name",
+                    Columns = ["name"]
+                }
+            ]
+        });
         DatabaseBatchTargetWriter.WriteBatch(
             connection,
             "sqlite",
@@ -127,7 +136,7 @@ public sealed class DatabaseConnectorTests
             "run",
             "batch",
             records,
-            "{}");
+            options);
         DatabaseBatchTargetWriter.WriteBatch(
             connection,
             "sqlite",
@@ -136,12 +145,29 @@ public sealed class DatabaseConnectorTests
             "run",
             "batch",
             records,
-            "{}");
+            options);
 
         Assert.Equal(2L, Scalar<long>(connection, "SELECT COUNT(*) FROM copied_records"));
         Assert.Equal("one", Scalar<string>(connection, "SELECT name FROM copied_records WHERE id = 1"));
+        Assert.Equal(
+            1L,
+            Scalar<long>(
+                connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'IX_copied_records_name'"));
+        DatabaseBatchTargetWriter.WriteBatch(
+            connection,
+            "sqlite",
+            "copied_records",
+            "Target",
+            "next-run",
+            "next-batch",
+            """[{"id":1,"name":"updated"},{"id":3,"name":"three"}]""",
+            options);
+        Assert.Equal(3L, Scalar<long>(connection, "SELECT COUNT(*) FROM copied_records"));
+        Assert.Equal("updated", Scalar<string>(connection, "SELECT name FROM copied_records WHERE id = 1"));
         var mismatchedSchema = JsonSerializer.Serialize(new DatabaseBatchTargetOptions
         {
+            KeyColumns = ["id"],
             Schema = new Dictionary<string, string>
             {
                 ["id"] = "TEXT",
@@ -160,7 +186,7 @@ public sealed class DatabaseConnectorTests
     }
 
     [Fact]
-    public void SqliteTargetCreatesExplicitSchemaBeforeWritingRows()
+    public void SqliteTargetDefaultsToValidateOnly()
     {
         using var files = new TemporaryDirectory();
         using var connection = new SqliteConnection($"Data Source={files.GetPath("target.sqlite")}");
@@ -171,7 +197,46 @@ public sealed class DatabaseConnectorTests
             {
                 ["id"] = "INTEGER",
                 ["name"] = "TEXT"
-            }
+            },
+            KeyColumns = ["id"]
+        });
+
+        Assert.Throws<InvalidOperationException>(() => DatabaseBatchTargetWriter.PrepareTargetSchema(
+            connection,
+            "sqlite",
+            "missing_records",
+            "Target",
+            options));
+        Assert.Equal(
+            0L,
+            Scalar<long>(
+                connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'missing_records'"));
+    }
+
+    [Fact]
+    public void SqliteTargetCreatesExplicitSchemaBeforeWritingRows()
+    {
+        using var files = new TemporaryDirectory();
+        using var connection = new SqliteConnection($"Data Source={files.GetPath("target.sqlite")}");
+        connection.Open();
+        var options = JsonSerializer.Serialize(new DatabaseBatchTargetOptions
+        {
+            CreateTable = true,
+            Schema = new Dictionary<string, string>
+            {
+                ["id"] = "INTEGER",
+                ["name"] = "TEXT"
+            },
+            KeyColumns = ["id"],
+            Indexes =
+            [
+                new DatabaseIndexDefinition
+                {
+                    Name = "IX_prepared_records_name",
+                    Columns = ["name"]
+                }
+            ]
         });
 
         DatabaseBatchTargetWriter.PrepareTargetSchema(
@@ -182,6 +247,11 @@ public sealed class DatabaseConnectorTests
             options);
 
         Assert.Equal(0L, Scalar<long>(connection, "SELECT COUNT(*) FROM prepared_records"));
+        Assert.Equal(
+            1L,
+            Scalar<long>(
+                connection,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'IX_prepared_records_name'"));
         Assert.Throws<InvalidOperationException>(() => DatabaseBatchTargetWriter.PrepareTargetSchema(
             connection,
             "sqlite",
@@ -189,8 +259,61 @@ public sealed class DatabaseConnectorTests
             "MissingTarget",
             JsonSerializer.Serialize(new DatabaseBatchTargetOptions
             {
-                CreateTable = false
+                CreateTable = false,
+                Schema = new Dictionary<string, string>
+                {
+                    ["id"] = "INTEGER",
+                    ["name"] = "TEXT"
+                },
+                KeyColumns = ["id"]
             })));
+    }
+
+    [Fact]
+    public void SqliteBatchTransformStagesRowsUsesParametersAndPreservesLineage()
+    {
+        using var files = new TemporaryDirectory();
+        using var connection = new SqliteConnection($"Data Source={files.GetPath("transform.sqlite")}");
+        connection.Open();
+        var outputJson = PreparedDatabaseTransformRunner.ExecuteSqliteBatch(
+            connection,
+            """
+            SELECT __migration_parent_index, Id, upper(Name) AS Name
+            FROM __migration4dataverse_input
+            WHERE length(Name) >= @minimumLength
+            ORDER BY Id
+            """,
+            """{"minimumLength":4}""",
+            """[{"Id":"A","Name":"Ada"},{"Id":"B","Name":"Grace"},{"Id":"C","Name":"Linus"}]""");
+        using var output = JsonDocument.Parse(outputJson);
+
+        Assert.Equal(2, output.RootElement.GetArrayLength());
+        var first = output.RootElement[0];
+        Assert.Equal(1, first.GetProperty("ParentIndices")[0].GetInt32());
+        Assert.Equal("GRACE", first.GetProperty("Record").GetProperty("Name").GetString());
+        Assert.Equal(
+            0L,
+            Scalar<long>(
+                connection,
+                "SELECT COUNT(*) FROM sqlite_temp_master WHERE name = '__migration4dataverse_input'"));
+
+        var mergedJson = PreparedDatabaseTransformRunner.ExecuteSqliteBatch(
+            connection,
+            """
+            SELECT json_group_array(__migration_parent_index) AS __migration_parent_indices,
+                   count(*) AS RecordCount
+            FROM __migration4dataverse_input
+            """,
+            "{}",
+            """[{"Id":"A"},{"Id":"B"}]""");
+        using var merged = JsonDocument.Parse(mergedJson);
+        Assert.Equal(2, merged.RootElement[0].GetProperty("ParentIndices").GetArrayLength());
+        Assert.Equal(2, merged.RootElement[0].GetProperty("Record").GetProperty("RecordCount").GetInt64());
+        Assert.Throws<ArgumentException>(() => PreparedDatabaseTransformRunner.ExecuteSqliteBatch(
+            connection,
+            "DELETE FROM __migration4dataverse_input",
+            "{}",
+            """[{"Id":"A"}]"""));
     }
 
     [Fact]
@@ -275,18 +398,15 @@ public sealed class DatabaseConnectorTests
     }
 
     [Fact]
-    public void InvokeMigrationSupportsSeparateSqliteDatabasesAndConnectionBackedTransform()
+    public void InvokeMigrationManagesSqliteTransformDatabaseWithoutConnection()
     {
         using var files = new TemporaryDirectory();
         using var source = new SqliteConnection($"Data Source={files.GetPath("source.sqlite")}");
-        using var transform = new SqliteConnection($"Data Source={files.GetPath("transform.sqlite")}");
         using var target = new SqliteConnection($"Data Source={files.GetPath("target.sqlite")}");
         source.Open();
-        transform.Open();
-        target.Open();
         Execute(source, "CREATE TABLE records (id TEXT NOT NULL, name TEXT NOT NULL)");
         Execute(source, "INSERT INTO records VALUES ('a', 'first'), ('b', 'second')");
-        Execute(transform, "CREATE TABLE audit (id TEXT NOT NULL)");
+        source.Close();
 
         var sourceStep = PSObject.AsPSObject(new
         {
@@ -297,6 +417,7 @@ public sealed class DatabaseConnectorTests
             {
                 ["Type"] = "sqlite",
                 ["ConnectionId"] = "source",
+                ["Path"] = "source.sqlite",
                 ["Key"] = "id",
                 ["Options"] = new Hashtable
                 {
@@ -311,14 +432,13 @@ public sealed class DatabaseConnectorTests
             Inputs = new[] { "Source" },
             Transform = new Hashtable
             {
-                ["Type"] = "sqlite",
-                ["ConnectionId"] = "transform"
+                ["Type"] = "sqlite"
             },
             Script = ScriptBlock.Create("""
                 param($row, $connection)
                 $command = $connection.CreateCommand()
                 try {
-                    $command.CommandText = 'INSERT INTO audit (id) VALUES (@id)'
+                    $command.CommandText = 'CREATE TABLE IF NOT EXISTS audit (id TEXT NOT NULL); INSERT INTO audit (id) VALUES (@id)'
                     $parameter = $command.CreateParameter()
                     $parameter.ParameterName = 'id'
                     $parameter.Value = $row.id
@@ -340,14 +460,17 @@ public sealed class DatabaseConnectorTests
             {
                 ["Type"] = "sqlite",
                 ["ConnectionId"] = "target",
+                ["Path"] = "target.sqlite",
                 ["Table"] = "result",
                 ["Options"] = new Hashtable
                 {
+                    ["CreateTable"] = true,
                     ["Schema"] = new Hashtable
                     {
                         ["id"] = "TEXT",
                         ["name"] = "TEXT"
-                    }
+                    },
+                    ["KeyColumns"] = new[] { "id" }
                 }
             }
         });
@@ -365,9 +488,8 @@ public sealed class DatabaseConnectorTests
             .AddParameter("Steps", new[] { sourceStep, transformStep, targetStep })
             .AddParameter("Connections", new Hashtable
             {
-                ["source"] = source,
-                ["transform"] = transform,
-                ["target"] = target
+                ["source"] = new DirectoryInfo(Path.GetDirectoryName(files.GetPath("source.sqlite"))!),
+                ["target"] = new DirectoryInfo(Path.GetDirectoryName(files.GetPath("target.sqlite"))!)
             })
             .AddParameter("BatchSize", 1)
             .AddParameter("MaxAttempts", 1);
@@ -375,8 +497,185 @@ public sealed class DatabaseConnectorTests
 
         Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
         Assert.IsType<DependencySchedulerResult>(Assert.Single(output).BaseObject);
+        target.Open();
         Assert.Equal("FIRST", Scalar<string>(target, "SELECT name FROM result WHERE id = 'a'"));
-        Assert.Equal(2L, Scalar<long>(transform, "SELECT COUNT(*) FROM audit"));
+        target.Close();
+        var transformFile = Assert.Single(Directory.EnumerateFiles(
+            Path.Combine(Path.GetDirectoryName(files.GetPath("migration.sqlite"))!, ".migration-transforms"),
+            "Transform-sqlite-database-connectors-*.sqlite"));
+        using var managedTransform = new SqliteConnection($"Data Source={transformFile}");
+        managedTransform.Open();
+        Assert.Equal(2L, Scalar<long>(managedTransform, "SELECT COUNT(*) FROM audit"));
+
+        powershell.Commands.Clear();
+        var secondOutput = powershell.AddCommand("Invoke-Migration")
+            .AddParameter("DatabasePath", files.GetPath("migration.sqlite"))
+            .AddParameter("RunName", "SQLite database connectors second run")
+            .AddParameter("RunId", "sqlite-database-connectors-second")
+            .AddParameter("Steps", new[] { sourceStep, transformStep, targetStep })
+            .AddParameter("Connections", new Hashtable
+            {
+                ["source"] = new DirectoryInfo(Path.GetDirectoryName(files.GetPath("source.sqlite"))!),
+                ["target"] = new DirectoryInfo(Path.GetDirectoryName(files.GetPath("target.sqlite"))!)
+            })
+            .AddParameter("BatchSize", 1)
+            .AddParameter("MaxAttempts", 1)
+            .Invoke();
+
+        Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
+        Assert.IsType<DependencySchedulerResult>(Assert.Single(secondOutput).BaseObject);
+        Assert.Equal(
+            2,
+            Directory.EnumerateFiles(
+                    Path.Combine(Path.GetDirectoryName(files.GetPath("migration.sqlite"))!, ".migration-transforms"),
+                    "Transform-sqlite-database-connectors-*.sqlite")
+                .Count());
+    }
+
+    [Fact]
+    public void InvokeMigrationRunsSqliteBatchAndWholeDatasetTransforms()
+    {
+        using var files = new TemporaryDirectory();
+        using var source = new SqliteConnection($"Data Source={files.GetPath("source.sqlite")}");
+        using var target = new SqliteConnection($"Data Source={files.GetPath("target.sqlite")}");
+        source.Open();
+        Execute(source, "CREATE TABLE records (Id TEXT NOT NULL, Name TEXT NOT NULL)");
+        Execute(source, "INSERT INTO records VALUES ('A001', 'North account'), ('A002', 'South account')");
+        source.Close();
+
+        var sourceStep = PSObject.AsPSObject(new
+        {
+            Id = "Source",
+            Type = "source",
+            Inputs = Array.Empty<string>(),
+            Source = new Hashtable
+            {
+                ["Type"] = "sqlite",
+                ["ConnectionId"] = "source",
+                ["Key"] = "Id",
+                ["Options"] = new Hashtable
+                {
+                    ["Query"] = "SELECT Id, Name FROM records WHERE Id >= @minimumId ORDER BY Id",
+                    ["Parameters"] = new Hashtable { ["minimumId"] = "A001" }
+                }
+            }
+        });
+        var batchTransform = PSObject.AsPSObject(new
+        {
+            Id = "NormalizeBatch",
+            Type = "transform",
+            Inputs = new[] { "Source" },
+            Transform = new Hashtable
+            {
+                ["Type"] = "sqlite",
+                ["Mode"] = "per_batch",
+                ["InitializeSql"] = """
+                    CREATE TABLE batch_rules (minimum_length INTEGER NOT NULL);
+                    INSERT INTO batch_rules VALUES (4);
+                    """,
+                ["Sql"] = """
+                    SELECT __migration_parent_index, Id, upper(Name) AS Name
+                    FROM __migration4dataverse_input
+                    WHERE length(Name) >= (SELECT minimum_length FROM batch_rules)
+                    ORDER BY Id
+                    """
+            }
+        });
+        var stageTarget = PSObject.AsPSObject(new
+        {
+            Id = "StageTarget",
+            Type = "target",
+            Inputs = new[] { "NormalizeBatch" },
+            Target = new Hashtable
+            {
+                ["Type"] = "sqlite",
+                ["Table"] = "staged_records",
+                ["Options"] = new Hashtable
+                {
+                    ["CreateTable"] = true,
+                    ["Schema"] = new Hashtable { ["Id"] = "TEXT", ["Name"] = "TEXT" },
+                    ["KeyColumns"] = new[] { "Id" },
+                    ["Indexes"] = new[]
+                    {
+                        new Hashtable
+                        {
+                            ["Name"] = "IX_staged_records_name",
+                            ["Columns"] = new[] { "Name" },
+                            ["Unique"] = false
+                        }
+                    }
+                }
+            }
+        });
+        var wholeDatasetTransform = PSObject.AsPSObject(new
+        {
+            Id = "EnrichWholeDataset",
+            Type = "transform",
+            Inputs = new[] { "StageTarget" },
+            Transform = new Hashtable
+            {
+                ["Type"] = "sqlite",
+                ["Mode"] = "whole_dataset",
+                ["Key"] = "Id",
+                ["InitializeSql"] = """
+                    CREATE TABLE dataset_rules (suffix TEXT NOT NULL);
+                    INSERT INTO dataset_rules VALUES ('!');
+                    """,
+                ["Sql"] = """
+                    SELECT s.Id, upper(s.Name) || (SELECT suffix FROM dataset_rules) AS Name
+                    FROM staged_records AS s
+                    ORDER BY s.Id
+                    """
+            }
+        });
+        var finalTarget = PSObject.AsPSObject(new
+        {
+            Id = "FinalTarget",
+            Type = "target",
+            Inputs = new[] { "EnrichWholeDataset" },
+            Target = new Hashtable
+            {
+                ["Type"] = "sqlite",
+                ["ConnectionId"] = "target",
+                ["Table"] = "final_records",
+                ["Options"] = new Hashtable
+                {
+                    ["CreateTable"] = true,
+                    ["Schema"] = new Hashtable { ["Id"] = "TEXT", ["Name"] = "TEXT" },
+                    ["KeyColumns"] = new[] { "Id" }
+                }
+            }
+        });
+
+        using var powershell = PS.Create();
+        powershell.AddCommand("Import-Module")
+            .AddParameter("Name", typeof(InvokeMigrationCommand).Assembly.Location);
+        powershell.Invoke();
+        Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
+        powershell.Commands.Clear();
+        powershell.AddCommand("Invoke-Migration")
+            .AddParameter("DatabasePath", files.GetPath("migration.sqlite"))
+            .AddParameter("RunName", "SQLite SQL transforms")
+            .AddParameter("RunId", "sqlite-sql-transforms")
+            .AddParameter(
+                "Steps",
+                new[] { sourceStep, batchTransform, stageTarget, wholeDatasetTransform, finalTarget })
+            .AddParameter("Connections", new Hashtable
+            {
+                ["source"] = new FileInfo(files.GetPath("source.sqlite")),
+                ["target"] = new FileInfo(files.GetPath("target.sqlite"))
+            })
+            .AddParameter("BatchSize", 1)
+            .AddParameter("MaxAttempts", 1);
+        var output = powershell.Invoke();
+
+        Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
+        Assert.IsType<DependencySchedulerResult>(Assert.Single(output).BaseObject);
+        target.Open();
+        Assert.Equal(2L, Scalar<long>(target, "SELECT COUNT(*) FROM final_records"));
+        Assert.Equal(
+            "SOUTH ACCOUNT!",
+            Scalar<string>(target, "SELECT Name FROM final_records WHERE Id = 'A002'"));
     }
 
     [Fact]
@@ -384,14 +683,11 @@ public sealed class DatabaseConnectorTests
     {
         using var files = new TemporaryDirectory();
         using var source = new DuckDBConnection($"Data Source={files.GetPath("source.duckdb")}");
-        using var transform = new DuckDBConnection($"Data Source={files.GetPath("transform.duckdb")}");
         using var target = new DuckDBConnection($"Data Source={files.GetPath("target.duckdb")}");
         source.Open();
-        transform.Open();
-        target.Open();
         Execute(source, "CREATE TABLE records (Id VARCHAR, Name VARCHAR)");
         Execute(source, "INSERT INTO records VALUES ('a', 'first'), ('b', 'second')");
-        Execute(transform, "CREATE TABLE audit (Id VARCHAR, Name VARCHAR)");
+        source.Close();
 
         var sourceStep = PSObject.AsPSObject(new
         {
@@ -409,7 +705,7 @@ public sealed class DatabaseConnectorTests
                 }
             }
         });
-        var transformStep = PSObject.AsPSObject(new
+        var rowTransform = PSObject.AsPSObject(new
         {
             Id = "Transform",
             Type = "transform",
@@ -417,8 +713,12 @@ public sealed class DatabaseConnectorTests
             Transform = new Hashtable
             {
                 ["Type"] = "duckdb",
-                ["ConnectionId"] = "transform",
-                ["Sql"] = "INSERT INTO audit VALUES (?, ?)",
+                ["InitializeSql"] = """
+                    CREATE TABLE IF NOT EXISTS row_rules (suffix VARCHAR);
+                    DELETE FROM row_rules;
+                    INSERT INTO row_rules VALUES ('!');
+                    """,
+                ["Sql"] = "SELECT ? AS Id, upper(?) || (SELECT suffix FROM row_rules) AS Name",
                 ["Parameters"] = new System.Collections.Specialized.OrderedDictionary
                 {
                     ["id"] = "Id",
@@ -426,11 +726,75 @@ public sealed class DatabaseConnectorTests
                 }
             }
         });
+        var batchTransform = PSObject.AsPSObject(new
+        {
+            Id = "BatchTransform",
+            Type = "transform",
+            Inputs = new[] { "Transform" },
+            Transform = new Hashtable
+            {
+                ["Type"] = "duckdb",
+                ["Mode"] = "per_batch",
+                ["InitializeSql"] = """
+                    CREATE TABLE IF NOT EXISTS batch_rules (minimum_length INTEGER);
+                    DELETE FROM batch_rules;
+                    INSERT INTO batch_rules VALUES (4);
+                    """,
+                ["Sql"] = """
+                    SELECT __migration_parent_index, Id, upper(Name) AS Name
+                    FROM __migration4dataverse_input
+                    WHERE length(Name) >= ?
+                    ORDER BY Id
+                    """,
+                ["Parameters"] = new System.Collections.Specialized.OrderedDictionary
+                {
+                    ["minimumLength"] = 4
+                }
+            }
+        });
+        var stageTarget = PSObject.AsPSObject(new
+        {
+            Id = "StageTarget",
+            Type = "target",
+            Inputs = new[] { "BatchTransform" },
+            Target = new Hashtable
+            {
+                ["Type"] = "duckdb",
+                ["Table"] = "staged_records"
+            }
+        });
+        var wholeDatasetTransform = PSObject.AsPSObject(new
+        {
+            Id = "WholeDatasetTransform",
+            Type = "transform",
+            Inputs = new[] { "StageTarget" },
+            Transform = new Hashtable
+            {
+                ["Type"] = "duckdb",
+                ["Mode"] = "whole_dataset",
+                ["Key"] = "Id",
+                ["InitializeSql"] = """
+                    CREATE TABLE IF NOT EXISTS dataset_rules (suffix VARCHAR);
+                    DELETE FROM dataset_rules;
+                    INSERT INTO dataset_rules VALUES ('!');
+                    """,
+                ["Sql"] = """
+                    SELECT Id, upper(Name) || (SELECT suffix FROM dataset_rules) AS Name
+                    FROM staged_records
+                    WHERE length(Name) >= ?
+                    ORDER BY Id
+                    """,
+                ["Parameters"] = new System.Collections.Specialized.OrderedDictionary
+                {
+                    ["minimumLength"] = 7
+                }
+            }
+        });
         var targetStep = PSObject.AsPSObject(new
         {
             Id = "Target",
             Type = "target",
-            Inputs = new[] { "Transform" },
+            Inputs = new[] { "WholeDatasetTransform" },
             Target = new Hashtable
             {
                 ["Type"] = "duckdb",
@@ -449,12 +813,13 @@ public sealed class DatabaseConnectorTests
             .AddParameter("DatabasePath", files.GetPath("migration.sqlite"))
             .AddParameter("RunName", "DuckDB prepared transform")
             .AddParameter("RunId", "duckdb-prepared-transform")
-            .AddParameter("Steps", new[] { sourceStep, transformStep, targetStep })
+            .AddParameter(
+                "Steps",
+                new[] { sourceStep, rowTransform, batchTransform, stageTarget, wholeDatasetTransform, targetStep })
             .AddParameter("Connections", new Hashtable
             {
-                ["source"] = source,
-                ["transform"] = transform,
-                ["target"] = target
+                ["source"] = new FileInfo(files.GetPath("source.duckdb")),
+                ["target"] = new FileInfo(files.GetPath("target.duckdb"))
             })
             .AddParameter("BatchSize", 1)
             .AddParameter("MaxAttempts", 1);
@@ -462,8 +827,18 @@ public sealed class DatabaseConnectorTests
 
         Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
         Assert.IsType<DependencySchedulerResult>(Assert.Single(output).BaseObject);
-        Assert.Equal(2L, Scalar<long>(target, "SELECT COUNT(*) FROM result"));
-        Assert.Equal(2L, Scalar<long>(transform, "SELECT COUNT(*) FROM audit"));
+        target.Open();
+        Assert.Equal(1L, Scalar<long>(target, "SELECT COUNT(*) FROM result"));
+        Assert.Equal("SECOND!!", Scalar<string>(target, "SELECT Name FROM result WHERE Id = 'b'"));
+        Assert.Single(Directory.EnumerateFiles(
+            Path.Combine(Path.GetDirectoryName(files.GetPath("migration.sqlite"))!, ".migration-transforms"),
+            "Transform-duckdb-prepared-transform-*.duckdb"));
+        Assert.Equal(
+            3,
+            Directory.EnumerateFiles(
+                    Path.Combine(Path.GetDirectoryName(files.GetPath("migration.sqlite"))!, ".migration-transforms"),
+                    "*duckdb-prepared-transform-*.duckdb")
+                .Count());
     }
 
     private static void Execute(System.Data.Common.DbConnection connection, string sql)

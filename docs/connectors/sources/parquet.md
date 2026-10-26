@@ -1,6 +1,6 @@
 # Parquet source
 
-The `parquet` source reads the embedded Parquet schema and loads one row group at a time. The source rejects any row group exceeding `MaxSourceRowGroupRows`; records emitted to the migration graph must serialize as JSON objects.
+The `parquet` source reads the embedded Parquet schema and loads one row group at a time. The source rejects any row group exceeding `MaxSourceRowGroupRows`; records emitted to the migration graph must serialize as JSON objects. Use a `DirectoryInfo` connection with a relative `Path`, or a `FileInfo` connection to name the exact input file and omit `Path`.
 
 ## Configuration example
 

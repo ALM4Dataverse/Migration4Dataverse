@@ -5,10 +5,22 @@ namespace Migration4Dataverse.Engine.Storage;
 
 internal static class SqliteNativeLibraryResolver
 {
+    private static readonly object RegistrationLock = new();
+    private static bool _isRegistered;
+
     public static void Register()
     {
-        var providerAssembly = Assembly.Load(new AssemblyName("SQLitePCLRaw.provider.e_sqlite3"));
-        NativeLibrary.SetDllImportResolver(providerAssembly, Resolve);
+        lock (RegistrationLock)
+        {
+            if (_isRegistered)
+            {
+                return;
+            }
+
+            var providerAssembly = Assembly.Load(new AssemblyName("SQLitePCLRaw.provider.e_sqlite3"));
+            NativeLibrary.SetDllImportResolver(providerAssembly, Resolve);
+            _isRegistered = true;
+        }
     }
 
     private static IntPtr Resolve(

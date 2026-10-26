@@ -24,7 +24,7 @@ Transform is a standalone node; it is not an optional property on another step. 
 
 ## Database-backed migration graph transforms
 
-The separate `Invoke-Migration` graph also supports per-row connected transforms. A SQLite Transform's inline `Script` receives both the current row and its named database connection:
+The separate `Invoke-Migration` graph supports SQLite and DuckDB transforms. The engine creates a database file beside `-DatabasePath`, keyed by provider, run ID, and transform step ID. The same run/step reuses its stable file when resumed; distinct runs and steps get distinct files. Do not provide a `ConnectionId` for a SQLite or DuckDB Transform. `Transform.InitializeSql` runs when the graph is created, before any records or batches are processed, and can create lookup or configuration tables used by the transform. It runs again when a compatible run is resumed, so make it idempotent. An inline SQLite `Script` receives the current row and its engine-managed database connection:
 
 ```powershell
 @{
@@ -32,7 +32,7 @@ The separate `Invoke-Migration` graph also supports per-row connected transforms
     Id = 'NormalizeWithLookup'
     Type = 'transform'
     Inputs = @('Records')
-    Transform = @{ Type = 'sqlite'; ConnectionId = 'lookup-db' }
+    Transform = @{ Type = 'sqlite' }
     Script = {
         param($row, $connection)
         $command = $connection.CreateCommand()
@@ -53,4 +53,64 @@ DuckDB transforms can use the same connection-aware PowerShell `Script` contract
 
 A Dataverse Transform uses `Transform = @{ Type = 'dataverse'; ConnectionId = 'crm' }`. Its `Script` receives `($row, $connection)` and can invoke `Invoke-DataverseSql -Connection $connection -Sql ... -Parameters ...` for SQL4CDS queries or updates. SQL4CDS is executed by the module; the Transform script determines which values are emitted downstream.
 
-Connected transforms currently run per row; whole-dataset and per-batch transform scopes are deferred. The connector requirements and supported migration-step semantics are in [migration step configuration](../../configuration.md#transform-and-filter-semantics).
+## SQLite and DuckDB set-based SQL transforms
+
+SQLite and DuckDB support per-batch and whole-dataset SQL modes. Both execute one read-only `SELECT` or `WITH` statement and preserve output lineage. `InitializeSql` runs before any batch so the database can contain helper tables or other setup state.
+
+### Per-batch
+
+`Mode = 'per_batch'` stages the input rows in the managed database's temporary table `__migration4dataverse_input`, executes `Transform.Sql`, then removes the temporary table. Include exactly one lineage column in the result: `__migration_parent_index` for one parent row or `__migration_parent_indices` containing a JSON array of parent row indexes. The engine strips that metadata before passing records downstream.
+
+```powershell
+Transform = @{
+    Type = 'sqlite'
+    Mode = 'per_batch'
+    InitializeSql = @'
+CREATE TABLE IF NOT EXISTS batch_rules (minimum_length INTEGER NOT NULL);
+DELETE FROM batch_rules;
+INSERT INTO batch_rules VALUES (4);
+'@
+    Sql = @'
+SELECT __migration_parent_index, Id, upper(Name) AS Name
+FROM __migration4dataverse_input
+WHERE length(Name) >= (SELECT minimum_length FROM batch_rules)
+ORDER BY Id
+'@
+}
+```
+
+### Whole-dataset
+
+`Mode = 'whole_dataset'` uses one matching SQLite or DuckDB Target step as an explicit staging barrier. Omit `ConnectionId` and `Path` from the staging Target and `ConnectionId` from the Transform: the engine creates one managed database shared by those two steps. The target writes the completed dataset to a managed table; after the target finishes, the transform streams the configured query as a source. `Transform.Key` names the stable, ordered result key. This mode reads query results from the database rather than consuming the target's batch payloads, so the SQL must query the staged table(s) itself. `Transform.CountQuery` is not supported; provide `ExpectedRecordCount` on the transform step if an exact count is known.
+
+```powershell
+@{
+    Id = 'StagingTarget'
+    Type = 'target'
+    Inputs = @('NormalizedRows')
+    Target = @{
+        Type = 'sqlite'
+        Table = 'staged_records'
+        Options = @{
+            CreateTable = $true
+            Schema = [ordered]@{ Id = 'TEXT'; Name = 'TEXT' }
+            KeyColumns = @('Id')
+        }
+    }
+}
+@{
+    Id = 'WholeDatasetTransform'
+    Type = 'transform'
+    Inputs = @('StagingTarget')
+    Transform = @{
+        Type = 'sqlite'
+        Mode = 'whole_dataset'
+        Key = 'Id'
+        Sql = 'SELECT Id, upper(Name) AS Name FROM staged_records ORDER BY Id'
+    }
+}
+```
+
+For per-batch and whole-dataset DuckDB SQL, `Transform.Parameters` is an ordered hashtable whose values bind to positional `?` placeholders. The per-batch temporary input table contains the current batch and its `__migration_parent_index`. Per-row DuckDB SQL instead maps those ordered parameters to input row fields. See the [DuckDB example](../../../examples/duckdb/example.ps1) for all three modes and setup SQL.
+
+SQLite source queries and whole-dataset transform queries are restricted to one read-only `SELECT` or `WITH` statement. SQLite `query_only` mode also guards query execution and is restored when reading completes. The connector guides describe source [parameter and ordering requirements](../../connectors/sources/sqlite.md) and target [schema, key, and index management](../../connectors/targets/sqlite.md). The complete migration-step contract is in [configuration](../../configuration.md#transform-and-filter-semantics).
