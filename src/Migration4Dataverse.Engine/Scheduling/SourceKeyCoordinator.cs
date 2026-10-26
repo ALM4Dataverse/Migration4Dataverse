@@ -6,11 +6,11 @@ namespace Migration4Dataverse.Engine.Scheduling;
 public sealed class SourceKeyCoordinator
 {
     private const int MaximumCachedSourceKeys = 8192;
-    private readonly SqliteMigrationStore _store;
+    private readonly IMigrationStore _store;
     private readonly ConcurrentDictionary<(string RunId, string StepId), TaskCompletionSource> _completedSteps = new();
     private readonly ConcurrentDictionary<(string RunId, string StepId, string Key), SourceKeyBatchReference> _sourceKeys = new();
 
-    public SourceKeyCoordinator(SqliteMigrationStore store)
+    public SourceKeyCoordinator(IMigrationStore store)
     {
         ArgumentNullException.ThrowIfNull(store);
         _store = store;

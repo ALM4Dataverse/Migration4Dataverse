@@ -7,7 +7,7 @@ namespace Migration4Dataverse.Engine.PowerShell;
 
 internal sealed class IndexedStreamingJoinBatchSource
 {
-    private readonly SqliteMigrationStore _store;
+    private readonly IMigrationStore _store;
     private readonly StepCompletionCoordinator _completionCoordinator;
     private readonly string _joinStepId;
     private readonly string _childInputStepId;
@@ -19,7 +19,7 @@ internal sealed class IndexedStreamingJoinBatchSource
     private readonly bool _preserveInputOrder;
 
     public IndexedStreamingJoinBatchSource(
-        SqliteMigrationStore store,
+        IMigrationStore store,
         StepCompletionCoordinator completionCoordinator,
         string joinStepId,
         string childInputStepId,

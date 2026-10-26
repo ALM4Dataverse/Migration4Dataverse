@@ -7,10 +7,10 @@ namespace Migration4Dataverse.Engine.Scheduling;
 
 public sealed class DependencyScheduler
 {
-    private const int MaxSqliteLeaseRetries = 5;
-    private readonly SqliteMigrationStore _store;
+    private const int MaxSqliteLockRetries = 5;
+    private readonly IMigrationStore _store;
 
-    public DependencyScheduler(SqliteMigrationStore store)
+    public DependencyScheduler(IMigrationStore store)
     {
         ArgumentNullException.ThrowIfNull(store);
         _store = store;
@@ -75,7 +75,7 @@ public sealed class DependencyScheduler
         if (!_store.TryAcquireRunLease(runId, schedulerOwner, effectiveOptions.RunLeaseDuration))
         {
             throw new InvalidOperationException(
-                $"Migration run '{runId}' is already owned by another scheduler.");
+                $"Migration run '{runId}' is already leased by another scheduler.");
         }
 
         Exception? runFailure = null;
@@ -581,10 +581,12 @@ public sealed class DependencyScheduler
                     runtime.SignalWork();
                     if (runtime.FailureTask.IsCompleted)
                     {
-                        _store.AbandonBatch(
-                            batch.BatchId,
-                            workerId,
-                            "Batch was returned to the queue after another batch failed.");
+                        await RetrySqliteLockAsync(
+                            () => _store.TryAbandonBatch(
+                                batch.BatchId,
+                                workerId,
+                                "Batch was returned to the queue after another batch failed."),
+                            CancellationToken.None).ConfigureAwait(false);
                         return;
                     }
 
@@ -633,8 +635,8 @@ public sealed class DependencyScheduler
             {
                 return operation();
             }
-            catch (SqliteException exception) when (
-                (exception.SqliteErrorCode is 5 or 6) && retry < MaxSqliteLeaseRetries)
+            catch (Exception exception) when (
+                IsSqliteLock(exception) && retry < MaxSqliteLockRetries)
             {
                 var backoffMilliseconds = Math.Min(5_000, 200 * (1 << retry));
                 var jitterMilliseconds = Random.Shared.Next(0, backoffMilliseconds / 2 + 1);
@@ -643,6 +645,26 @@ public sealed class DependencyScheduler
                     cancellationToken).ConfigureAwait(false);
             }
         }
+    }
+
+    private static bool IsSqliteLock(Exception exception) =>
+        exception switch
+        {
+            SqliteException sqliteException => sqliteException.SqliteErrorCode is 5 or 6,
+            RemoteStoreException remoteException => remoteException.SqliteErrorCode is 5 or 6,
+            _ => false
+        };
+
+    private static async Task RetrySqliteLockAsync(Action operation, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        await RetrySqliteLockAsync(
+            () =>
+            {
+                operation();
+                return true;
+            },
+            cancellationToken).ConfigureAwait(false);
     }
 
     private async Task ExecuteBatchAsync(
@@ -660,7 +682,7 @@ public sealed class DependencyScheduler
             var exception = new InvalidOperationException(
                 $"Batch '{batch.BatchId}' was recovered after exceeding the maximum of " +
                 $"{options.MaxAttempts} attempts.");
-            CompleteFailedBatch(
+            await CompleteFailedBatchAsync(
                 batch,
                 workerId,
                 CreateFailureOutcomes(batch, exception),
@@ -675,7 +697,7 @@ public sealed class DependencyScheduler
         {
             var exception = new InvalidOperationException(
                 $"Stored batch '{batch.BatchId}' references unknown step '{batch.StepId}'.");
-            CompleteFailedBatch(
+            await CompleteFailedBatchAsync(
                 batch,
                 workerId,
                 CreateFailureOutcomes(batch, exception),
@@ -688,7 +710,7 @@ public sealed class DependencyScheduler
         if (string.IsNullOrWhiteSpace(batch.PayloadJson))
         {
             var exception = new InvalidOperationException($"Leased batch '{batch.BatchId}' has no durable payload.");
-            CompleteFailedBatch(
+            await CompleteFailedBatchAsync(
                 batch,
                 workerId,
                 CreateFailureOutcomes(batch, exception),
@@ -704,13 +726,16 @@ public sealed class DependencyScheduler
         {
             if (options.CaptureDebugData)
             {
-                _store.CaptureDebugSnapshots(MigrationDebugCapture.CaptureInput(
+                var inputSnapshots = MigrationDebugCapture.CaptureInput(
                     batch,
                     (parentBatchId, recordIndex) =>
                     {
                         var lineageIds = _store.GetBatchOutputLineageIds(batch.RunId, parentBatchId);
                         return recordIndex < lineageIds.Count ? lineageIds[recordIndex] : null;
-                    }));
+                    });
+                await RetrySqliteLockAsync(
+                    () => _store.CaptureDebugSnapshots(inputSnapshots),
+                    CancellationToken.None).ConfigureAwait(false);
             }
 
             result = await ExecuteHandlerWithLeaseAsync(
@@ -723,11 +748,18 @@ public sealed class DependencyScheduler
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            _store.AbandonBatch(
-                batch.BatchId,
-                workerId,
-                "Batch execution was cancelled before its outcomes were committed.");
+            await RetrySqliteLockAsync(
+                () => _store.TryAbandonBatch(
+                    batch.BatchId,
+                    workerId,
+                    "Batch execution was cancelled before its outcomes were committed."),
+                CancellationToken.None).ConfigureAwait(false);
             throw;
+        }
+        catch (BatchLeaseLostException)
+        {
+            runtime.SignalWork();
+            return;
         }
         catch (Exception exception)
         {
@@ -736,26 +768,38 @@ public sealed class DependencyScheduler
                 var retryDelay = GetRetryDelay(options.RetryDelay, batch.Attempts);
                 try
                 {
-                    if (retryDelay > TimeSpan.Zero)
-                    {
-                        await WaitBeforeRetryWithLeaseAsync(
+                    if (retryDelay > TimeSpan.Zero &&
+                        !await WaitBeforeRetryWithLeaseAsync(
                             batch.BatchId,
                             workerId,
                             retryDelay,
                             options.BatchLeaseDuration,
-                            cancellationToken).ConfigureAwait(false);
+                            cancellationToken).ConfigureAwait(false))
+                    {
+                        runtime.SignalWork();
+                        return;
                     }
 
-                    _store.AbandonBatch(batch.BatchId, workerId, exception.ToString());
+                    var abandoned = await RetrySqliteLockAsync(
+                        () => _store.TryAbandonBatch(batch.BatchId, workerId, exception.ToString()),
+                        CancellationToken.None).ConfigureAwait(false);
+                    if (!abandoned)
+                    {
+                        runtime.SignalWork();
+                        return;
+                    }
+
                     runtime.SignalWork();
                     return;
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    _store.AbandonBatch(
-                        batch.BatchId,
-                        workerId,
-                        "Batch retry delay was cancelled before the next attempt.");
+                    await RetrySqliteLockAsync(
+                        () => _store.TryAbandonBatch(
+                            batch.BatchId,
+                            workerId,
+                            "Batch retry delay was cancelled before the next attempt."),
+                        CancellationToken.None).ConfigureAwait(false);
                     throw;
                 }
             }
@@ -772,7 +816,7 @@ public sealed class DependencyScheduler
                     }
                 }
             });
-            CompleteFailedBatch(
+            await CompleteFailedBatchAsync(
                 batch,
                 workerId,
                 outcomesJson,
@@ -787,7 +831,7 @@ public sealed class DependencyScheduler
         {
             var exception = new InvalidOperationException(
                 $"Step '{step.Id}' returned no result for batch '{batch.BatchId}'.");
-            CompleteFailedBatch(
+            await CompleteFailedBatchAsync(
                 batch,
                 workerId,
                 CreateFailureOutcomes(batch, exception),
@@ -804,7 +848,7 @@ public sealed class DependencyScheduler
         }
         catch (Exception exception)
         {
-            CompleteFailedBatch(
+            await CompleteFailedBatchAsync(
                 batch,
                 workerId,
                 CreateFailureOutcomes(batch, exception),
@@ -817,7 +861,7 @@ public sealed class DependencyScheduler
 
         if (result.HasErrors)
         {
-            CaptureDebugResult(batch, result, options.CaptureDebugData);
+            await CaptureDebugResultAsync(batch, result, options.CaptureDebugData).ConfigureAwait(false);
             var errorMessage = string.IsNullOrWhiteSpace(result.LastError)
                 ? result.OutcomesJson
                 : result.LastError;
@@ -828,13 +872,21 @@ public sealed class DependencyScheduler
                     errorMessage;
             }
 
-            _store.CompleteBatch(
-                batch.BatchId,
-                workerId,
-                result.OutcomesJson,
-                hasErrors: true,
-                lastError: errorMessage,
-                filteredRows: result.FilteredRows);
+            var completed = await RetrySqliteLockAsync(
+                () => _store.TryCompleteBatch(
+                    batch.BatchId,
+                    workerId,
+                    result.OutcomesJson,
+                    hasErrors: true,
+                    lastError: errorMessage,
+                    filteredRows: result.FilteredRows),
+                CancellationToken.None).ConfigureAwait(false);
+            if (completed is null)
+            {
+                runtime.SignalWork();
+                return;
+            }
+
             runtime.BatchCompleted(batch.StepId);
             runtime.SignalDependencyWork();
             runtime.Fail(new InvalidOperationException(
@@ -849,7 +901,7 @@ public sealed class DependencyScheduler
         }
         catch (Exception exception)
         {
-            CompleteFailedBatch(
+            await CompleteFailedBatchAsync(
                 batch,
                 workerId,
                 CreateFailureOutcomes(batch, exception),
@@ -868,15 +920,23 @@ public sealed class DependencyScheduler
         runtime.RegisterDependencyEvents(dependencyEvents, immediatelyReadyEvents);
         try
         {
-            CaptureDebugResult(batch, result, options.CaptureDebugData);
-            _store.CompleteBatch(
-                batch.BatchId,
-                workerId,
-                result.OutcomesJson,
-                result.HasErrors,
-                dependencyEvents,
-                result.LastError,
-                filteredRows: result.FilteredRows);
+            await CaptureDebugResultAsync(batch, result, options.CaptureDebugData).ConfigureAwait(false);
+            var completed = await RetrySqliteLockAsync(
+                () => _store.TryCompleteBatch(
+                    batch.BatchId,
+                    workerId,
+                    result.OutcomesJson,
+                    result.HasErrors,
+                    dependencyEvents,
+                    result.LastError,
+                    filteredRows: result.FilteredRows),
+                CancellationToken.None).ConfigureAwait(false);
+            if (completed is null)
+            {
+                runtime.RemoveDependencyEvents(dependencyEvents, immediatelyReadyEvents);
+                runtime.SignalWork();
+                return;
+            }
         }
         catch
         {
@@ -888,7 +948,7 @@ public sealed class DependencyScheduler
         runtime.SignalDependencyWork();
     }
 
-    private void CompleteFailedBatch(
+    private async Task CompleteFailedBatchAsync(
         StoredBatch batch,
         string workerId,
         string outcomesJson,
@@ -900,22 +960,32 @@ public sealed class DependencyScheduler
         if (captureDebugData)
         {
             var failureJson = JsonSerializer.Serialize(new { error = exception.ToString() });
-            _store.CaptureDebugSnapshots(
-                [MigrationDebugCapture.CaptureOutcomes(batch, failureJson)]);
+            var snapshots = new[] { MigrationDebugCapture.CaptureOutcomes(batch, failureJson) };
+            await RetrySqliteLockAsync(
+                () => _store.CaptureDebugSnapshots(snapshots),
+                CancellationToken.None).ConfigureAwait(false);
         }
 
-        _store.CompleteBatch(
-            batch.BatchId,
-            workerId,
-            outcomesJson,
-            hasErrors: true,
-            lastError: exception.ToString());
+        var completed = await RetrySqliteLockAsync(
+            () => _store.TryCompleteBatch(
+                batch.BatchId,
+                workerId,
+                outcomesJson,
+                hasErrors: true,
+                lastError: exception.ToString()),
+            CancellationToken.None).ConfigureAwait(false);
+        if (completed is null)
+        {
+            runtime.SignalWork();
+            return;
+        }
+
         runtime.BatchCompleted(batch.StepId);
         runtime.SignalDependencyWork();
         runtime.Fail(new InvalidOperationException(failureMessage, exception));
     }
 
-    private void CaptureDebugResult(
+    private async Task CaptureDebugResultAsync(
         StoredBatch batch,
         MigrationBatchResult result,
         bool captureDebugData)
@@ -957,7 +1027,9 @@ public sealed class DependencyScheduler
                 _store.GetBatchInputLineageIds(batch.RunId, batch.BatchId)));
         }
 
-        _store.CaptureDebugSnapshots(snapshots);
+        await RetrySqliteLockAsync(
+            () => _store.CaptureDebugSnapshots(snapshots),
+            CancellationToken.None).ConfigureAwait(false);
     }
 
     private static string CreateFailureOutcomes(StoredBatch batch, Exception exception)
@@ -1221,7 +1293,8 @@ public sealed class DependencyScheduler
             if (completedTask == heartbeatTask)
             {
                 await heartbeatTask.ConfigureAwait(false);
-                throw new InvalidOperationException($"Batch lease renewal for '{batch.BatchId}' stopped unexpectedly.");
+                throw new BatchLeaseLostException(
+                    $"Batch lease renewal for '{batch.BatchId}' stopped unexpectedly.");
             }
 
             return await handlerTask.ConfigureAwait(false);
@@ -1251,7 +1324,7 @@ public sealed class DependencyScheduler
             await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
             if (!_store.RenewBatchLease(batchId, workerId, leaseDuration))
             {
-                throw new InvalidOperationException(
+                throw new BatchLeaseLostException(
                     $"Worker '{workerId}' lost the lease for batch '{batchId}'.");
             }
         }
@@ -1275,7 +1348,7 @@ public sealed class DependencyScheduler
         }
     }
 
-    private async Task WaitBeforeRetryWithLeaseAsync(
+    private async Task<bool> WaitBeforeRetryWithLeaseAsync(
         string batchId,
         string workerId,
         TimeSpan retryDelay,
@@ -1290,18 +1363,27 @@ public sealed class DependencyScheduler
             leaseCancellation.Token);
         try
         {
-            await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            leaseCancellation.Cancel();
             try
             {
-                await heartbeatTask.ConfigureAwait(false);
+                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (leaseCancellation.IsCancellationRequested)
+            finally
             {
+                leaseCancellation.Cancel();
+                try
+                {
+                    await heartbeatTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (leaseCancellation.IsCancellationRequested)
+                {
+                }
             }
+
+            return true;
+        }
+        catch (BatchLeaseLostException)
+        {
+            return false;
         }
     }
 
@@ -1479,6 +1561,14 @@ public sealed class DependencyScheduler
         if (options.RetryDelay < TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(options.RetryDelay));
+        }
+    }
+
+    private sealed class BatchLeaseLostException : InvalidOperationException
+    {
+        public BatchLeaseLostException(string message)
+            : base(message)
+        {
         }
     }
 

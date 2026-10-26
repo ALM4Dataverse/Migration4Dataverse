@@ -1318,6 +1318,7 @@ export default function App() {
   } | null>(null);
   const [graphLayoutError, setGraphLayoutError] = useState("");
   const flowCanvasRef = useRef<HTMLDivElement | null>(null);
+  const refreshInFlight = useRef(false);
   const lastAutoFit = useRef<{ instance: ReactFlowInstance; key: string } | null>(null);
   const lastCenteredSelection = useRef<{ instance: ReactFlowInstance; key: string } | null>(null);
   const taskErrorRequestVersion = useRef(0);
@@ -1419,61 +1420,67 @@ export default function App() {
   }, []);
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
-    const listedRuns = (await api<ApiRunSummary[]>("/api/runs", signal)).map(normalizeRun);
-    setRuns(listedRuns);
-    const processMetrics = await api<ApiProcessMetrics>("/api/process-metrics", signal);
-    const sampledAt = Date.parse(processMetrics.capturedUtc);
-    if (!Number.isFinite(sampledAt)) {
-      throw new Error("The dashboard returned an invalid process-metrics timestamp.");
-    }
-    setProcessSamples((previous) => {
-      const lastSample = previous.at(-1);
-      if (lastSample && sampledAt - lastSample.sampledAt < 2500) return previous;
-      return [...previous, {
-        sampledAt,
-        cpuTimeMilliseconds: processMetrics.cpuTimeMilliseconds,
-        logicalProcessorCount: processMetrics.logicalProcessorCount,
-        workingSetBytes: processMetrics.workingSetBytes,
-        managedHeapBytes: processMetrics.managedHeapBytes,
-        memoryLimitBytes: processMetrics.memoryLimitBytes,
-      }]
-        .filter((sample) => sample.sampledAt >= sampledAt - 6 * 60_000)
-        .slice(-120);
-    });
-    const configurationResponse = await fetch("/api/configuration", { cache: "no-store", signal });
-    if (configurationResponse.ok) {
-      setPreviewConfiguration(normalizeConfiguration(
-        await configurationResponse.json() as ApiConfiguration,
-      ));
-    } else if (configurationResponse.status === 404) {
-      setPreviewConfiguration(null);
-    } else {
-      throw new Error(`${configurationResponse.status} ${configurationResponse.statusText}`);
-    }
-    const currentId = runId || listedRuns[0]?.runId || "";
-    if (!currentId) {
-      setRun(null);
-      setRunId("");
-      setShowConfiguration(true);
-      return;
-    }
-    if (currentId !== runId) setRunId(currentId);
-    const currentRun = normalizeRun(
-      await api<ApiRunSummary>(`/api/runs/${encodeURIComponent(currentId)}`, signal),
-    );
-    setRun(currentRun);
-    const sample = createSchedulerSample(currentRun);
-    setSchedulerSamples((previous) => {
-      const currentRunSamples = previous.filter((item) => item.runId === currentRun.runId);
-      const lastSample = currentRunSamples.at(-1);
-      if (lastSample && sample.sampledAt - lastSample.sampledAt < 2500) {
-        return currentRunSamples;
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    try {
+      const listedRuns = (await api<ApiRunSummary[]>("/api/runs", signal)).map(normalizeRun);
+      setRuns(listedRuns);
+      const processMetrics = await api<ApiProcessMetrics>("/api/process-metrics", signal);
+      const sampledAt = Date.parse(processMetrics.capturedUtc);
+      if (!Number.isFinite(sampledAt)) {
+        throw new Error("The dashboard returned an invalid process-metrics timestamp.");
       }
-      return [...currentRunSamples, sample]
-        .filter((item) => item.sampledAt >= sample.sampledAt - 6 * 60_000)
-        .slice(-120);
-    });
-    setError("");
+      setProcessSamples((previous) => {
+        const lastSample = previous.at(-1);
+        if (lastSample && sampledAt - lastSample.sampledAt < 2500) return previous;
+        return [...previous, {
+          sampledAt,
+          cpuTimeMilliseconds: processMetrics.cpuTimeMilliseconds,
+          logicalProcessorCount: processMetrics.logicalProcessorCount,
+          workingSetBytes: processMetrics.workingSetBytes,
+          managedHeapBytes: processMetrics.managedHeapBytes,
+          memoryLimitBytes: processMetrics.memoryLimitBytes,
+        }]
+          .filter((sample) => sample.sampledAt >= sampledAt - 6 * 60_000)
+          .slice(-120);
+      });
+      const configurationResponse = await fetch("/api/configuration", { cache: "no-store", signal });
+      if (configurationResponse.ok) {
+        setPreviewConfiguration(normalizeConfiguration(
+          await configurationResponse.json() as ApiConfiguration,
+        ));
+      } else if (configurationResponse.status === 404) {
+        setPreviewConfiguration(null);
+      } else {
+        throw new Error(`${configurationResponse.status} ${configurationResponse.statusText}`);
+      }
+      const currentId = runId || listedRuns[0]?.runId || "";
+      if (!currentId) {
+        setRun(null);
+        setRunId("");
+        setShowConfiguration(true);
+        return;
+      }
+      if (currentId !== runId) setRunId(currentId);
+      const currentRun = normalizeRun(
+        await api<ApiRunSummary>(`/api/runs/${encodeURIComponent(currentId)}`, signal),
+      );
+      setRun(currentRun);
+      const sample = createSchedulerSample(currentRun);
+      setSchedulerSamples((previous) => {
+        const currentRunSamples = previous.filter((item) => item.runId === currentRun.runId);
+        const lastSample = currentRunSamples.at(-1);
+        if (lastSample && sample.sampledAt - lastSample.sampledAt < 2500) {
+          return currentRunSamples;
+        }
+        return [...currentRunSamples, sample]
+          .filter((item) => item.sampledAt >= sample.sampledAt - 6 * 60_000)
+          .slice(-120);
+      });
+      setError("");
+    } finally {
+      refreshInFlight.current = false;
+    }
   }, [runId]);
 
   useEffect(() => {

@@ -1220,6 +1220,88 @@ public sealed class DependencySchedulerTests
     }
 
     [Fact]
+    public async Task LostBatchLeaseDuringRetryDoesNotFailRun()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        var attempts = 0;
+        var jobs = new[]
+        {
+            new MigrationStepDefinition(
+                "Accounts",
+                inputs: null,
+                (_, cancellationToken) => SingleBatch("{}", cancellationToken),
+                (batch, _) =>
+                {
+                    if (Interlocked.Increment(ref attempts) == 1)
+                    {
+                        store.AbandonBatch(
+                            batch.BatchId,
+                            Assert.IsType<string>(batch.LeaseOwner),
+                            "Lease was reclaimed.");
+                        return Task.FromException<MigrationBatchResult>(
+                            new InvalidOperationException("Retryable failure."));
+                    }
+
+                    return Task.FromResult(new MigrationBatchResult("{}"));
+                })
+        };
+
+        var result = await new DependencyScheduler(store).ExecuteAsync(
+            "lost-lease-retry-run",
+            "lost-lease-retry-test",
+            "hash-1",
+            jobs,
+            CreateOptions(maxDegreeOfParallelism: 1, maxQueuedBatches: 1));
+
+        var batch = store.GetBatch(MigrationBatchIdentity.Create("lost-lease-retry-run", "Accounts", 0));
+        Assert.NotNull(batch);
+        Assert.Equal(2, attempts);
+        Assert.Equal(MigrationBatchState.Succeeded, batch.State);
+        Assert.Equal(1, result.SucceededBatches);
+    }
+
+    [Fact]
+    public async Task LostBatchLeaseBeforeCompletionDoesNotFailRun()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        var attempts = 0;
+        var jobs = new[]
+        {
+            new MigrationStepDefinition(
+                "Accounts",
+                inputs: null,
+                (_, cancellationToken) => SingleBatch("{}", cancellationToken),
+                (batch, _) =>
+                {
+                    if (Interlocked.Increment(ref attempts) == 1)
+                    {
+                        store.AbandonBatch(
+                            batch.BatchId,
+                            Assert.IsType<string>(batch.LeaseOwner),
+                            "Lease was reclaimed.");
+                    }
+
+                    return Task.FromResult(new MigrationBatchResult("{}"));
+                })
+        };
+
+        var result = await new DependencyScheduler(store).ExecuteAsync(
+            "lost-lease-complete-run",
+            "lost-lease-complete-test",
+            "hash-1",
+            jobs,
+            CreateOptions(maxDegreeOfParallelism: 1, maxQueuedBatches: 1));
+
+        var batch = store.GetBatch(MigrationBatchIdentity.Create("lost-lease-complete-run", "Accounts", 0));
+        Assert.NotNull(batch);
+        Assert.Equal(2, attempts);
+        Assert.Equal(MigrationBatchState.Succeeded, batch.State);
+        Assert.Equal(1, result.SucceededBatches);
+    }
+
+    [Fact]
     public async Task CancellationDuringRetryDelayReturnsBatchToPending()
     {
         using var database = new TemporaryDatabase();

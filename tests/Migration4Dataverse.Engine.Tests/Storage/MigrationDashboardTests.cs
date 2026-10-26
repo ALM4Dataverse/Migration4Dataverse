@@ -545,6 +545,46 @@ public sealed class MigrationDashboardTests
     }
 
     [Fact]
+    public void BatchOutputLineageUsesLatestAttemptOnly()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        const string runId = "debug-retry-lineage-run";
+        const string stepId = "Parent";
+        const string batchId = "parent-batch";
+        store.CreateRun(runId, "debug-retry-lineage-test", "hash", debugCaptureEnabled: true);
+        store.EnqueueBatch(runId, stepId, 0, batchId, null, "{}");
+
+        store.CaptureDebugSnapshots(
+        [
+            new MigrationDebugSnapshot(
+                runId,
+                batchId,
+                stepId,
+                stepId,
+                0,
+                1,
+                "first-attempt",
+                Array.Empty<string>(),
+                "{}",
+                DateTimeOffset.UtcNow),
+            new MigrationDebugSnapshot(
+                runId,
+                batchId,
+                stepId,
+                stepId,
+                0,
+                2,
+                "second-attempt",
+                Array.Empty<string>(),
+                "{}",
+                DateTimeOffset.UtcNow)
+        ]);
+
+        Assert.Equal(new[] { "second-attempt" }, store.GetBatchOutputLineageIds(runId, batchId));
+    }
+
+    [Fact]
     public async Task DebugCaptureTracksMultipleInputRowsForMergedStageRows()
     {
         using var database = new TemporaryDatabase();

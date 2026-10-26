@@ -12,7 +12,7 @@ public sealed record RowLinkedParentDependency(
 
 public sealed class RowLinkedSourceBatchSource
 {
-    private readonly SqliteMigrationStore _store;
+    private readonly IMigrationStore _store;
     private readonly SourceKeyCoordinator _sourceKeyCoordinator;
     private readonly HierarchySourceLevel _childLevel;
     private readonly IReadOnlyList<RowLinkedParentDependency> _parents;
@@ -20,7 +20,7 @@ public sealed class RowLinkedSourceBatchSource
     private readonly Func<HierarchySourceLevel, IHierarchyRecordReader> _readerFactory;
 
     public RowLinkedSourceBatchSource(
-        SqliteMigrationStore store,
+        IMigrationStore store,
         SourceKeyCoordinator sourceKeyCoordinator,
         HierarchySourceLevel childLevel,
         IEnumerable<RowLinkedParentDependency> parents,

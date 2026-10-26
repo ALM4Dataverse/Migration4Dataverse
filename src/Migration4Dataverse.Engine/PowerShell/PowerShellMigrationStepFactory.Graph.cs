@@ -50,7 +50,7 @@ internal static partial class PowerShellMigrationStepFactory
         PowerShellScriptExecutor executor,
         int defaultBatchSize,
         bool captureDebugData = false,
-        SqliteMigrationStore? store = null,
+        IMigrationStore? store = null,
         int maxTargetConcurrency = 32,
         bool disableDataverseRetriesForDiagnostics = false)
     {

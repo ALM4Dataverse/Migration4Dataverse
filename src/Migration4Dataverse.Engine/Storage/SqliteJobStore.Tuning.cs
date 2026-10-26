@@ -2,7 +2,7 @@ using Microsoft.Data.Sqlite;
 
 namespace Migration4Dataverse.Engine.Storage;
 
-public sealed partial class SqliteMigrationStore
+internal sealed partial class SqliteMigrationStore
 {
     public DataverseTargetTuningProfile? GetDataverseTargetTuningProfile(string stepId)
     {
@@ -37,6 +37,7 @@ public sealed partial class SqliteMigrationStore
         int algorithmVersion = 1,
         string? connectionId = null)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
         if (batchSize is <= 0)
         {
@@ -80,6 +81,7 @@ public sealed partial class SqliteMigrationStore
 
     public long ClearDataverseTargetTuningProfile(string stepId)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
@@ -93,6 +95,7 @@ public sealed partial class SqliteMigrationStore
 
     public long ClearDataverseTargetTuningProfiles()
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM DataverseTargetTuningProfiles;";

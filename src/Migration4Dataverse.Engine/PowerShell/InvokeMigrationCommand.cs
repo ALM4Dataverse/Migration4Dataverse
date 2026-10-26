@@ -102,7 +102,7 @@ public sealed class InvokeMigrationCommand : PSCmdlet
                 "so transient failures can fail the migration.");
         }
 
-        var store = new SqliteMigrationStore(DatabasePath);
+        var store = MigrationStoreFactory.Open(DatabasePath);
         var scheduler = new DependencyScheduler(store);
         var modules = ModulesToImport
             .Concat(PowerShellMigrationStepFactory.GetRequiredModulesForGraph(Steps))
@@ -191,7 +191,7 @@ public sealed class InvokeMigrationCommand : PSCmdlet
     }
 
     private void UpdateConnectionInstanceSnapshot(
-        SqliteMigrationStore store,
+        IMigrationStore store,
         string runId,
         IDictionary connections,
         string phase)
@@ -215,7 +215,7 @@ public sealed class InvokeMigrationCommand : PSCmdlet
         _cancellation?.Cancel();
     }
 
-    private void WriteRunProgress(SqliteMigrationStore store, string runId)
+    private void WriteRunProgress(IMigrationStore store, string runId)
     {
         MigrationRunSummary run;
         try

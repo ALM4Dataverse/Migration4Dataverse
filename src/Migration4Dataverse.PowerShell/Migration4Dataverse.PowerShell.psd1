@@ -13,7 +13,12 @@
         'Start-MigrationDashboard'
         'Stop-MigrationDashboard'
     )
-    CmdletsToExport = @('Invoke-Migration', 'Get-MigrationRun', 'Clear-MigrationTargetTuning')
+    CmdletsToExport = @(
+        'Invoke-Migration'
+        'Get-MigrationRun'
+        'Clear-MigrationTargetTuning'
+        'Start-MigrationDatabaseServer'
+    )
     VariablesToExport = @()
     AliasesToExport = @()
     PrivateData = @{

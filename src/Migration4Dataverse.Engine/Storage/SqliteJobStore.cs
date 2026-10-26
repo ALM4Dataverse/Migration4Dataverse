@@ -6,7 +6,7 @@ using Microsoft.Data.Sqlite;
 
 namespace Migration4Dataverse.Engine.Storage;
 
-public sealed partial class SqliteMigrationStore
+internal sealed partial class SqliteMigrationStore : IMigrationStore
 {
     private readonly string _connectionString;
 
@@ -15,7 +15,7 @@ public sealed partial class SqliteMigrationStore
         SqliteNativeLibraryResolver.Register();
     }
 
-    public SqliteMigrationStore(string databasePath)
+    internal SqliteMigrationStore(string databasePath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         if (string.Equals(databasePath, ":memory:", StringComparison.OrdinalIgnoreCase))
@@ -54,6 +54,7 @@ public sealed partial class SqliteMigrationStore
         string configurationJson = "null",
         string connectionInstancesJson = "[]")
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(runName);
         ArgumentException.ThrowIfNullOrWhiteSpace(stepHash);
@@ -139,6 +140,7 @@ public sealed partial class SqliteMigrationStore
 
     public void UpdateConnectionInstanceSnapshots(string runId, string snapshotsJson)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ValidateJson(snapshotsJson, nameof(snapshotsJson));
         using var connection = OpenConnection();
@@ -158,6 +160,7 @@ public sealed partial class SqliteMigrationStore
 
     public void SetRunStatus(string runId, MigrationRunStatus status, DateTimeOffset? nowUtc = null)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
 
         var now = nowUtc ?? DateTimeOffset.UtcNow;
@@ -195,6 +198,7 @@ public sealed partial class SqliteMigrationStore
 
     public void SaveTargetRecordIds(string runId, IReadOnlyList<TargetRecordIdMapping> mappings)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentNullException.ThrowIfNull(mappings);
         if (mappings.Count == 0)
@@ -311,6 +315,7 @@ public sealed partial class SqliteMigrationStore
         string runId,
         IReadOnlyList<TargetRecordContextMapping> contexts)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentNullException.ThrowIfNull(contexts);
         if (contexts.Count == 0)
@@ -483,6 +488,7 @@ public sealed partial class SqliteMigrationStore
         string runId,
         IReadOnlyList<JoinInputRecordMapping> records)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentNullException.ThrowIfNull(records);
         if (records.Count == 0)
@@ -829,6 +835,7 @@ public sealed partial class SqliteMigrationStore
         string joinStepId,
         IReadOnlyList<JoinRelationshipMatch> matches)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(joinStepId);
         ArgumentNullException.ThrowIfNull(matches);
@@ -1038,6 +1045,7 @@ public sealed partial class SqliteMigrationStore
 
     public void ClearJoinStaging(string runId)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction();
@@ -1060,6 +1068,7 @@ public sealed partial class SqliteMigrationStore
 
     public void StartStepActivity(string runId, string stepId, DateTimeOffset? nowUtc = null)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
 
@@ -1071,6 +1080,7 @@ public sealed partial class SqliteMigrationStore
 
     public void EnterStepActivity(string runId, string stepId, DateTimeOffset? nowUtc = null)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
 
@@ -1083,6 +1093,7 @@ public sealed partial class SqliteMigrationStore
 
     public void ExitStepActivity(string runId, string stepId, DateTimeOffset? nowUtc = null)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
 
@@ -1095,6 +1106,7 @@ public sealed partial class SqliteMigrationStore
 
     public void CompleteStepActivity(string runId, string stepId, DateTimeOffset? nowUtc = null)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
 
@@ -1111,6 +1123,7 @@ public sealed partial class SqliteMigrationStore
         TimeSpan leaseDuration,
         DateTimeOffset? nowUtc = null)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
         if (leaseDuration <= TimeSpan.Zero)
@@ -1120,7 +1133,10 @@ public sealed partial class SqliteMigrationStore
 
         var now = nowUtc ?? DateTimeOffset.UtcNow;
         using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction(deferred: false);
+
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             UPDATE Runs
             SET SchedulerLeaseOwner = $workerId,
@@ -1137,11 +1153,18 @@ public sealed partial class SqliteMigrationStore
         AddParameter(command, "$leaseExpiresUtc", FormatUtc(now.Add(leaseDuration)));
         AddParameter(command, "$now", FormatUtc(now));
         AddParameter(command, "$runId", runId);
-        return command.ExecuteNonQuery() == 1;
+        var acquired = command.ExecuteNonQuery() == 1;
+        if (acquired)
+        {
+            transaction.Commit();
+        }
+
+        return acquired;
     }
 
     public void ReleaseRunLease(string runId, string workerId, DateTimeOffset? nowUtc = null)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
 
@@ -1346,6 +1369,7 @@ public sealed partial class SqliteMigrationStore
         long filteredRows = 0,
         IReadOnlyList<SourceKeyEntry>? sourceKeys = null)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(tableName);
         ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
@@ -1528,6 +1552,7 @@ public sealed partial class SqliteMigrationStore
         DateTimeOffset? nowUtc = null,
         string? stepId = null)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
         if (leaseDuration <= TimeSpan.Zero)
@@ -1605,6 +1630,19 @@ public sealed partial class SqliteMigrationStore
         string error,
         DateTimeOffset? nowUtc = null)
     {
+        if (!TryAbandonBatch(batchId, workerId, error, nowUtc))
+        {
+            throw new InvalidOperationException($"Worker '{workerId}' does not hold batch lease '{batchId}'.");
+        }
+    }
+
+    public bool TryAbandonBatch(
+        string batchId,
+        string workerId,
+        string error,
+        DateTimeOffset? nowUtc = null)
+    {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
         ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
         ArgumentNullException.ThrowIfNull(error);
@@ -1614,6 +1652,12 @@ public sealed partial class SqliteMigrationStore
         using var transaction = connection.BeginTransaction(deferred: false);
         var batch = FindBatchById(connection, transaction, batchId)
             ?? throw new KeyNotFoundException($"Batch '{batchId}' was not found.");
+        if (batch.State != MigrationBatchState.InFlight ||
+            !string.Equals(batch.LeaseOwner, workerId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
@@ -1635,11 +1679,12 @@ public sealed partial class SqliteMigrationStore
 
         if (command.ExecuteNonQuery() != 1)
         {
-            throw new InvalidOperationException($"Worker '{workerId}' does not hold batch lease '{batchId}'.");
+            return false;
         }
         ExitStepActivity(connection, transaction, batch.RunId, batch.StepId, now);
         TouchRun(connection, transaction, batch.RunId, FormatUtc(now));
         transaction.Commit();
+        return true;
     }
 
     public bool RenewBatchLease(
@@ -1648,6 +1693,7 @@ public sealed partial class SqliteMigrationStore
         TimeSpan leaseDuration,
         DateTimeOffset? nowUtc = null)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
         ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
         if (leaseDuration <= TimeSpan.Zero)
@@ -1683,6 +1729,29 @@ public sealed partial class SqliteMigrationStore
         DateTimeOffset? nowUtc = null,
         long filteredRows = 0)
     {
+        return TryCompleteBatch(
+                   batchId,
+                   workerId,
+                   outcomesJson,
+                   hasErrors,
+                   dependencyEvents,
+                   lastError,
+                   nowUtc,
+                   filteredRows)
+               ?? throw new InvalidOperationException($"Worker '{workerId}' does not hold batch lease '{batchId}'.");
+    }
+
+    public MigrationStepCheckpoint? TryCompleteBatch(
+        string batchId,
+        string workerId,
+        string outcomesJson,
+        bool hasErrors,
+        IReadOnlyCollection<DependencyEvent>? dependencyEvents = null,
+        string? lastError = null,
+        DateTimeOffset? nowUtc = null,
+        long filteredRows = 0)
+    {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
         ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
         ArgumentNullException.ThrowIfNull(outcomesJson);
@@ -1706,7 +1775,7 @@ public sealed partial class SqliteMigrationStore
         if (batch.State != MigrationBatchState.InFlight ||
             !string.Equals(batch.LeaseOwner, workerId, StringComparison.Ordinal))
         {
-            throw new InvalidOperationException($"Worker '{workerId}' does not hold batch lease '{batchId}'.");
+            return null;
         }
 
         var terminalState = hasErrors
@@ -1744,7 +1813,7 @@ public sealed partial class SqliteMigrationStore
             AddParameter(update, "$workerId", workerId);
             if (update.ExecuteNonQuery() != 1)
             {
-                throw new InvalidOperationException($"Worker '{workerId}' lost the lease for batch '{batchId}'.");
+                return null;
             }
         }
         ExitStepActivity(connection, transaction, batch.RunId, batch.StepId, ParseUtc(now));
@@ -1871,6 +1940,7 @@ public sealed partial class SqliteMigrationStore
         string eventId,
         DateTimeOffset? nowUtc = null)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(eventId);
 
@@ -2027,6 +2097,7 @@ public sealed partial class SqliteMigrationStore
 
     public void CompleteDependencyEvent(string runId, string eventId, DateTimeOffset? nowUtc = null)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(eventId);
 
@@ -2059,6 +2130,7 @@ public sealed partial class SqliteMigrationStore
 
     private void Initialize()
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         using var connection = new SqliteConnection(_connectionString);
         connection.Open();
         ConfigureConnection(connection);

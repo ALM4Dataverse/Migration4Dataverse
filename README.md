@@ -17,6 +17,8 @@ Migration configuration, mapping, and custom callbacks are ordinary PowerShell s
 
 The runtime needs PowerShell 7.6+ and the .NET 10 SDK; it does not require SSIS, SQL Server, or an Azure-hosted execution service. It is designed for single-machine migration runs rather than distributed scale-out.
 
+Each migration SQLite database has one local owner process that centralizes all engine and dashboard store access. The owner starts implicitly on first use, or can be started explicitly with [`Start-MigrationDatabaseServer`](./docs/cmdlets/migration-database-server.md) when multiple PowerShell processes need to share the database. Schedulers and PowerShell callbacks remain in their caller processes, and multiple run IDs can execute concurrently through one owner.
+
 ## Current capabilities
 
 - A declarative step graph with named connections, connector-backed sources and targets, transforms, filters, keyed joins, and custom PowerShell callbacks.
@@ -145,6 +147,8 @@ pwsh ./examples/dashboard/example.ps1
 ```
 
 Open the printed `http://127.0.0.1:5180` URL while the 48-batch sample runs. Afterward, the server remains available for completed-run inspection until you press Enter. `Start-MigrationDashboard -Steps $steps -Connections $connections` also opens a configuration preview without executing a migration; use [`Get-MigrationRun`](./docs/cmdlets/get-migration-run.md) to list or inspect saved execution history. See the [dashboard guide](./docs/cmdlets/migration-dashboard.md) for retention and security details.
+
+For multiple independent PowerShell processes sharing a database, start [`Start-MigrationDatabaseServer`](./docs/cmdlets/migration-database-server.md) in a dedicated process first. The owner keeps SQLite access in one process while migration schedulers and callbacks stay with their callers; distinct run IDs can run concurrently through it.
 
 **Complex engine graph:** configuration-only preview of the 37-step Dataverse sample, showing independent sources, streaming joins, transforms, and targets. No migration is executing.
 

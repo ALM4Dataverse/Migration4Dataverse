@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 using System.Web;
 using Migration4Dataverse.Engine.Storage;
 
@@ -10,6 +11,7 @@ namespace Migration4Dataverse.Engine.Dashboard;
 public static class MigrationDashboardServer
 {
     private const string DefaultUrl = "http://127.0.0.1:5180/";
+    private const int MaxConcurrentRequests = 8;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public static Task<MigrationDashboardHandle> StartAsync(
@@ -47,7 +49,7 @@ public static class MigrationDashboardServer
         }
 
         var uri = ValidateUrl(url);
-        var store = string.IsNullOrWhiteSpace(databasePath) ? null : new SqliteMigrationStore(databasePath);
+        var store = string.IsNullOrWhiteSpace(databasePath) ? null : MigrationStoreFactory.Open(databasePath);
         store?.PurgeExpiredDebugSnapshots();
         var listener = new HttpListener();
         listener.Prefixes.Add(uri.ToString());
@@ -67,33 +69,77 @@ public static class MigrationDashboardServer
 
     private static async Task RunServerAsync(
         HttpListener listener,
-        SqliteMigrationStore? store,
+        IMigrationStore? store,
         string? configurationJson,
         CancellationToken cancellationToken)
     {
-        while (!cancellationToken.IsCancellationRequested && listener.IsListening)
-        {
-            HttpListenerContext context;
-            try
+        var requestQueue = Channel.CreateBounded<HttpListenerContext>(
+            new BoundedChannelOptions(MaxConcurrentRequests)
             {
-                context = await listener.GetContextAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (HttpListenerException) when (cancellationToken.IsCancellationRequested || !listener.IsListening)
-            {
-                return;
-            }
+                FullMode = BoundedChannelFullMode.Wait,
+                SingleWriter = true,
+                SingleReader = false,
+                AllowSynchronousContinuations = false
+            });
+        var workers = Enumerable.Range(0, MaxConcurrentRequests)
+            .Select(_ => ProcessRequestsAsync(
+                requestQueue.Reader,
+                store,
+                configurationJson,
+                cancellationToken))
+            .ToArray();
 
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested && listener.IsListening)
+            {
+                HttpListenerContext context;
+                try
+                {
+                    context = await listener.GetContextAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (HttpListenerException) when (cancellationToken.IsCancellationRequested || !listener.IsListening)
+                {
+                    return;
+                }
+
+                try
+                {
+                    await requestQueue.Writer.WriteAsync(context, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    context.Response.Close();
+                    throw;
+                }
+            }
+        }
+        finally
+        {
+            requestQueue.Writer.TryComplete();
+            await Task.WhenAll(workers).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task ProcessRequestsAsync(
+        ChannelReader<HttpListenerContext> requestQueue,
+        IMigrationStore? store,
+        string? configurationJson,
+        CancellationToken cancellationToken)
+    {
+        await foreach (var context in requestQueue.ReadAllAsync().ConfigureAwait(false))
+        {
             await HandleRequestAsync(context, store, configurationJson, cancellationToken).ConfigureAwait(false);
         }
     }
 
     private static async Task HandleRequestAsync(
         HttpListenerContext context,
-        SqliteMigrationStore? store,
+        IMigrationStore? store,
         string? configurationJson,
         CancellationToken cancellationToken)
     {

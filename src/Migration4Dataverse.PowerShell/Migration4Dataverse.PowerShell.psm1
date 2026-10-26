@@ -17,7 +17,7 @@ function New-MigrationJobStore {
         [string]$DatabasePath
     )
 
-    [Migration4Dataverse.Engine.Storage.SqliteJobStore]::new($DatabasePath)
+    [Migration4Dataverse.Engine.Storage.MigrationStoreFactory]::Open($DatabasePath)
 }
 
 function Complete-MigrationBatch {
@@ -56,7 +56,9 @@ function Complete-MigrationBatch {
         $OutcomesJson,
         $HasErrors.IsPresent,
         $dependencyEvents,
-        $LastError)
+        $LastError,
+        $null,
+        0)
 }
 
 function Set-MigrationRunStatus {
@@ -75,7 +77,7 @@ function Set-MigrationRunStatus {
         [Migration4Dataverse.Engine.Storage.MigrationRunStatus],
         $Status,
         $false)
-    $Store.SetRunStatus($RunId, $statusValue)
+    $Store.SetRunStatus($RunId, $statusValue, $null)
 }
 
 function Start-MigrationDashboard {
@@ -126,4 +128,5 @@ function Stop-MigrationDashboard {
 Export-ModuleMember `
     -Function New-MigrationJobStore, Complete-MigrationBatch, Set-MigrationRunStatus, `
         Start-MigrationDashboard, Stop-MigrationDashboard `
-    -Cmdlet Invoke-Migration, Get-MigrationRun, Clear-MigrationTargetTuning
+    -Cmdlet Invoke-Migration, Get-MigrationRun, Clear-MigrationTargetTuning, `
+        Start-MigrationDatabaseServer

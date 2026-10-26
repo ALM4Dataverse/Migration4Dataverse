@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
 using Microsoft.Data.Sqlite;
 using Migration4Dataverse.Engine.Storage;
 
@@ -159,6 +161,37 @@ public sealed class SqliteJobStoreTests
 
         Assert.All(leasedBatches, batch => Assert.NotNull(batch));
         Assert.Equal(batchCount, leasedBatches.Select(batch => batch!.BatchId).Distinct().Count());
+    }
+
+    [Fact]
+    public async Task DatabaseWriteGateSerializesConcurrentWritersForTheSamePath()
+    {
+        using var database = new TemporaryDatabase();
+        var activeWriters = 0;
+        var maximumActiveWriters = 0;
+
+        var writers = Enumerable.Range(0, 16).Select(_ => Task.Run(() =>
+        {
+            using var writeLock = SqliteDatabaseWriteGate.Enter(database.Path);
+            var active = Interlocked.Increment(ref activeWriters);
+            var observed = Volatile.Read(ref maximumActiveWriters);
+            while (active > observed)
+            {
+                var previous = Interlocked.CompareExchange(ref maximumActiveWriters, active, observed);
+                if (previous == observed)
+                {
+                    break;
+                }
+                observed = previous;
+            }
+
+            Thread.Sleep(10);
+            Interlocked.Decrement(ref activeWriters);
+        })).ToArray();
+
+        await Task.WhenAll(writers);
+
+        Assert.Equal(1, maximumActiveWriters);
     }
 
     [Fact]
@@ -388,6 +421,79 @@ public sealed class SqliteJobStoreTests
             now.AddMinutes(1).AddSeconds(31)));
         Assert.Throws<InvalidOperationException>(() => store.ReleaseRunLease("leased-run", "scheduler-1", now));
         store.ReleaseRunLease("leased-run", "scheduler-2", now);
+    }
+
+    [Fact]
+    public async Task RunLeasesAllowMultipleActiveRunsPerDatabase()
+    {
+        using var database = new TemporaryDatabase();
+        var now = new DateTimeOffset(2026, 10, 20, 12, 0, 0, TimeSpan.Zero);
+        var firstStore = new SqliteMigrationStore(database.Path);
+        var secondStore = new SqliteMigrationStore(database.Path);
+        firstStore.CreateRun("run-one", "run-one", "hash-1", now);
+        firstStore.CreateRun("run-two", "run-two", "hash-2", now);
+
+        var attempts = await Task.WhenAll(
+            Task.Run(() => firstStore.TryAcquireRunLease(
+                "run-one",
+                "scheduler-one",
+                TimeSpan.FromMinutes(1),
+                now)),
+            Task.Run(() => secondStore.TryAcquireRunLease(
+                "run-two",
+                "scheduler-two",
+                TimeSpan.FromMinutes(1),
+                now)));
+
+        Assert.All(attempts, Assert.True);
+    }
+
+    [Fact]
+    public void WriteGateMeasuresWaitAndHoldDurations()
+    {
+        using var database = new TemporaryDatabase();
+        var measurements = new ConcurrentDictionary<string, int>(StringComparer.Ordinal);
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, meterListener) =>
+        {
+            if (instrument.Meter.Name == "Migration4Dataverse.Engine.Storage")
+            {
+                meterListener.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<double>((instrument, _, _, _) =>
+        {
+            measurements.AddOrUpdate(instrument.Name, 1, static (_, count) => count + 1);
+        });
+        listener.Start();
+
+        using (SqliteDatabaseWriteGate.Enter(database.Path))
+        {
+        }
+
+        Assert.True(measurements["migration.sqlite.write_gate.wait"] > 0);
+        Assert.True(measurements["migration.sqlite.write_gate.hold"] > 0);
+    }
+
+    [Fact]
+    public void ExpiredRunLeaseDoesNotBlockAnotherRunInSameDatabase()
+    {
+        using var database = new TemporaryDatabase();
+        var now = new DateTimeOffset(2026, 10, 20, 12, 0, 0, TimeSpan.Zero);
+        var store = new SqliteMigrationStore(database.Path);
+        store.CreateRun("expired-run", "expired-run", "hash-1", now);
+        store.CreateRun("new-run", "new-run", "hash-2", now);
+
+        Assert.True(store.TryAcquireRunLease(
+            "expired-run",
+            "scheduler-one",
+            TimeSpan.FromMinutes(1),
+            now));
+        Assert.True(store.TryAcquireRunLease(
+            "new-run",
+            "scheduler-two",
+            TimeSpan.FromMinutes(1),
+            now.AddMinutes(1).AddSeconds(1)));
     }
 
     [Fact]

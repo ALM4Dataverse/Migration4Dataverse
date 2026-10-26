@@ -21,7 +21,7 @@ public sealed class GetMigrationRunCommand : PSCmdlet
 
     protected override void ProcessRecord()
     {
-        var store = new SqliteMigrationStore(DatabasePath);
+        var store = MigrationStoreFactory.Open(DatabasePath);
         if (!string.IsNullOrWhiteSpace(RunId))
         {
             WriteObject(store.GetDashboardRun(RunId));

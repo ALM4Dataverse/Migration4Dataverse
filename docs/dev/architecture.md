@@ -4,12 +4,13 @@ This guide describes the current implementation, not a promise of complete Kings
 
 ## System boundaries
 
-There are two binary PowerShell cmdlets, a read-only local monitoring UI/API, and a separate transformation API:
+There are four binary PowerShell cmdlets, a read-only local monitoring UI/API, a separate transformation API, and a local SQLite owner service:
 
 1. **The binary PowerShell cmdlet** [`Invoke-Migration`](../../src/Migration4Dataverse.Engine/PowerShell/InvokeMigrationCommand.cs) accepts a top-level `Steps` DAG. [`PowerShellMigrationStepFactory`](../../src/Migration4Dataverse.Engine/PowerShell/PowerShellMigrationStepFactory.Graph.cs) converts Source, Join, Transform, Filter, Append, Target, and callback nodes into [`MigrationStepDefinition`](../../src/Migration4Dataverse.Engine/Scheduling/MigrationStepDefinition.cs) objects for the shared [`DependencyScheduler`](../../src/Migration4Dataverse.Engine/Scheduling/DependencyScheduler.cs). Keyed source and join inputs declare their row-flow dependencies; `DependsOn` is reserved for additional whole-step completion barriers. A two-input Join stages and indexes inputs on disk, emits matches incrementally, then sends one nested row to a one-input Transform. Callback mode supports explicit multi-parent batch readiness through `MigrationDependencyOutput.RequiredBatchIds`.
 2. **The data-flow API** in `Migration4Dataverse.Engine.Transformations` remains a separate named transformation DAG. PowerShell callers define it with hashtables and inline Transform and Filter script blocks; the engine internally binds those scripts to their node IDs. Its stream-wide Sort and Merge operators are not yet wired into `Invoke-Migration`.
 3. **The dashboard** [`MigrationDashboardServer`](../../src/Migration4Dataverse.Engine/Dashboard/MigrationDashboardServer.cs) hosts the built React/React Flow SPA and a read-only API over the same SQLite file. It binds only to a loopback URL. Basic run/step/batch metadata is always retained; row payload snapshots are separately opt-in.
-4. **Run history** is queryable through [`Get-MigrationRun`](../../src/Migration4Dataverse.Engine/PowerShell/GetMigrationRunCommand.cs). The dashboard can also preview caller-supplied step and connection objects without starting a migration or opening a database.
+4. **The database owner** is hosted by the first caller that opens a database, or explicitly with `Start-MigrationDatabaseServer`. It is the only Migration4Dataverse process that opens that SQLite file; other processes use same-user named-pipe IPC. Scheduler execution, workers, live connections, and callbacks remain in each caller process. A database can serve multiple active run IDs, with per-run leases preventing duplicate schedulers for the same run.
+5. **Run history** is queryable through [`Get-MigrationRun`](../../src/Migration4Dataverse.Engine/PowerShell/GetMigrationRunCommand.cs). The dashboard can also preview caller-supplied step and connection objects without starting a migration or opening a database.
 
 ```mermaid
 flowchart LR
@@ -47,9 +48,14 @@ flowchart LR
 
     subgraph engine["Shared C# engine"]
         scheduler["DependencyScheduler"]
-        store["SqliteMigrationStore / run data / tuning profiles"]
+        storeClient["MigrationStoreFactory / IMigrationStore"]
         dashboardServer["MigrationDashboardServer"]
         psExecutor["PowerShellScriptExecutor"]
+    end
+    subgraph owner["Per-database SQLite owner process"]
+        rpcServer["Same-user named-pipe RPC server (bounded reusable listeners)"]
+        writeGate["Owner-process SQLite write gate"]
+        store["SqliteMigrationStore / run data / tuning profiles"]
     end
 
     config --> invoke
@@ -60,12 +66,14 @@ flowchart LR
     sourceCount -->|TotalRecordCount| dataverseSource
     sourceCount -->|row-group metadata| parquetCounts
     sourceCount -->|CountCallback| psExecutor
-    sourceCount -->|resolved expected totals| store
+    sourceCount -->|resolved expected totals| storeClient
     scheduler --> completionGate
-    invoke -- sanitized config and connection snapshots --> store
+    invoke -- sanitized config and connection snapshots --> storeClient
     sourceFeeder --> scheduler
-    scheduler --> store
-    dashboardServer --> store
+    scheduler --> storeClient
+    dashboardServer --> storeClient
+    storeClient -->|direct in owner process; IPC otherwise| rpcServer
+    rpcServer --> writeGate --> store
     browser --> dashboard
     dashboard --> dashboardServer
     scheduler --> psExecutor
@@ -86,17 +94,17 @@ flowchart LR
     runspaces -->|target batch outcomes| throughput
     runspaces -->|batch-size experiments| targetTuner
     targetTuner -->|one experiment at a time; pipeline throughput| throughput
-    targetTuner -->|load/save batch profiles by step ID| store
+    targetTuner -->|load/save batch profiles by step ID| storeClient
     targetTuner -->|selected batch size| targetType
     runspaces -->|shared execution permits| connectionController
     connectionController -->|connection retry/throttle observations| retryMonitor
     retryMonitor -->|reduce budget on throttle| connectionController
-    connectionController -->|load/save versioned connection budget| store
+    connectionController -->|load/save versioned connection budget| storeClient
     connectionController -->|shared target concurrency| targetType
     targetType -- dataverse --> commands --> dataverse
-    runspaces --> joinStaging --> store
+    runspaces --> joinStaging --> storeClient
     commands -->|returned target IDs| runspaces
-    store -->|completed input pages and key matches| joinReader --> scheduler
+    storeClient -->|completed input pages and key matches| joinReader --> scheduler
     targetType -- jsonl / csv / parquet --> fileWriter --> output
     targetType -- sqlite / duckdb --> databaseWriter
     runspaces --> databaseTransform
@@ -160,7 +168,7 @@ flowchart LR
 
 ## Scheduler lifecycle
 
-[`DependencyScheduler.ExecuteAsync`](../../src/Migration4Dataverse.Engine/Scheduling/DependencyScheduler.cs) validates the graph and options, creates or verifies the run against its name and step hash, and acquires an exclusive run lease. It then starts root feeders, the worker pool, a dependency-event pump, and a run-lease heartbeat concurrently.
+[`DependencyScheduler.ExecuteAsync`](../../src/Migration4Dataverse.Engine/Scheduling/DependencyScheduler.cs) validates the graph and options, creates or verifies the run against its name and step hash, and acquires an exclusive lease for that run ID. Distinct run IDs can execute concurrently against one database through its owner process. The scheduler then starts root feeders, the worker pool, a dependency-event pump, and a per-run lease heartbeat concurrently.
 
 ```mermaid
 sequenceDiagram
@@ -178,7 +186,7 @@ sequenceDiagram
     participant Join as Indexed Join reader
 
     Caller->>Scheduler: ExecuteAsync(run, hash, steps, options)
-    Scheduler->>Store: CreateRun and acquire run lease
+    Scheduler->>Store: CreateRun and acquire run-scoped scheduler lease
     Scheduler->>Store: Read progress and step checkpoints
 
     par Source feeders
@@ -213,6 +221,8 @@ sequenceDiagram
     Note over Store,Keys: Batch enqueue and source-key indexing are transactional.
     Note over Store,Pump: Dependency-event inserts and checkpoint advancement are transactional.
     Note over Store,Workers: Batch leasing acquires the WAL writer slot before selecting a batch; other read-modify-write operations serialize before reading, while WAL readers remain concurrent.
+    Note over Caller,Store: IMigrationStore is a local call when the caller owns the database, otherwise a same-user named-pipe request to its single SQLite owner.
+    Note over Store: The owner centralizes SQLite connections and write serialization; it does not host schedulers, workers, callbacks, or live connector objects.
     Join->>Store: Scan completed left rows and restore deferred row cursors
     Join->>Store: Probe successful parent rows by durable key index
     Store-->>Join: Matching parent rows from completed batches
@@ -233,6 +243,7 @@ sequenceDiagram
 Join readers stage both input streams in SQLite and use a durable key index for parent lookups. In the default ready mode, the reader advances through completed child rows, retaining positions for keys not yet present in the parent index while emitting available matches; those outputs may be out of left-input order. The checkpoint stores the scan position and deferred row references, so a restart can continue resolving them. Once the parent completes, remaining keys become unmatched left rows or filtered inner rows. Stable mode instead waits on each child row in sequence before advancing.
 - Row-linked sources support either a positive fixed `RowsPerParent` count per relationship or variable fan-out when the setting is omitted or zero. Each non-null key must match a parent key; missing matches fail. Explicit JSON null represents an absent relationship, while missing or blank key properties are invalid. Rows with all relationships null have no parent-batch prerequisites. Input need not be grouped or ordered by foreign key; staging sorts by null status, parent-key tuple, and child key.
 - `MaxQueuedBatches` (default 64) bounds pending plus in-flight batches, while `MaxQueuedBatchesPerStep` (default 32) bounds each step's outstanding batches and producer reservations. Producers reserve downstream capacity before leasing work; the dependency pump incrementally materializes multi-batch fan-out only when a child slot is available, skipping full consumers instead of blocking sibling branches. Durable, prerequisite-blocked dependency events do not consume materialized-batch capacity.
+- The SQLite owner is the only Migration4Dataverse process that opens its database. Caller-side `IMigrationStore` clients use an in-process implementation when local, or a same-user named-pipe request when remote. The owner maintains a bounded pool of eight reusable pipe listeners; each listener handles one request at a time, avoiding concurrent listener recreation while still serving multiple requests concurrently. Inside the owner, WAL supports concurrent readers and a per-database write gate serializes mutations because SQLite permits only one writer at a time. Selected lease and worker persistence operations retain bounded `BUSY`/`LOCKED` retries with exponential backoff and jitter for contention outside that gate; unrelated SQLite errors remain visible and fail the run. The owner lock is released automatically when its process exits, so clients can reconnect by reopening the store after a crash; an in-progress caller must be restarted to resume its run.
 - Root feeders use their own bounded share of the global batch queue and do not wait on ready dependency events across the whole graph; worker-level dependency priority preserves prompt child execution without pausing unrelated roots.
 - `MaxDegreeOfParallelism` controls the number of workers and is limited to 32. SQLite work remains shared, while handlers execute concurrently up to this bound; target-specific semaphores may further limit concurrent writes.
 - Ready materialized dependency batches are prioritized over queued root batches, allowing child work to start after its parent batch succeeds rather than waiting for the root source to finish. Within each dependency-priority group, a weighted-fair dispatcher combines graph-derived pipeline impact with the current ready-batch backlog. More impactful, backlogged work gets more dispatches, while service counts and rotation ensure lower-weight ready steps are not starved. Workers acquire target execution permits and downstream queue capacity before leasing batches.
@@ -251,11 +262,12 @@ A worker leases one batch, incrementing its attempt count, and renews that batch
 
 Successful completion atomically records outcomes, releases the batch lease, inserts dependency events, advances the table checkpoint, and removes the now-unneeded payload JSON. Outcomes may include optional step-specific specialist information; Dataverse targets record their current batch-size and concurrency tuning state for the dashboard. A batch with row errors retains its payload and error outcomes, releases no dependency work, and blocks resuming that run until the failures are resolved or exported.
 
-When cancellation interrupts handler execution, the scheduler abandons the batch back to `Pending` before stopping. Persisted work can be resumed by reusing the same run ID and unchanged step definition after the run lease is available.
+When cancellation interrupts handler execution, the scheduler abandons the batch back to `Pending` before stopping. If another worker has already reclaimed a batch, the former owner cannot complete or abandon it; its stale outcome is discarded and the current lease owner controls the durable transition. Losing a batch lease alone does not fail the run. Persisted work can be resumed by reusing the same run ID and unchanged step definition after the run lease is available.
 
 ## SQLite persistence and recovery
 
 [`SqliteMigrationStore`](../../src/Migration4Dataverse.Engine/Storage/SqliteJobStore.cs) requires a file-backed database. It enables WAL journal mode and configures foreign keys, `synchronous = FULL`, and a 30-second busy timeout. Scheduler read-modify-write operations begin immediate transactions so concurrent workers reserve SQLite's single WAL writer slot before reading, avoiding deferred-transaction upgrade races while allowing readers to continue. Ordered migrations are tracked in `SchemaMigrations` by version, name, and applied time; each migration and its ledger row commit in one transaction. Migration 1 creates the initial store. Migration 2 renames job/table identifiers to run/step identifiers while preserving their row data. Migration 3 adds persisted step runtime metrics and per-batch row totals. Migration 4 adds the legacy target-record ID mapping table. Migration 5 adds the legacy Target context table. Migration 6 adds Join input and match staging plus explicit batch-parent references. Migration 7 adds nullable per-batch input-row counts and filtered-row counts; uncountable callback payloads stay `NULL`, not zero. New batches are counted when queued, and successful completion may remove the original payload without losing the count. Migration 8 records step activity intervals for working-versus-waiting timelines; it does not reconstruct intervals for runs created before this migration. Migration 9 adds `SourceKeyIndex`, a durable mapping from each keyed source row to its queued batch and record index, written transactionally with batch enqueue. Migration 10 adds `JoinInputKeyIndex` for indexed streaming-join key lookups. Migration 11 adds an index that lets debug-snapshot retention cleanup seek by run and capture time. Migration 12 adds `DataverseTargetTuningProfiles`, which stores target tuning profiles independently of run history. Migration 13 adds the tuning algorithm version, and migration 14 adds the Dataverse connection ID used to validate shared concurrency profiles. Batch-size values remain target-step scoped; shared DOP is reused only from a compatible version-2 profile for the same connection. `Clear-MigrationTargetTuning` removes one or all profiles. Untracked legacy databases are rejected; create a fresh database when upgrading from a build that predates the migration ledger.
+[`SqliteMigrationStore`](../../src/Migration4Dataverse.Engine/Storage/SqliteJobStore.cs) requires a file-backed database. It enables WAL journal mode and configures foreign keys, `synchronous = FULL`, and a 30-second busy timeout. Scheduler read-modify-write operations begin immediate transactions so concurrent workers reserve SQLite's single WAL writer slot before reading, avoiding deferred-transaction upgrade races while allowing readers to continue. A database-wide lease, acquired in an immediate transaction, excludes other active runs even when they use a different run ID or process. The write gate records wait and hold durations through the `Migration4Dataverse.Engine.Storage` meter. Ordered migrations are tracked in `SchemaMigrations` by version, name, and applied time; each migration and its ledger row commit in one transaction. Migration 1 creates the initial store. Migration 2 renames job/table identifiers to run/step identifiers while preserving their row data. Migration 3 adds persisted step runtime metrics and per-batch row totals. Migration 4 adds the legacy target-record ID mapping table. Migration 5 adds the legacy Target context table. Migration 6 adds Join input and match staging plus explicit batch-parent references. Migration 7 adds nullable per-batch input-row counts and filtered-row counts; uncountable callback payloads stay `NULL`, not zero. New batches are counted when queued, and successful completion may remove the original payload without losing the count. Migration 8 records step activity intervals for working-versus-waiting timelines; it does not reconstruct intervals for runs created before this migration. Migration 9 adds `SourceKeyIndex`, a durable mapping from each keyed source row to its queued batch and record index, written transactionally with batch enqueue. Migration 10 adds `JoinInputKeyIndex` for indexed streaming-join key lookups. Migration 11 adds an index that lets debug-snapshot retention cleanup seek by run and capture time. Migration 12 adds `DataverseTargetTuningProfiles`, which stores target tuning profiles independently of run history. Migration 13 adds the tuning algorithm version, and migration 14 adds the Dataverse connection ID used to validate shared concurrency profiles. Batch-size values remain target-step scoped; shared DOP is reused only from a compatible version-2 profile for the same connection. `Clear-MigrationTargetTuning` removes one or all profiles. Untracked legacy databases are rejected; create a fresh database when upgrading from a build that predates the migration ledger.
 
 Dashboard input progress sums persisted `InputRows` by batch state and reports filtered rows separately. Root source totals may use a resolved source count provider or the positive configured `ExpectedRecordCount`; other step totals are derived only after every upstream input has completed and pending dependency events are materialized. A step with any uncountable batch has no derived total. Target progress aggregates target-step input work (not unique logical rows) and remains indeterminate until every target has a final countable denominator.
 

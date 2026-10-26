@@ -4,10 +4,11 @@ using Microsoft.Data.Sqlite;
 
 namespace Migration4Dataverse.Engine.Storage;
 
-public sealed partial class SqliteMigrationStore
+internal sealed partial class SqliteMigrationStore
 {
     public long PurgeExpiredDebugSnapshots()
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
         command.CommandText = """
@@ -599,7 +600,7 @@ public sealed partial class SqliteMigrationStore
         return snapshots;
     }
 
-    internal IReadOnlyList<string> GetBatchInputLineageIds(string runId, string batchId)
+    public IReadOnlyList<string> GetBatchInputLineageIds(string runId, string batchId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
@@ -631,7 +632,7 @@ public sealed partial class SqliteMigrationStore
         return lineageIds;
     }
 
-    internal IReadOnlyList<string> GetBatchOutputLineageIds(string runId, string batchId)
+    public IReadOnlyList<string> GetBatchOutputLineageIds(string runId, string batchId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
@@ -647,6 +648,18 @@ public sealed partial class SqliteMigrationStore
                   SELECT StepId
                   FROM Batches
                   WHERE Batches.BatchId = $batchId
+              )
+              AND Attempt = (
+                  SELECT MAX(Attempt)
+                  FROM DebugSnapshots
+                  WHERE RunId = $runId
+                    AND BatchId = $batchId
+                    AND RecordIndex >= 0
+                    AND StageName = (
+                        SELECT StepId
+                        FROM Batches
+                        WHERE Batches.BatchId = $batchId
+                    )
               )
             ORDER BY SnapshotId;
             """;
@@ -906,6 +919,7 @@ public sealed partial class SqliteMigrationStore
 
     public void MarkSourceFeederStarted(string runId, string stepId)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
         using var connection = OpenConnection();
@@ -929,6 +943,7 @@ public sealed partial class SqliteMigrationStore
 
     public void MarkSourceFeederCompleted(string runId, string stepId)
     {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
         using var connection = OpenConnection();
@@ -967,6 +982,7 @@ public sealed partial class SqliteMigrationStore
             ValidateJson(snapshot.PayloadJson, nameof(snapshots));
         }
 
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction();
         using (var cleanup = connection.CreateCommand())

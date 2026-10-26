@@ -47,7 +47,7 @@ public sealed class ClearMigrationTargetTuningCommand : PSCmdlet
             return;
         }
 
-        var store = new SqliteMigrationStore(databasePath);
+        var store = MigrationStoreFactory.Open(databasePath);
         var deletedProfiles = All
             ? store.ClearDataverseTargetTuningProfiles()
             : store.ClearDataverseTargetTuningProfile(StepId);

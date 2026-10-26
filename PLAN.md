@@ -3,6 +3,21 @@
 **Status:** The C# engine, embedded PowerShell SDK, and SQLite are implemented. `Invoke-Migration` runs a top-level DAG of Source, Transform, Filter, Append, Target, and callback steps through the C# dependency scheduler. Connector definitions and script blocks are inline on their respective steps; `Inputs` declares graph edges. The dashboard, opt-in row capture, and recursive lineage tracing are implemented. Dataverse auto tuning now includes pipeline-weighted fair dispatch, globally measured per-target batch experiments, a shared adaptive concurrency budget per connection, and optional retry/throttle telemetry. Stream-wide Merge/Sort are currently available only through the separate data-flow API; production Dataverse hardening remains.
 **Public repository:** [rnwood/Migration4Dataverse](https://github.com/rnwood/Migration4Dataverse)
 
+Short term todos
+- Expose the skip plugins/custom business logic steps options from set-dataverserecord
+- Upgrade the Dataverse PS module and use the -nolookups option to encourage mappings that don't need a query for each record
+- Fix progress indication globally and across the non-source tasks, and fix ETA
+- Allow rows to be opened using model-driven app URL
+- Preview/whatif mode
+- Dataverse target - For tables that are super slow to upsert, allow create/update-if-needed mode based on what the PS module can do to query for the record first and skip where it already exists with same values.
+- Dataverse target - Use the new alternate key support on lookup columns, adapting the examples where possible to remove fetching those records for lookup.
+- Dataverse target - create, update, delete, custom API, SQL4CDS (via invoke-dataversesql, including for transformations)
+- Prepare for distribution, publishing on PowerShell gallery and ensuring it check any modules our connectors depend on are present at >= required version
+- SQLite and duckdb examples are ugly because they have to load assemblies etc. Fold this into the framework.
+- Benchmark
+- Graph still flickers every 3 seconds on refresh
+- Allow re-usable powershell functions across transformations (and everywhere else PS is allowed), including making sure required modules are loaded.
+
 ## Goal
 
 Build a C# engine for the KingswaySoft capabilities used when targeting Microsoft Dataverse. Embed the PowerShell SDK to execute caller-authored source readers and transformations, and use `Rnwood.Dataverse.Data.PowerShell` as the Dataverse connection and data-access layer.

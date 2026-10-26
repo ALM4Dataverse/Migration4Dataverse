@@ -5,6 +5,7 @@ The detailed documentation is organized by public surface:
 - [Cmdlets and functions](./cmdlets/README.md)
 - [Run history and dashboard](./cmdlets/get-migration-run.md): `Get-MigrationRun`, configuration previews, and stored run metadata.
 - [`Clear-MigrationTargetTuning`](./cmdlets/clear-migration-target-tuning.md): remove persisted Dataverse tuning profiles by step ID or clear all profiles in a database.
+- [`Start-MigrationDatabaseServer`](./cmdlets/migration-database-server.md): explicitly host the local SQLite owner for multiple PowerShell processes.
 - [Migration step configuration](./configuration.md)
 - [Concepts](./concepts/README.md)
 - [Transformations](./transformations/README.md)
@@ -13,6 +14,8 @@ The detailed documentation is organized by public surface:
 - [Architecture](./dev/architecture.md)
 
 This reference describes the implemented engine contract. `Invoke-Migration` accepts native PowerShell hashtables or other PowerShell objects for step definitions; examples use hashtables. It does not claim full KingswaySoft or SSIS compatibility.
+
+Each migration database has one process owner, started implicitly by the first module caller or explicitly with `Start-MigrationDatabaseServer`. Separate callers route store operations through same-user local IPC; schedulers, workers, connections, and callbacks remain caller-side. Multiple run IDs can use the same database, while per-run leases prevent duplicate schedulers for a single run.
 
 Source readers receive a `MigrationStepCheckpoint` with `LastCompletedSequence` and `CursorJson` for the last contiguous completed batch, and `ResumeSequence` and `ResumeCursorJson` for the latest durably enqueued batch. Readers should continue after the resume position; pending and in-flight batches are replayed from SQLite using their stored payloads.
 
