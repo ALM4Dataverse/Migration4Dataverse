@@ -1,9 +1,11 @@
 using System.Diagnostics;
+using System.IO;
 using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using System.Web;
+using Migration4Dataverse.Engine.PowerShell;
 using Migration4Dataverse.Engine.Storage;
 
 namespace Migration4Dataverse.Engine.Dashboard;
@@ -49,7 +51,10 @@ public static class MigrationDashboardServer
         }
 
         var uri = ValidateUrl(url);
-        var store = string.IsNullOrWhiteSpace(databasePath) ? null : MigrationStoreFactory.Open(databasePath);
+        var resolvedDatabasePath = string.IsNullOrWhiteSpace(databasePath)
+            ? null
+            : Path.GetFullPath(databasePath);
+        var store = resolvedDatabasePath is null ? null : MigrationStoreFactory.Open(resolvedDatabasePath);
         store?.PurgeExpiredDebugSnapshots();
         var listener = new HttpListener();
         listener.Prefixes.Add(uri.ToString());
@@ -57,7 +62,7 @@ public static class MigrationDashboardServer
         {
             listener.Start();
             var stop = new CancellationTokenSource();
-            var serverTask = RunServerAsync(listener, store, configurationJson, stop.Token);
+            var serverTask = RunServerAsync(listener, store, resolvedDatabasePath, configurationJson, stop.Token);
             return Task.FromResult(new MigrationDashboardHandle(listener, serverTask, stop, uri));
         }
         catch
@@ -70,6 +75,7 @@ public static class MigrationDashboardServer
     private static async Task RunServerAsync(
         HttpListener listener,
         IMigrationStore? store,
+        string? databasePath,
         string? configurationJson,
         CancellationToken cancellationToken)
     {
@@ -85,6 +91,7 @@ public static class MigrationDashboardServer
             .Select(_ => ProcessRequestsAsync(
                 requestQueue.Reader,
                 store,
+                databasePath,
                 configurationJson,
                 cancellationToken))
             .ToArray();
@@ -128,18 +135,21 @@ public static class MigrationDashboardServer
     private static async Task ProcessRequestsAsync(
         ChannelReader<HttpListenerContext> requestQueue,
         IMigrationStore? store,
+        string? databasePath,
         string? configurationJson,
         CancellationToken cancellationToken)
     {
         await foreach (var context in requestQueue.ReadAllAsync().ConfigureAwait(false))
         {
-            await HandleRequestAsync(context, store, configurationJson, cancellationToken).ConfigureAwait(false);
+            await HandleRequestAsync(context, store, databasePath, configurationJson, cancellationToken)
+                .ConfigureAwait(false);
         }
     }
 
     private static async Task HandleRequestAsync(
         HttpListenerContext context,
         IMigrationStore? store,
+        string? databasePath,
         string? configurationJson,
         CancellationToken cancellationToken)
     {
@@ -242,6 +252,23 @@ public static class MigrationDashboardServer
                         response,
                         HttpStatusCode.OK,
                         store.GetDashboardRun(runId),
+                        cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
+                if (segments.Length == 4 && segments[3] == "dataverse-connection-throughput")
+                {
+                    if (string.IsNullOrWhiteSpace(databasePath))
+                    {
+                        throw new InvalidOperationException(
+                            "A database path is required to read Dataverse connection throughput.");
+                    }
+
+                    _ = store.GetDashboardRun(runId);
+                    await WriteJsonAsync(
+                        response,
+                        HttpStatusCode.OK,
+                        DataverseConnectionPool.GetDashboardSnapshots(databasePath, runId),
                         cancellationToken).ConfigureAwait(false);
                     return;
                 }

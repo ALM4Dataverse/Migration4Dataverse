@@ -1,6 +1,6 @@
 # Transform
 
-The `transform` node runs a PowerShell script for each input row and emits each object written to the script's success output. It requires exactly one input and has no node-specific options.
+The `transform` node runs a PowerShell script for each input row and emits each object written to the script's success output. It requires exactly one input. Apart from the required `Script`, it has no additional optional node settings.
 
 ```powershell
 $node = @{
@@ -51,11 +51,11 @@ The separate `Invoke-Migration` graph supports SQLite and DuckDB transforms. The
 
 DuckDB transforms can use the same connection-aware PowerShell `Script` contract, or configure `Transform.Sql` with an ordered `Transform.Parameters` hashtable to execute a prepared statement once per input row. DuckDB statements use positional `?` placeholders; parameter values bind to row fields in hashtable order. Statements returning rows emit those rows; side-effect statements with no result set pass through their input row.
 
-A Dataverse Transform uses `Transform = @{ Type = 'dataverse'; ConnectionId = 'crm' }`. Its `Script` receives `($row, $connection)` and can invoke `Invoke-DataverseSql -Connection $connection -Sql ... -Parameters ...` for SQL4CDS queries or updates. SQL4CDS is executed by the module; the Transform script determines which values are emitted downstream.
+A Dataverse Transform uses `Transform = @{ Type = 'dataverse'; ConnectionId = 'crm' }`. Its `Script` receives `($row, $connection)` and can invoke `Invoke-DataverseSql -Connection $connection -Sql ... -Parameters ...` for Cds4Sql queries or updates. Cds4Sql is executed by the module; the Transform script determines which values are emitted downstream.
 
 ## SQLite and DuckDB set-based SQL transforms
 
-SQLite and DuckDB support per-batch and whole-dataset SQL modes. Both execute one read-only `SELECT` or `WITH` statement and preserve output lineage. `InitializeSql` runs before any batch so the database can contain helper tables or other setup state.
+SQLite and DuckDB support per-batch and whole-dataset SQL modes. Both execute one read-only `SELECT` or `WITH` statement and preserve output lineage. `InitializeSql` runs before any batch so the database can contain helper tables or other setup state. `Transform.CommandTimeoutSeconds` controls engine-run initialization and SQL commands (default `30`; `0` disables the timeout).
 
 ### Per-batch
 
@@ -81,7 +81,7 @@ ORDER BY Id
 
 ### Whole-dataset
 
-`Mode = 'whole_dataset'` uses one matching SQLite or DuckDB Target step as an explicit staging barrier. Omit `ConnectionId` and `Path` from the staging Target and `ConnectionId` from the Transform: the engine creates one managed database shared by those two steps. The target writes the completed dataset to a managed table; after the target finishes, the transform streams the configured query as a source. `Transform.Key` names the stable, ordered result key. This mode reads query results from the database rather than consuming the target's batch payloads, so the SQL must query the staged table(s) itself. `Transform.CountQuery` is not supported; provide `ExpectedRecordCount` on the transform step if an exact count is known.
+`Mode = 'whole_dataset'` uses one matching SQLite or DuckDB Target step as an explicit staging barrier. Omit `ConnectionId` and `Path` from the staging Target and `ConnectionId` from the Transform: the engine creates one managed database shared by those two steps. The target writes the completed dataset to a managed table; after the target finishes, the transform streams the configured query as a source. `Transform.Key` names the stable, ordered result key. This mode reads query results from the database rather than consuming the target's batch payloads, so the SQL must query the staged table(s) itself. `Transform.CountQuery` is not supported; provide `Transform.ExpectedRecordCount` if an exact count is known.
 
 ```powershell
 @{

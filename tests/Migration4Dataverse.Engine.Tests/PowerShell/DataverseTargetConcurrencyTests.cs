@@ -9,27 +9,19 @@ namespace Migration4Dataverse.Engine.Tests.PowerShell;
 public sealed class DataverseTargetConcurrencyTests
 {
     [Fact]
-    public void DataverseTargetsShareAnAdaptiveConnectionBudgetAndThrottleFeedback()
+    public void DataverseTargetsShareAFixedConnectionBudgetAndReportThrottleTelemetry()
     {
         var connection = new TestDataverseConnection
         {
             RecommendedDegreesOfParallelism = 4
         };
-        var meter = new PipelineThroughputMeter();
-        using var controller = new PipelineAdaptiveDataverseConnectionController(
+        using var controller = new PipelineDataverseConnectionController(
             "crm",
             connection,
-            maxConcurrency: 8,
-            meter,
-            new PipelineBatchTuningCoordinator(),
+            invocationMaxConcurrency: 64,
             disableRetriesForDiagnostics: false);
-        controller.RegisterTarget(
-            "TargetOne", 10, autoBatchSize: false, autoConcurrency: true,
-            batchSize: 10, maxStepConcurrency: 1, null, null, null);
-        controller.RegisterTarget(
-            "TargetTwo", 10, autoBatchSize: false, autoConcurrency: true,
-            batchSize: 10, maxStepConcurrency: 1, null, null, null);
-        controller.CompleteRegistration();
+        controller.RegisterTarget("TargetOne", batchSize: 10, maxStepConcurrency: 64);
+        controller.RegisterTarget("TargetTwo", batchSize: 10, maxStepConcurrency: 64);
 
         var leases = Enumerable.Range(0, 4)
             .Select(index => controller.TryAcquire(index % 2 == 0 ? "TargetOne" : "TargetTwo"))
@@ -40,12 +32,12 @@ public sealed class DataverseTargetConcurrencyTests
         Assert.True(connection.InMemoryLogCollectionEnabled);
 
         connection.Logs.Add(Tuple.Create(DateTime.UtcNow, "Retrying request after HTTP 429 throttling."));
-        meter.Record(1);
-        controller.Complete(leases[0]!, rowsWritten: 1, succeeded: true);
-        controller.Complete(leases[1]!, rowsWritten: 1, succeeded: true);
+        controller.Complete(leases[0]!);
+        controller.Complete(leases[1]!);
 
         var state = controller.GetDashboardState("TargetOne");
-        Assert.Equal(2, state.ConnectionConcurrencyBudget);
+        Assert.Equal(4, state.ConnectionConcurrencyBudget);
+        Assert.Equal(4, state.MaxConcurrency);
         Assert.Equal(1, state.RetryCount);
         Assert.Equal(1, state.ThrottleCount);
         Assert.True(state.RetryTelemetryAvailable);
@@ -79,7 +71,7 @@ public sealed class DataverseTargetConcurrencyTests
         using (var stepSet = (IDisposable)CreateGraph(
                    directory.Path,
                    executor,
-                   firstConcurrency: "auto",
+                   firstConcurrency: 2,
                    dataverseConnection: connection,
                    disableRetriesForDiagnostics: true)!)
         {
@@ -90,34 +82,76 @@ public sealed class DataverseTargetConcurrencyTests
     }
 
     [Fact]
-    public void DataverseTargetsDefaultToAutoTuningPerTarget()
+    public void DataverseTargetsIgnoreInvocationBatchSizeByDefaultAndUseConnectionRecommendation()
+    {
+        using var directory = new TemporaryDirectory();
+        using var executor = new PowerShellScriptExecutor();
+        var connection = new TestDataverseConnection { RecommendedDegreesOfParallelism = 6 };
+
+        using var stepSet = (MigrationStepSet)CreateGraph(
+            directory.Path,
+            executor,
+            firstConcurrency: null,
+            defaultBatchSize: 64,
+            dataverseConnection: connection)!;
+        var state = Assert.Single(stepSet.TargetControllers).GetDashboardState("TargetOne");
+
+        Assert.Equal(10, state.BatchSize);
+        Assert.Equal(6, state.MaxConcurrency);
+        Assert.Equal("Fixed", state.Stage);
+    }
+
+    [Fact]
+    public void DataverseTargetHonorsExplicitBatchSizeInsteadOfInvocationBatchSize()
     {
         using var directory = new TemporaryDirectory();
         using var executor = new PowerShellScriptExecutor();
 
-        using var stepSet = (IDisposable)CreateGraph(directory.Path, executor, null, 2)!;
+        using var stepSet = (MigrationStepSet)CreateGraph(
+            directory.Path,
+            executor,
+            firstConcurrency: null,
+            defaultBatchSize: 64,
+            dataverseConnection: new TestDataverseConnection { RecommendedDegreesOfParallelism = 6 },
+            firstBatchSize: 25)!;
+        var state = Assert.Single(stepSet.TargetControllers).GetDashboardState("TargetOne");
+
+        Assert.Equal(25, state.BatchSize);
     }
 
     [Fact]
-    public void DataverseTargetsAcceptIndependentConcurrencyOnTheSameConnection()
+    public void DataverseTargetsCanSetIndependentFixedConcurrencyCapsOnTheSameConnection()
     {
         using var directory = new TemporaryDirectory();
         using var executor = new PowerShellScriptExecutor();
 
-        using var stepSet = (IDisposable)CreateGraph(directory.Path, executor, 2, 3)!;
+        using var stepSet = (MigrationStepSet)CreateGraph(directory.Path, executor, 2, 3)!;
+        var controller = Assert.Single(stepSet.TargetControllers);
+
+        Assert.Equal(2, controller.GetDashboardState("TargetOne").MaxConcurrency);
+        Assert.Equal(3, controller.GetDashboardState("TargetTwo").MaxConcurrency);
     }
 
-    [Fact]
-    public void DataverseTargetsAcceptExplicitAutoSettings()
+    [Theory]
+    [InlineData("MaxConcurrency")]
+    [InlineData("BatchSize")]
+    public void DataverseTargetsRejectRemovedAutoSettings(string propertyName)
     {
         using var directory = new TemporaryDirectory();
         using var executor = new PowerShellScriptExecutor();
 
-        using var stepSet = (IDisposable)CreateGraph(directory.Path, executor, "auto", "auto")!;
+        var exception = Assert.Throws<TargetInvocationException>(() =>
+            CreateGraph(
+                directory.Path,
+                executor,
+                firstConcurrency: propertyName == "MaxConcurrency" ? "auto" : null,
+                firstBatchSize: propertyName == "BatchSize" ? "auto" : null));
+
+        Assert.IsType<ArgumentException>(exception.InnerException);
     }
 
     [Fact]
-    public void DataverseTargetLoadsStoredTuningForMatchingStepIdAndRespectsCurrentCaps()
+    public void DataverseTargetIgnoresLegacyPersistedTuningProfiles()
     {
         using var directory = new TemporaryDirectory();
         using var executor = new PowerShellScriptExecutor();
@@ -127,75 +161,17 @@ public sealed class DataverseTargetConcurrencyTests
         using var stepSet = (MigrationStepSet)CreateGraph(
             directory.Path,
             executor,
-            firstConcurrency: "auto",
+            firstConcurrency: null,
             store: store,
-            defaultBatchSize: 10,
-            maxTargetConcurrency: 4)!;
-        var controller = Assert.Single(stepSet.TargetControllers);
-        var state = controller.GetDashboardState("TargetOne");
+            dataverseConnection: new TestDataverseConnection { RecommendedDegreesOfParallelism = 4 })!;
+        var state = Assert.Single(stepSet.TargetControllers).GetDashboardState("TargetOne");
+        var profile = store.GetDataverseTargetTuningProfile("TargetOne");
 
         Assert.Equal(10, state.BatchSize);
         Assert.Equal(4, state.MaxConcurrency);
-        Assert.Equal("BatchSize", state.Stage);
-    }
-
-    [Fact]
-    public void DataverseTargetPersistsTuningOnceTheBestValuesAreFound()
-    {
-        using var directory = new TemporaryDirectory();
-        using var executor = new PowerShellScriptExecutor();
-        var store = new SqliteMigrationStore(Path.Combine(directory.Path, "migration.sqlite3"));
-        using var stepSet = (MigrationStepSet)CreateGraph(
-            directory.Path,
-            executor,
-            firstConcurrency: "auto",
-            store: store,
-            defaultBatchSize: 1,
-            maxTargetConcurrency: 2)!;
-        var controller = Assert.Single(stepSet.TargetControllers);
-        for (var index = 0; index < 3; index++)
-        {
-            using var lease = controller.TryAcquire("TargetOne");
-            Assert.NotNull(lease);
-            stepSet.ThroughputMeter.Record(1);
-            controller.Complete(lease, rowsWritten: 1, succeeded: true);
-        }
-
-        var profile = store.GetDataverseTargetTuningProfile("TargetOne");
         Assert.NotNull(profile);
-        Assert.Equal(1, profile.BatchSize);
-        Assert.Equal(2, profile.MaxConcurrency);
-        Assert.Equal(2, profile.AlgorithmVersion);
-        Assert.Equal("crm", profile.ConnectionId);
-    }
-
-    [Theory]
-    [InlineData("crm", 3)]
-    [InlineData("other", 4)]
-    public void OnlyPipelineProfilesForTheSameConnectionSeedSharedConcurrency(
-        string profileConnectionId,
-        int expectedConcurrency)
-    {
-        using var directory = new TemporaryDirectory();
-        using var executor = new PowerShellScriptExecutor();
-        var store = new SqliteMigrationStore(Path.Combine(directory.Path, "migration.sqlite3"));
-        store.SaveDataverseTargetTuningProfile(
-            "TargetOne",
-            batchSize: 10,
-            maxConcurrency: 3,
-            algorithmVersion: 2,
-            connectionId: profileConnectionId);
-
-        using var stepSet = (MigrationStepSet)CreateGraph(
-            directory.Path,
-            executor,
-            firstConcurrency: "auto",
-            store: store,
-            maxTargetConcurrency: 4)!;
-
-        Assert.Equal(
-            expectedConcurrency,
-            Assert.Single(stepSet.TargetControllers).GetDashboardState("TargetOne").MaxConcurrency);
+        Assert.Equal(25, profile.BatchSize);
+        Assert.Equal(8, profile.MaxConcurrency);
     }
 
     [Theory]
@@ -218,10 +194,11 @@ public sealed class DataverseTargetConcurrencyTests
         object? firstConcurrency,
         object? secondConcurrency = null,
         SqliteMigrationStore? store = null,
-        int defaultBatchSize = 100,
-        int maxTargetConcurrency = 32,
+        int defaultBatchSize = 10,
+        int maxTargetConcurrency = 64,
         object? dataverseConnection = null,
-        bool disableRetriesForDiagnostics = false)
+        bool disableRetriesForDiagnostics = false,
+        object? firstBatchSize = null)
     {
         var steps = new List<PSObject>
         {
@@ -238,7 +215,7 @@ public sealed class DataverseTargetConcurrencyTests
                     Key = "id"
                 }
             }),
-            CreateTarget("TargetOne", firstConcurrency)
+            CreateTarget("TargetOne", firstConcurrency, firstBatchSize)
         };
         if (secondConcurrency is not null)
         {
@@ -268,11 +245,13 @@ public sealed class DataverseTargetConcurrencyTests
                 store,
                 maxTargetConcurrency,
                 disableRetriesForDiagnostics,
-                false
+                false,
+                null,
+                null
             ]);
     }
 
-    private static PSObject CreateTarget(string id, object? maxConcurrency)
+    private static PSObject CreateTarget(string id, object? maxConcurrency, object? batchSize = null)
     {
         var target = new Hashtable(StringComparer.OrdinalIgnoreCase)
         {
@@ -284,7 +263,10 @@ public sealed class DataverseTargetConcurrencyTests
         {
             target["MaxConcurrency"] = maxConcurrency;
         }
-        target["BatchSize"] = "auto";
+        if (batchSize is not null)
+        {
+            target["BatchSize"] = batchSize;
+        }
 
         return PSObject.AsPSObject(new
         {

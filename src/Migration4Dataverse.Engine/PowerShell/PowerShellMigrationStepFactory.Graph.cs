@@ -10,6 +10,8 @@ namespace Migration4Dataverse.Engine.PowerShell;
 
 internal static partial class PowerShellMigrationStepFactory
 {
+    private const int DefaultDataverseTargetBatchSize = 10;
+
     public static bool IsMigrationStep(PSObject step)
     {
         ArgumentNullException.ThrowIfNull(step);
@@ -60,13 +62,14 @@ internal static partial class PowerShellMigrationStepFactory
         int defaultBatchSize,
         bool captureDebugData = false,
         IMigrationStore? store = null,
-        int maxTargetConcurrency = 32,
+        int maxTargetConcurrency = 64,
         bool disableDataverseRetriesForDiagnostics = false,
         bool whatIf = false,
         string? runId = null,
         string? migrationDatabasePath = null)
     {
         var ownedConnections = new List<DbConnection>();
+        var ownedDataversePools = new List<DataverseConnectionPool>();
         try
         {
             return CreateGraphCore(
@@ -81,10 +84,15 @@ internal static partial class PowerShellMigrationStepFactory
                 whatIf,
                 runId,
                 migrationDatabasePath,
-                ownedConnections);
+                ownedConnections,
+                ownedDataversePools);
         }
         catch
         {
+            foreach (var pool in ownedDataversePools)
+            {
+                pool.Dispose();
+            }
             foreach (var connection in ownedConnections)
             {
                 connection.Dispose();
@@ -105,7 +113,8 @@ internal static partial class PowerShellMigrationStepFactory
         bool whatIf,
         string? runId,
         string? migrationDatabasePath,
-        List<DbConnection> ownedConnections)
+        List<DbConnection> ownedConnections,
+        List<DataverseConnectionPool> ownedDataversePools)
     {
         ArgumentNullException.ThrowIfNull(stepObjects);
         ArgumentNullException.ThrowIfNull(connections);
@@ -114,12 +123,14 @@ internal static partial class PowerShellMigrationStepFactory
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxTargetConcurrency);
 
         var graphSteps = stepObjects.ToArray();
+        var objectStagingRoot = GetObjectStagingRoot(migrationDatabasePath, runId);
         var wholeDatasetStageTargetIds = GetWholeDatasetStageTargetIds(graphSteps);
         var inputs = graphSteps
             .Select(step => ParseGraphStep(
                 step,
                 connections,
                 defaultBatchSize,
+                maxTargetConcurrency,
                 wholeDatasetStageTargetIds))
             .ToArray();
         if (inputs.Length == 0)
@@ -136,9 +147,16 @@ internal static partial class PowerShellMigrationStepFactory
             ownedConnections);
         ValidateGraph(inputs);
         ValidateDatabaseSourceConnections(inputs);
+        var dataversePools = CreateDataverseConnectionPools(
+            inputs,
+            runId,
+            migrationDatabasePath,
+            disableDataverseRetriesForDiagnostics,
+            ownedDataversePools);
         var dispatchWeights = CalculatePipelineDispatchWeights(inputs);
         foreach (var databaseTarget in inputs.Where(input =>
-                     !whatIf && input.Type == "target" && input.TargetType is "sqlite" or "duckdb"))
+                     !whatIf && input.Type == "target" &&
+                     DatabaseConnectorSupport.IsDatabaseConnectorType(input.TargetType!)))
         {
             DatabaseBatchTargetWriter.PrepareTargetSchema(
                 (DbConnection)databaseTarget.TargetConnection!,
@@ -206,18 +224,18 @@ internal static partial class PowerShellMigrationStepFactory
             dataverseSources.Add(
                 source.Id,
                 new PowerShellDataverseSourceDefinition(
-                    source.SourceConnection!,
+                    GetDataverseConnection(source, dataversePools),
                     source.DataverseSourceOptions!,
-                    source.DataverseQueryType!));
+                    source.DataverseQueryType!,
+                    source.DataverseSourcePartitions));
         }
 
         var readerFactory = new PowerShellHierarchyRecordReaderFactory(executor, customSources, dataverseSources);
         var semaphores = new Dictionary<string, (SemaphoreSlim Semaphore, int Capacity)>(StringComparer.Ordinal);
         var definitions = new List<MigrationStepDefinition>(inputs.Length);
         var throughputMeter = new PipelineThroughputMeter();
-        var batchTuningCoordinator = new PipelineBatchTuningCoordinator();
-        var targetControllers = new List<PipelineAdaptiveDataverseConnectionController>();
-        var targetControllersByConnection = new Dictionary<string, PipelineAdaptiveDataverseConnectionController>(
+        var targetControllers = new List<PipelineDataverseConnectionController>();
+        var targetControllersByConnection = new Dictionary<string, PipelineDataverseConnectionController>(
             StringComparer.OrdinalIgnoreCase);
         try
         {
@@ -228,47 +246,23 @@ internal static partial class PowerShellMigrationStepFactory
                 var targetConnection = targetGroup.First().TargetConnection
                     ?? throw new InvalidOperationException(
                         $"Dataverse connection '{targetGroup.Key}' resolved to null.");
-                var controller = new PipelineAdaptiveDataverseConnectionController(
+                var targetPool = dataversePools.GetValueOrDefault(targetGroup.Key);
+                targetConnection = targetPool?.Connection ?? targetConnection;
+                var controller = new PipelineDataverseConnectionController(
                     targetGroup.Key,
                     targetConnection,
                     maxTargetConcurrency,
-                    throughputMeter,
-                    batchTuningCoordinator,
-                    disableDataverseRetriesForDiagnostics);
+                    disableDataverseRetriesForDiagnostics,
+                    targetPool);
                 targetControllers.Add(controller);
                 targetControllersByConnection.Add(targetGroup.Key, controller);
                 foreach (var input in targetGroup)
                 {
-                    var tuningProfile = store?.GetDataverseTargetTuningProfile(input.Id);
-                    Action<int?, int?>? persistTunedValues = store is null
-                        ? null
-                        : (batchSize, maxConcurrency) =>
-                            store.SaveDataverseTargetTuningProfile(
-                                input.Id,
-                                batchSize,
-                                maxConcurrency ?? (input.TargetConcurrencyAuto
-                                    ? controller.CurrentConcurrencyBudget
-                                    : null),
-                                algorithmVersion: 2,
-                                connectionId: targetGroup.Key);
                     controller.RegisterTarget(
                         input.Id,
-                        Math.Min(input.BatchSize, 1000),
-                        input.TargetBatchSizeAuto,
-                        input.TargetConcurrencyAuto,
                         input.BatchSize,
-                        input.TargetMaxConcurrency,
-                        tuningProfile?.BatchSize,
-                        tuningProfile is { AlgorithmVersion: 2 } &&
-                        string.Equals(
-                            tuningProfile.ConnectionId,
-                            targetGroup.Key,
-                            StringComparison.OrdinalIgnoreCase)
-                            ? tuningProfile.MaxConcurrency
-                            : null,
-                        persistTunedValues);
+                        input.TargetMaxConcurrency);
                 }
-                controller.CompleteRegistration();
             }
 
             foreach (var input in inputs)
@@ -281,7 +275,8 @@ internal static partial class PowerShellMigrationStepFactory
                     sourceReader = new HierarchyBatchSource(
                         sourceLevel,
                         input.BatchSize,
-                        readerFactory.CreateDelegate()).CreateReader();
+                        readerFactory.CreateDelegate(),
+                        readerFactory.CreateCheckpointAwareDelegate()).CreateReader();
                 }
                 else if (input.Type == "source" && input.RowDependencies.Length > 0)
                 {
@@ -384,6 +379,7 @@ internal static partial class PowerShellMigrationStepFactory
                     ["Children"] = childContexts,
                     ["JoinInputConsumers"] = joinInputConsumers,
                     ["CaptureDebugData"] = captureDebugData,
+                    ["StagingRoot"] = objectStagingRoot,
                     ["WhatIf"] = whatIf
                 };
                 var handlerWithLease = input.Type == "callback"
@@ -421,7 +417,10 @@ internal static partial class PowerShellMigrationStepFactory
                             return
                             [
                                 input.SourceConnection,
-                                input.TargetConnection,
+                                input.TargetType == "dataverse"
+                                    ? dataversePools.GetValueOrDefault(input.TargetConnectionId!)?.Connection
+                                        ?? input.TargetConnection
+                                    : input.TargetConnection,
                                 input.TransformConnection,
                                 invocationContext
                             ];
@@ -449,28 +448,43 @@ internal static partial class PowerShellMigrationStepFactory
                     ResolveExpectedRecordCountAsync = CreateExpectedRecordCountResolver(
                         input,
                         executor,
-                        sourceLevel),
+                        sourceLevel,
+                        input.SourceType == "dataverse"
+                            ? GetDataverseConnection(input, dataversePools)
+                            : input.SourceConnection),
                     WaitForInputCompletion = input.Type != "join" && input.RowDependencies.Length == 0,
                     SourceKeyCoordinator = sourceKeyCoordinator,
                     SourceKeyProperty = sourceKeyParents.Contains(input.Id) ? input.SourceKey : null,
                     StepCompletionCoordinator = stepCompletionCoordinator,
                     TryAcquireExecutionLease = tryAcquireExecutionLease,
                     ExecuteBatchWithExecutionLeaseAsync = handlerWithLease,
-                    CompleteAsync = !whatIf &&
-                                    input.Type == "target" &&
-                                    input.TargetType is "jsonl" or "csv" or "parquet"
-                        ? cancellationToken =>
-                        {
-                            cancellationToken.ThrowIfCancellationRequested();
-                            FileBatchTargetWriter.FinalizeSingleFileTarget(
-                                input.TargetPath!,
-                                runId ?? throw new InvalidOperationException(
-                                    $"File target '{input.Id}' requires a run ID for finalization."),
-                                input.Id,
-                                input.TargetType!,
-                                input.TargetOptionsJson ?? "{}");
-                            return Task.CompletedTask;
-                        }
+                    CompleteAsync = !whatIf && input.Type == "target"
+                        ? input.TargetType is "jsonl" or "csv" or "parquet"
+                            ? cancellationToken =>
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                                FileBatchTargetWriter.FinalizeSingleFileTarget(
+                                    input.TargetPath!,
+                                    runId ?? throw new InvalidOperationException(
+                                        $"File target '{input.Id}' requires a run ID for finalization."),
+                                    input.Id,
+                                    input.TargetType!,
+                                    input.TargetOptionsJson ?? "{}");
+                                return Task.CompletedTask;
+                            }
+                            : input.TargetType is "azureblob" or "s3" or "adlsgen2" or "gcs"
+                                ? cancellationToken =>
+                                    ObjectStorageTargetWriter.FinalizeAsync(
+                                        input.TargetConnection!,
+                                        input.TargetType!,
+                                        input.TargetPath!,
+                                        input.Id,
+                                        runId ?? throw new InvalidOperationException(
+                                            $"Object storage target '{input.Id}' requires a run ID for finalization."),
+                                        input.TargetOptionsJson ?? "{}",
+                                        objectStagingRoot,
+                                        cancellationToken)
+                                : null
                         : null,
                     DispatchWeight = dispatchWeights[input.Id]
                 });
@@ -486,6 +500,10 @@ internal static partial class PowerShellMigrationStepFactory
             {
                 controller.Dispose();
             }
+            foreach (var pool in ownedDataversePools)
+            {
+                pool.Dispose();
+            }
             throw;
         }
 
@@ -494,7 +512,8 @@ internal static partial class PowerShellMigrationStepFactory
             semaphores.Values.Select(value => value.Semaphore).ToArray(),
             targetControllers,
             throughputMeter,
-            ownedConnections);
+            ownedConnections,
+            ownedDataversePools);
     }
 
     private static GraphStepInput[] ConfigureDatabaseConnectorConnections(
@@ -539,7 +558,8 @@ internal static partial class PowerShellMigrationStepFactory
 
         return inputs.Select(input =>
         {
-            if (input.Type == "source" && input.SourceType is "sqlite" or "duckdb")
+            if (input.Type == "source" &&
+                DatabaseConnectorSupport.IsFileDatabaseConnectorType(input.SourceType))
             {
                 var connection = GetConnection(
                     input.SourceConnectionId!,
@@ -551,20 +571,206 @@ internal static partial class PowerShellMigrationStepFactory
                 return input with { SourceConnection = connection };
             }
             if (input.Type == "target" &&
-                input.TargetType is "sqlite" or "duckdb" &&
+                DatabaseConnectorSupport.IsFileDatabaseConnectorType(input.TargetType!) &&
                 input.TargetConnection is not null)
             {
                 var connection = GetConnection(
                     input.TargetConnectionId!,
                     input.TargetConnection,
                     input.TargetPath!,
-                    input.TargetType,
+                    input.TargetType!,
                     input.Id,
                     "target");
                 return input with { TargetConnection = connection };
             }
             return input;
         }).ToArray();
+    }
+
+    private static Dictionary<string, DataverseConnectionPool> CreateDataverseConnectionPools(
+        IReadOnlyList<GraphStepInput> inputs,
+        string? runId,
+        string? migrationDatabasePath,
+        bool disableRetriesForDiagnostics,
+        ICollection<DataverseConnectionPool> ownedPools)
+    {
+        var pools = new Dictionary<string, DataverseConnectionPool>(StringComparer.OrdinalIgnoreCase);
+        var connectionGroups = inputs
+            .Where(input =>
+                input.Type == "source" && input.SourceType == "dataverse" ||
+                input.Type == "target" && input.TargetType == "dataverse")
+            .GroupBy(
+                input => input.Type == "source" ? input.SourceConnectionId! : input.TargetConnectionId!,
+                StringComparer.OrdinalIgnoreCase);
+        foreach (var group in connectionGroups)
+        {
+            var slots = group
+                .Select(input => input.Type == "source" ? input.SourceConnection : input.TargetConnection)
+                .Select(connection => connection is object[] values ? values : [connection!])
+                .ToArray();
+            var connections = slots[0];
+            if (slots.Any(slot =>
+                    slot.Length != connections.Length ||
+                    !slot.SequenceEqual(connections, ReferenceEqualityComparer.Instance)))
+            {
+                throw new ArgumentException(
+                    $"Dataverse connection slot '{group.Key}' resolves to inconsistent connection arrays.");
+            }
+
+            if (connections.Length > 1)
+            {
+                var pool = DataverseConnectionPool.Create(
+                    group.Key,
+                    connections,
+                    disableRetriesForDiagnostics,
+                    runId,
+                    migrationDatabasePath);
+                pools.Add(group.Key, pool);
+                ownedPools.Add(pool);
+            }
+        }
+
+        return pools;
+    }
+
+    private static object GetDataverseConnection(
+        GraphStepInput input,
+        IReadOnlyDictionary<string, DataverseConnectionPool> pools)
+    {
+        var connectionId = input.Type == "source" ? input.SourceConnectionId : input.TargetConnectionId;
+        var connection = input.Type == "source" ? input.SourceConnection : input.TargetConnection;
+        return connectionId is not null && pools.TryGetValue(connectionId, out var pool)
+            ? pool.Connection
+            : connection ?? throw new InvalidOperationException(
+                $"Dataverse connection for step '{input.Id}' resolved to null.");
+    }
+
+    private static object NormalizeDataverseConnectionSlot(
+        object connection,
+        string connectionId,
+        string stepId)
+    {
+        var unwrapped = Unwrap(connection)
+            ?? throw new ArgumentException(
+                $"Dataverse connection slot '{connectionId}' for step '{stepId}' resolved to null.");
+        if (unwrapped is IDictionary or string)
+        {
+            return unwrapped;
+        }
+
+        var enumerable = LanguagePrimitives.GetEnumerable(unwrapped);
+        if (enumerable is null)
+        {
+            return unwrapped;
+        }
+
+        var values = enumerable.Cast<object?>()
+            .Select(Unwrap)
+            .ToArray();
+        if (values.Length == 0 || values.Any(value => value is null))
+        {
+            throw new ArgumentException(
+                $"Dataverse connection slot '{connectionId}' for step '{stepId}' must contain one or more non-null connections.");
+        }
+        if (values.Distinct(ReferenceEqualityComparer.Instance).Count() != values.Length)
+        {
+            throw new ArgumentException(
+                $"Dataverse connection slot '{connectionId}' for step '{stepId}' contains the same connection instance more than once.");
+        }
+
+        return values.Length == 1
+            ? values[0]!
+            : values.Cast<object>().ToArray();
+    }
+
+    private static DataverseSourcePartition[]? ParseDataverseSourcePartitions(
+        object? value,
+        IDictionary sourceOptions,
+        string queryType,
+        string stepId)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        var entries = GetMap(value, $"Partitions for Dataverse source step '{stepId}", required: false) is not null
+            ? new[] { value }
+            : LanguagePrimitives.GetEnumerable(value)?.Cast<object?>().ToArray() ?? [value];
+        if (entries.Length < 2)
+        {
+            throw new ArgumentException(
+                $"Dataverse source step '{stepId}' must declare at least two query partitions.");
+        }
+
+        var partitions = new List<DataverseSourcePartition>(entries.Length);
+        var partitionIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var entry in entries)
+        {
+            var definition = GetMap(entry, $"Partition for Dataverse source step '{stepId}", required: true)!;
+            foreach (var key in definition.Keys)
+            {
+                var keyName = key?.ToString() ?? string.Empty;
+                if (!string.Equals(keyName, "Id", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(keyName, "Options", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new ArgumentException(
+                        $"Partition for Dataverse source step '{stepId}' has unsupported property '{keyName}'.");
+                }
+            }
+
+            var partitionId = GetRequiredString(definition, "Id");
+            if (!partitionIds.Add(partitionId))
+            {
+                throw new ArgumentException(
+                    $"Dataverse source step '{stepId}' contains duplicate partition ID '{partitionId}'.");
+            }
+
+            var mergedOptions = new Hashtable(StringComparer.OrdinalIgnoreCase);
+            foreach (DictionaryEntry option in sourceOptions)
+            {
+                mergedOptions[option.Key] = Unwrap(option.Value);
+            }
+            var rawPartitionOptions = GetProperty(definition, "Options");
+            var partitionOptions = GetMap(
+                rawPartitionOptions,
+                $"Options for partition '{partitionId}' on Dataverse source step '{stepId}",
+                required: false);
+            if (rawPartitionOptions is not null && partitionOptions is null)
+            {
+                throw new ArgumentException(
+                    $"Options for partition '{partitionId}' on Dataverse source step '{stepId}' must be a dictionary or object with named properties.");
+            }
+            if (partitionOptions is not null)
+            {
+                foreach (DictionaryEntry option in partitionOptions)
+                {
+                    mergedOptions[option.Key] = Unwrap(option.Value);
+                }
+            }
+
+            var partitionQueryType = GetRequiredString(mergedOptions, "QueryType").Trim().ToLowerInvariant();
+            if (!string.Equals(partitionQueryType, queryType, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ArgumentException(
+                    $"Partition '{partitionId}' on Dataverse source step '{stepId}' must use the same QueryType as its source.");
+            }
+            _ = ValidateDataverseSourceOptions(mergedOptions, $"{stepId}/{partitionId}");
+            if (partitionQueryType == "cds4sql")
+            {
+                var maxDegreeOfParallelism = GetInt(mergedOptions, "MaxDegreeOfParallelism", 1);
+                if (maxDegreeOfParallelism != 1)
+                {
+                    throw new ArgumentException(
+                        $"Cds4Sql partition '{partitionId}' on Dataverse source step '{stepId}' must use MaxDegreeOfParallelism = 1.");
+                }
+                mergedOptions["MaxDegreeOfParallelism"] = 1;
+            }
+
+            partitions.Add(new DataverseSourcePartition(partitionId, mergedOptions));
+        }
+
+        return partitions.ToArray();
     }
 
     private static HashSet<string> GetWholeDatasetStageTargetIds(IReadOnlyList<PSObject> steps)
@@ -599,6 +805,20 @@ internal static partial class PowerShellMigrationStepFactory
         return stageTargetIds;
     }
 
+    private static string GetObjectStagingRoot(string? migrationDatabasePath, string? runId)
+    {
+        var runDirectory = string.IsNullOrWhiteSpace(runId) ? "adhoc" : runId;
+        if (!string.IsNullOrWhiteSpace(migrationDatabasePath))
+        {
+            var databaseDirectory = Path.GetDirectoryName(Path.GetFullPath(migrationDatabasePath));
+            if (!string.IsNullOrWhiteSpace(databaseDirectory))
+            {
+                return Path.Combine(databaseDirectory, ".migration-object-staging", runDirectory);
+            }
+        }
+        return Path.Combine(Path.GetTempPath(), "migration4dataverse-staging", runDirectory);
+    }
+
     private static void ValidateFileTargetPaths(IReadOnlyList<GraphStepInput> inputs)
     {
         var pathComparer = OperatingSystem.IsWindows()
@@ -612,6 +832,19 @@ internal static partial class PowerShellMigrationStepFactory
         {
             throw new ArgumentException(
                 $"File target steps cannot share output path '{duplicatePath.Key}'.");
+        }
+
+        var duplicateObjectPath = inputs
+            .Where(input => input.Type == "target" &&
+                            input.TargetType is "azureblob" or "s3" or "adlsgen2" or "gcs")
+            .GroupBy(
+                input => $"{input.TargetType}\0{input.TargetConnectionId}\0{input.TargetPath}",
+                StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault(group => group.Count() > 1);
+        if (duplicateObjectPath is not null)
+        {
+            throw new ArgumentException(
+                $"Object storage target steps cannot share the same connection and object path.");
         }
     }
 
@@ -709,6 +942,7 @@ internal static partial class PowerShellMigrationStepFactory
         PSObject step,
         IDictionary connections,
         int defaultBatchSize,
+        int maxTargetConcurrency,
         IReadOnlySet<string> wholeDatasetStageTargetIds)
     {
         ArgumentNullException.ThrowIfNull(step);
@@ -831,6 +1065,7 @@ internal static partial class PowerShellMigrationStepFactory
         object? sourceConnection = null;
         CustomConnector? sourceCustom = null;
         IDictionary? dataverseSourceOptions = null;
+        DataverseSourcePartition[]? dataverseSourcePartitions = null;
         string? dataverseQueryType = null;
         string? callbackScriptText = null;
         string? readBatchesScriptText = null;
@@ -840,23 +1075,78 @@ internal static partial class PowerShellMigrationStepFactory
         {
             var source = GetMap(GetProperty(step, "Source"), $"Source for step '{id}'")!;
             sourceType = GetRequiredString(source, "Type").ToLowerInvariant();
-            if (sourceType is not ("jsonl" or "csv" or "parquet" or "custom" or "dataverse" or "sqlite" or "duckdb"))
+            if (sourceType is not ("jsonl" or "csv" or "parquet" or "excel" or "custom" or "dataverse" or
+                "sqlite" or "duckdb" or "sqlserver" or "postgresql" or "mysql" or "oracle" or
+                "azureblob" or "s3" or "adlsgen2" or "gcs" or "http" or "odata" or "mongodb" or
+                "salesforce" or "sharepoint" or "hubspot" or "zendesk" or "servicenow"))
             {
                 throw new ArgumentException($"Source connector type '{sourceType}' for step '{id}' is not supported.");
             }
             sourceConnectionId = GetRequiredString(source, "ConnectionId");
             sourceConnection = ResolveConnection(connections, sourceConnectionId, id, "source");
+            if (sourceType == "dataverse")
+            {
+                sourceConnection = NormalizeDataverseConnectionSlot(
+                    sourceConnection
+                        ?? throw new ArgumentException(
+                            $"Dataverse connection '{sourceConnectionId}' for step '{id}' resolved to null."),
+                    sourceConnectionId,
+                    id);
+            }
             if (sourceType is "sqlite" or "duckdb" &&
                 sourceConnection is not (FileInfo or DirectoryInfo))
             {
                 throw new ArgumentException(
                     $"Database source step '{id}' requires a FileInfo or DirectoryInfo in -Connections.");
             }
+            if (sourceType is "sqlserver" or "postgresql" or "mysql" or "oracle")
+            {
+                if (sourceConnection is not DbConnection databaseConnection)
+                {
+                    throw new ArgumentException(
+                        $"Database source step '{id}' requires a {sourceType} DbConnection in -Connections.");
+                }
+                DatabaseConnectorSupport.ValidateConnection(
+                    sourceType,
+                    databaseConnection,
+                    $"source '{id}'");
+            }
+            if (sourceType is "azureblob" or "s3" or "adlsgen2" or "gcs")
+            {
+                if (sourceConnection is null)
+                {
+                    throw new ArgumentException(
+                        $"Object storage source step '{id}' requires a connection in -Connections.");
+                }
+                ObjectStorageConnectionSupport.ValidateConnection(
+                    sourceType,
+                    sourceConnection,
+                    $"source '{id}'");
+            }
+            if (sourceType == "mongodb")
+            {
+                if (sourceConnection is null)
+                {
+                    throw new ArgumentException(
+                        $"MongoDB source step '{id}' requires an IMongoClient or IMongoDatabase in -Connections.");
+                }
+                MongoConnectionSupport.ValidateConnection(sourceConnection, $"source '{id}'");
+            }
+            if (sourceType is "http" or "odata" &&
+                sourceConnection is not (Uri or string or HttpClient))
+            {
+                throw new ArgumentException(
+                    $"HTTP source step '{id}' requires a Uri, absolute URL string, or HttpClient in -Connections.");
+            }
+            if (sourceType is "salesforce" or "sharepoint" or "hubspot" or "zendesk" or "servicenow")
+            {
+                RestJsonConnectorSupport.GetHttpClient(sourceConnection, sourceType, $"source '{id}'");
+            }
             var configuredSourcePath = GetString(
                 source,
                 "Path",
                 required: sourceConnection is DirectoryInfo &&
-                          sourceType is "jsonl" or "csv" or "parquet" or "sqlite" or "duckdb");
+                          sourceType is "jsonl" or "csv" or "parquet" or "excel" or "sqlite" or "duckdb");
             sourcePath = ResolveConnectorPath(
                 sourceConnection,
                 configuredSourcePath ?? string.Empty,
@@ -873,35 +1163,69 @@ internal static partial class PowerShellMigrationStepFactory
                     $"Options for Dataverse source step '{id}'",
                     required: false);
                 dataverseQueryType = ValidateDataverseSourceOptions(dataverseSourceOptions, id);
+                if (sourceConnection is object[] && dataverseQueryType == "cds4sql")
+                {
+                    var maxDegreeOfParallelism = GetInt(
+                        dataverseSourceOptions!,
+                        "MaxDegreeOfParallelism",
+                        1);
+                    if (maxDegreeOfParallelism != 1)
+                    {
+                        throw new ArgumentException(
+                            $"Cds4Sql source step '{id}' must use MaxDegreeOfParallelism = 1 when its ConnectionId contains multiple connections.");
+                    }
+                    dataverseSourceOptions!["MaxDegreeOfParallelism"] = 1;
+                }
+                dataverseSourcePartitions = ParseDataverseSourcePartitions(
+                    GetProperty(source, "Partitions"),
+                    dataverseSourceOptions!,
+                    dataverseQueryType,
+                    id);
+            }
+            else if (GetProperty(source, "Partitions") is not null)
+            {
+                throw new ArgumentException(
+                    $"Source partitions are only supported for Dataverse source step '{id}'.");
             }
             sourceKey = GetRequiredString(source, "Key");
             idProperty = GetString(source, "Id", required: false) ?? string.Empty;
             sourceOptionsJson = SerializeJson(GetProperty(source, "Options"));
-            if (sourceType is "sqlite" or "duckdb")
+            if (sourceType == "excel")
+            {
+                ExcelSourceOptions.FromJson(sourceOptionsJson, id).Validate(id);
+            }
+            else if (sourceType == "salesforce")
+            {
+                SalesforceSourceOptions.FromJson(sourceOptionsJson, id).Validate(id);
+            }
+            else if (sourceType == "sharepoint")
+            {
+                SharePointSourceOptions.FromJson(sourceOptionsJson, id).Validate(id);
+            }
+            else if (sourceType == "hubspot")
+            {
+                HubSpotSourceOptions.FromJson(sourceOptionsJson, id).Validate(id);
+            }
+            else if (sourceType == "zendesk")
+            {
+                ZendeskSourceOptions.FromJson(sourceOptionsJson, id).Validate(id);
+            }
+            else if (sourceType == "servicenow")
+            {
+                ServiceNowSourceOptions.FromJson(sourceOptionsJson, id).Validate(id);
+            }
+            if (DatabaseConnectorSupport.IsDatabaseConnectorType(sourceType))
             {
                 var databaseSourceOptions = DatabaseSourceOptions.FromJson(sourceOptionsJson, id);
                 databaseSourceOptions.Validate(id);
-                if (sourceType == "sqlite")
-                {
-                    ReadOnlySqlValidator.ValidateSelect(
-                        databaseSourceOptions.Query,
-                        $"SQLite source query for step '{id}'");
-                }
+                ReadOnlySqlValidator.ValidateSelect(
+                    databaseSourceOptions.Query,
+                    $"Database source query for step '{id}'");
                 if (databaseSourceOptions.CountQuery is not null)
                 {
-                    if (sourceType == "sqlite")
-                    {
-                        ReadOnlySqlValidator.ValidateSelect(
-                            databaseSourceOptions.CountQuery,
-                            $"SQLite count query for source step '{id}'");
-                    }
-                    else
-                    {
-                        ValidateReadOnlySql(
-                            databaseSourceOptions.CountQuery,
-                            id,
-                            "Database count query for source step");
-                    }
+                    ReadOnlySqlValidator.ValidateSelect(
+                        databaseSourceOptions.CountQuery,
+                        $"Database count query for source step '{id}'");
                 }
             }
             expectedRecordCount = GetLong(source, "ExpectedRecordCount", 0);
@@ -918,31 +1242,26 @@ internal static partial class PowerShellMigrationStepFactory
         string? targetOptionsJson = null;
         string? targetConnectionId = null;
         object? targetConnection = null;
-        var targetMaxConcurrency = 1;
-        var targetConcurrencyAuto = false;
-        var targetBatchSizeAuto = false;
+        var targetMaxConcurrency = maxTargetConcurrency;
         var targetMatchOnGroups = Array.Empty<string[]>();
         CustomConnector? targetCustom = null;
         if (type == "target")
         {
             var target = GetMap(GetProperty(step, "Target"), $"Target for step '{id}'")!;
             targetType = GetRequiredString(target, "Type").ToLowerInvariant();
-            if (targetType is not ("dataverse" or "jsonl" or "csv" or "parquet" or "custom" or "sqlite" or "duckdb"))
+            if (targetType is not ("dataverse" or "jsonl" or "csv" or "parquet" or "custom" or
+                "sqlite" or "duckdb" or "sqlserver" or "postgresql" or "mysql" or "oracle" or
+                "azureblob" or "s3" or "adlsgen2" or "gcs" or "mongodb"))
             {
                 throw new ArgumentException($"Target connector type '{targetType}' for step '{id}' is not supported.");
             }
             if (targetType == "dataverse")
             {
-                var concurrencySetting = ParseTargetTuningSetting(
-                    target, "MaxConcurrency", 1, defaultAuto: true, id);
-                targetMaxConcurrency = concurrencySetting.Value;
-                targetConcurrencyAuto = concurrencySetting.Auto;
-                if (!targetConcurrencyAuto && targetMaxConcurrency < 1)
-                {
-                    throw new ArgumentOutOfRangeException(
-                        nameof(targetMaxConcurrency),
-                        $"MaxConcurrency for Dataverse target step '{id}' must be positive.");
-                }
+                targetMaxConcurrency = ParsePositiveTargetInteger(
+                    target,
+                    "MaxConcurrency",
+                    maxTargetConcurrency,
+                    id);
             }
             else if (GetProperty(target, "MaxConcurrency") is not null)
             {
@@ -974,6 +1293,13 @@ internal static partial class PowerShellMigrationStepFactory
                 targetConnection = ResolveConnection(connections, targetConnectionId, id, "target")
                     ?? throw new ArgumentException(
                         $"Target connection '{targetConnectionId}' for step '{id}' resolved to null.");
+                if (targetType == "dataverse")
+                {
+                    targetConnection = NormalizeDataverseConnectionSlot(
+                        targetConnection,
+                        targetConnectionId,
+                        id);
+                }
             }
             if (targetType is "sqlite" or "duckdb")
             {
@@ -982,6 +1308,39 @@ internal static partial class PowerShellMigrationStepFactory
                     throw new ArgumentException(
                         $"Database target step '{id}' requires a FileInfo or DirectoryInfo in -Connections.");
                 }
+            }
+            if (targetType is "sqlserver" or "postgresql" or "mysql" or "oracle")
+            {
+                if (targetConnection is not DbConnection databaseConnection)
+                {
+                    throw new ArgumentException(
+                        $"Database target step '{id}' requires a {targetType} DbConnection in -Connections.");
+                }
+                DatabaseConnectorSupport.ValidateConnection(
+                    targetType,
+                    databaseConnection,
+                    $"target '{id}'");
+            }
+            if (targetType == "mongodb")
+            {
+                if (targetConnection is null)
+                {
+                    throw new ArgumentException(
+                        $"MongoDB target step '{id}' requires an IMongoClient or IMongoDatabase in -Connections.");
+                }
+                MongoConnectionSupport.ValidateConnection(targetConnection, $"target '{id}'");
+            }
+            if (targetType is "azureblob" or "s3" or "adlsgen2" or "gcs")
+            {
+                if (targetConnection is null)
+                {
+                    throw new ArgumentException(
+                        $"Object storage target step '{id}' requires a connection in -Connections.");
+                }
+                ObjectStorageConnectionSupport.ValidateConnection(
+                    targetType,
+                    targetConnection,
+                    $"target '{id}'");
             }
             var configuredTargetPath = GetString(
                 target,
@@ -1010,7 +1369,13 @@ internal static partial class PowerShellMigrationStepFactory
             tableName = targetType == "dataverse"
                 ? GetRequiredString(target, "Table")
                 : GetString(target, "Table", required: false) ?? string.Empty;
-            if (targetType is "sqlite" or "duckdb" && string.IsNullOrWhiteSpace(tableName))
+            if (targetType is "azureblob" or "s3" or "adlsgen2" or "gcs" && string.IsNullOrWhiteSpace(targetPath))
+            {
+                throw new ArgumentException($"Object storage target step '{id}' requires a Path.");
+            }
+            if ((DatabaseConnectorSupport.IsDatabaseConnectorType(targetType) ||
+                 targetType == "mongodb") &&
+                string.IsNullOrWhiteSpace(tableName))
             {
                 throw new ArgumentException($"Database target step '{id}' requires a Table.");
             }
@@ -1073,16 +1438,11 @@ internal static partial class PowerShellMigrationStepFactory
             }
             if (targetType == "dataverse")
             {
-                var batchSetting = ParseTargetTuningSetting(
-                    target, "BatchSize", batchSize, defaultAuto: true, id);
-                batchSize = batchSetting.Value;
-                targetBatchSizeAuto = batchSetting.Auto;
-                if (!targetBatchSizeAuto && batchSize < 1)
-                {
-                    throw new ArgumentOutOfRangeException(
-                        nameof(defaultBatchSize),
-                        $"Target batch size for step '{id}' must be positive.");
-                }
+                batchSize = ParsePositiveTargetInteger(
+                    target,
+                    "BatchSize",
+                    DefaultDataverseTargetBatchSize,
+                    id);
             }
             else
             {
@@ -1317,6 +1677,7 @@ internal static partial class PowerShellMigrationStepFactory
             sourceConnection,
             sourceCustom,
             dataverseSourceOptions,
+            dataverseSourcePartitions,
             dataverseQueryType,
             targetType,
             targetOperation,
@@ -1326,8 +1687,6 @@ internal static partial class PowerShellMigrationStepFactory
             targetConnectionId,
             targetConnection,
             targetMaxConcurrency,
-            targetConcurrencyAuto,
-            targetBatchSizeAuto,
             targetMatchOnGroups,
             targetCustom,
             transformType,
@@ -1542,6 +1901,11 @@ internal static partial class PowerShellMigrationStepFactory
                 throw new ArgumentException(
                     $"Every Input on row-linked source step '{step.Id}' must declare its keyed parent relationship.");
             }
+            if (step.DataverseSourcePartitions is not null && step.RowDependencies.Length > 0)
+            {
+                throw new ArgumentException(
+                    $"Partitioned Dataverse source step '{step.Id}' must be a root source without keyed parent inputs.");
+            }
             foreach (var dependencyId in step.CompletionDependencies)
             {
                 if (string.Equals(step.Id, dependencyId, StringComparison.Ordinal))
@@ -1667,7 +2031,8 @@ internal static partial class PowerShellMigrationStepFactory
     private static void ValidateDatabaseSourceConnections(IReadOnlyList<GraphStepInput> steps)
     {
         foreach (var source in steps.Where(step =>
-                     step.Type == "source" && step.SourceType is "sqlite" or "duckdb"))
+                     step.Type == "source" &&
+                     DatabaseConnectorSupport.IsDatabaseConnectorType(step.SourceType)))
         {
             var sourceConnection = source.SourceConnection;
             if (steps.Any(step =>
@@ -1696,7 +2061,8 @@ internal static partial class PowerShellMigrationStepFactory
             optionsJson: input.SourceOptionsJson,
             connectionId: input.SourceConnectionId,
             identity: input.SourceCustom?.Identity,
-            databaseConnection: input.SourceConnection as DbConnection);
+            databaseConnection: input.SourceConnection as DbConnection,
+            connectorConnection: input.SourceConnection);
     }
 
     private static HierarchySourceLevel CreateGraphWholeDatasetTransformSourceLevel(GraphStepInput input)
@@ -1720,7 +2086,8 @@ internal static partial class PowerShellMigrationStepFactory
     private static Func<CancellationToken, Task<long>>? CreateExpectedRecordCountResolver(
         GraphStepInput input,
         PowerShellScriptExecutor executor,
-        HierarchySourceLevel? sourceLevel)
+        HierarchySourceLevel? sourceLevel,
+        object? dataverseSourceConnection)
     {
         if (input.Type != "source" ||
             input.ExpectedRecordCount > 0 ||
@@ -1735,9 +2102,78 @@ internal static partial class PowerShellMigrationStepFactory
             resolver = cancellationToken =>
                 HierarchyRecordReaderFactory.GetMetadataRecordCountAsync(sourceLevel, cancellationToken);
         }
-        else if (input.SourceType is "sqlite" or "duckdb")
+        else if (input.SourceType == "excel")
+        {
+            var options = ExcelSourceOptions.FromJson(input.SourceOptionsJson, input.Id);
+            resolver = cancellationToken =>
+                ExcelHierarchyRecordReader.CountRecordsAsync(
+                    sourceLevel,
+                    options,
+                    cancellationToken);
+        }
+        else if (input.SourceType == "salesforce")
+        {
+            var options = SalesforceSourceOptions.FromJson(input.SourceOptionsJson, input.Id);
+            if (!string.IsNullOrWhiteSpace(options.Soql))
+            {
+                return null;
+            }
+            resolver = cancellationToken =>
+                SalesforceHierarchyRecordReader.CountRecordsAsync(
+                    sourceLevel,
+                    options,
+                    cancellationToken);
+        }
+        else if (input.SourceType == "hubspot")
+        {
+            var options = HubSpotSourceOptions.FromJson(input.SourceOptionsJson, input.Id);
+            if (!options.UsesSearch)
+            {
+                return null;
+            }
+            resolver = cancellationToken =>
+                HubSpotHierarchyRecordReader.CountRecordsAsync(
+                    sourceLevel,
+                    options,
+                    cancellationToken);
+        }
+        else if (input.SourceType == "zendesk")
+        {
+            var options = ZendeskSourceOptions.FromJson(input.SourceOptionsJson, input.Id);
+            if (string.IsNullOrWhiteSpace(options.Query))
+            {
+                return null;
+            }
+            resolver = cancellationToken =>
+                ZendeskHierarchyRecordReader.CountRecordsAsync(
+                    sourceLevel,
+                    options,
+                    cancellationToken);
+        }
+        else if (input.SourceType == "mongodb")
+        {
+            var options = MongoSourceOptions.FromJson(input.SourceOptionsJson, input.Id);
+            var connection = input.SourceConnection
+                ?? throw new InvalidOperationException(
+                    $"MongoDB source step '{input.Id}' has no connection for its count query.");
+            var database = MongoConnectionSupport.GetDatabase(
+                connection,
+                options.Database,
+                $"source '{input.Id}'");
+            resolver = cancellationToken =>
+                MongoHierarchyRecordReader.CountRecordsAsync(
+                    database,
+                    input.Id,
+                    options,
+                    cancellationToken);
+        }
+        else if (DatabaseConnectorSupport.IsDatabaseConnectorType(input.SourceType))
         {
             var options = DatabaseSourceOptions.FromJson(input.SourceOptionsJson, input.Id);
+            if (input.SourceType == "sqlserver" && string.IsNullOrWhiteSpace(options.CountQuery))
+            {
+                return null;
+            }
             var connection = input.SourceConnection as DbConnection
                 ?? throw new InvalidOperationException(
                     $"Database source step '{input.Id}' has no database connection for its count query.");
@@ -1752,16 +2188,42 @@ internal static partial class PowerShellMigrationStepFactory
                  input.DataverseQueryType is "simple" or "fetchxml")
         {
             var definition = new PowerShellDataverseSourceDefinition(
-                input.SourceConnection!,
+                dataverseSourceConnection
+                    ?? throw new InvalidOperationException(
+                        $"Dataverse source step '{input.Id}' has no effective connection."),
                 input.DataverseSourceOptions!,
-                input.DataverseQueryType);
-            resolver = cancellationToken =>
-                PowerShellDataverseHierarchyRecordReader.CountRecordsAsync(
-                    executor,
-                    input.Id,
-                    input.SourceKey,
-                    definition,
-                    cancellationToken);
+                input.DataverseQueryType,
+                input.DataverseSourcePartitions);
+            resolver = async cancellationToken =>
+            {
+                if (definition.Partitions.Count == 0)
+                {
+                    return await PowerShellDataverseHierarchyRecordReader.CountRecordsAsync(
+                        executor,
+                        input.Id,
+                        input.SourceKey,
+                        definition,
+                        cancellationToken).ConfigureAwait(false);
+                }
+
+                long total = 0;
+                foreach (var partition in definition.Partitions)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var partitionDefinition = new PowerShellDataverseSourceDefinition(
+                        definition.Connection,
+                        partition.Options,
+                        definition.QueryType);
+                    total = checked(total + await PowerShellDataverseHierarchyRecordReader.CountRecordsAsync(
+                        executor,
+                        $"{input.Id}/{partition.Id}",
+                        input.SourceKey,
+                        partitionDefinition,
+                        cancellationToken).ConfigureAwait(false));
+                }
+
+                return total;
+            };
         }
         else if (input.SourceType == "custom" && input.SourceCustom?.CountCallbackText is { } countCallbackText)
         {
@@ -1850,16 +2312,22 @@ internal static partial class PowerShellMigrationStepFactory
         IDictionary<string, (SemaphoreSlim Semaphore, int Capacity)> semaphores)
     {
         if (step.Type != "target" ||
-            step.TargetType is not ("custom" or "sqlite" or "duckdb"))
+            (step.TargetType is not "custom" &&
+             !DatabaseConnectorSupport.IsDatabaseConnectorType(step.TargetType!) &&
+             step.TargetType is not ("azureblob" or "s3" or "adlsgen2" or "gcs" or "mongodb")))
         {
             return null;
         }
         var capacity = step.TargetType == "custom"
             ? step.TargetCustom?.MaxConcurrency ?? 1
             : 1;
-        var key = step.TargetType is "sqlite" or "duckdb"
+        var key = DatabaseConnectorSupport.IsDatabaseConnectorType(step.TargetType!)
             ? $"database:{step.TargetConnectionId}"
-            : $"{step.TargetType}:{step.TargetConnectionId}";
+            : step.TargetType == "mongodb"
+                ? $"mongodb:{step.TargetConnectionId}"
+            : step.TargetType is "azureblob" or "s3" or "adlsgen2" or "gcs"
+                ? $"object:{step.TargetType}:{step.TargetConnectionId}"
+                : $"{step.TargetType}:{step.TargetConnectionId}";
         if (semaphores.TryGetValue(key, out var existing))
         {
             if (existing.Capacity != capacity)
@@ -1887,21 +2355,16 @@ internal static partial class PowerShellMigrationStepFactory
         }
     }
 
-    private static (int Value, bool Auto) ParseTargetTuningSetting(
+    private static int ParsePositiveTargetInteger(
         IDictionary target,
         string name,
         int defaultValue,
-        bool defaultAuto,
         string stepId)
     {
         var raw = Unwrap(GetProperty(target, name));
         if (raw is null)
         {
-            return (defaultValue, defaultAuto);
-        }
-        if (raw is string text && string.Equals(text, "auto", StringComparison.OrdinalIgnoreCase))
-        {
-            return (defaultValue, true);
+            return defaultValue;
         }
 
         int value;
@@ -1912,7 +2375,7 @@ internal static partial class PowerShellMigrationStepFactory
         catch (PSInvalidCastException exception)
         {
             throw new ArgumentException(
-                $"Dataverse target '{stepId}' property '{name}' must be a positive integer or 'auto'.",
+                $"Dataverse target '{stepId}' property '{name}' must be a positive integer.",
                 name,
                 exception);
         }
@@ -1922,7 +2385,14 @@ internal static partial class PowerShellMigrationStepFactory
                 name,
                 $"Dataverse target '{stepId}' property '{name}' must be positive.");
         }
-        return (value, false);
+        if (name.Equals("BatchSize", StringComparison.OrdinalIgnoreCase) && value > 1000)
+        {
+            throw new ArgumentOutOfRangeException(
+                name,
+                $"Dataverse target '{stepId}' batch size cannot exceed 1000.");
+        }
+
+        return value;
     }
 
     private static IReadOnlyDictionary<string, double> CalculatePipelineDispatchWeights(
@@ -1993,6 +2463,7 @@ internal static partial class PowerShellMigrationStepFactory
         object? SourceConnection,
         CustomConnector? SourceCustom,
         IDictionary? DataverseSourceOptions,
+        DataverseSourcePartition[]? DataverseSourcePartitions,
         string? DataverseQueryType,
         string? TargetType,
         string? TargetOperation,
@@ -2002,8 +2473,6 @@ internal static partial class PowerShellMigrationStepFactory
         string? TargetConnectionId,
         object? TargetConnection,
         int TargetMaxConcurrency,
-        bool TargetConcurrencyAuto,
-        bool TargetBatchSizeAuto,
         string[][] TargetMatchOnGroups,
         CustomConnector? TargetCustom,
         string? TransformType,

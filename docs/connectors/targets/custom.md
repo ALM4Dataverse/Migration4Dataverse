@@ -26,7 +26,7 @@ The callback receives:
 
 1. The connection object from `-Connections`.
 2. The mapped records for the batch. A record has an `Id` when the source defines `Source.Id` or a Transform supplies it; whether it is required depends on the custom target.
-3. A context object with `StepId`, `TableName`, `RunId`, `BatchId`, `Sequence`, and `TargetPath`.
+3. A context object with `StepId`, `TableName`, `RunId`, `BatchId`, `Sequence`, and `TargetPath`. `TargetPath` is the resolved `Target.Path`; when `Path` is omitted it is an empty string.
 
 It must emit exactly one Boolean `$true` after success. Exceptions, no output, extra output, `$false`, or any non-Boolean value fail the batch. Send diagnostics to non-output streams.
 
@@ -38,6 +38,7 @@ It must emit exactly one Boolean `$true` after success. Exceptions, no output, e
 | `Callback` | Yes | — | Scriptblock writing one batch. |
 | `MaxConcurrency` | No | `1` | Positive callback concurrency for the target connection. Steps sharing that target connection must use the same value. Choose a value no greater than the cmdlet's `MaxDegreeOfParallelism`. |
 | `Modules` | No | `[]` | Module names or paths imported into the embedded runspace pool. |
-| `PageSize` | No | `100` | Source-only option; has no effect on target callbacks. |
+
+`PageSize` is a source-only option and has no effect on target callbacks.
 
 The callback may execute again if a remote write succeeds but its SQLite completion is not committed. Use `BatchId` or another stable idempotency key so that a retry is safe. Target concurrency is shared among steps that use the same target connector type and connection ID.

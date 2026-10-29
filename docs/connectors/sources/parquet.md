@@ -29,8 +29,8 @@ Options are case-insensitive when deserialized. Every option is listed; `SchemaB
 | `CompressionLevel` | `Optimal` | Compression level used when writing; no source effect. |
 | `TargetRowGroupSize` | `100000` | Writer row-group size; no source effect. |
 | `MaxSourceRowGroupRows` | `250000` | Maximum accepted row group size. An oversized group fails. |
-| `DictionaryEncodingThreshold` | `0.8` | Parquet.Net dictionary encoding threshold (`0..1`). |
-| `DictionaryEncodingSampleSize` | `1000` | Number of values sampled for dictionary encoding. |
+| `DictionaryEncodingThreshold` | `0.8` | Writer dictionary-encoding threshold (`0..1`); no source effect. |
+| `DictionaryEncodingSampleSize` | `1000` | Writer dictionary-encoding sample size; no source effect. |
 | `TreatByteArrayAsString` | `false` | Parquet.Net byte-array interpretation. |
 | `TreatBigIntegersAsDates` | `false` | Parquet.Net large-integer interpretation. |
 | `UseDateOnlyTypeForDates` | `true` | Read dates using Parquet.Net `DateOnly` behavior. |

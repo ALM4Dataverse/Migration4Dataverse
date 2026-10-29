@@ -58,7 +58,7 @@ public sealed class DataverseTargetOperationsTests
         var createGraph = factory.GetMethod("CreateGraph", BindingFlags.Public | BindingFlags.Static)!;
         using var stepSet = (IDisposable)createGraph.Invoke(
             null,
-            [steps, connections, executor, 1, false, store, 8, false, false])!;
+            [steps, connections, executor, 1, false, store, 8, false, false, null, null])!;
         var definitions = (IReadOnlyList<MigrationStepDefinition>)stepSet.GetType()
             .GetProperty("Steps", BindingFlags.Public | BindingFlags.Instance)!
             .GetValue(stepSet)!;
@@ -155,7 +155,7 @@ public sealed class DataverseTargetOperationsTests
         var createGraph = factory.GetMethod("CreateGraph", BindingFlags.Public | BindingFlags.Static)!;
         using var stepSet = (IDisposable)createGraph.Invoke(
             null,
-            [steps, connections, executor, 1, false, store, 8, false, false])!;
+            [steps, connections, executor, 1, false, store, 8, false, false, null, null])!;
         var definitions = (IReadOnlyList<MigrationStepDefinition>)stepSet.GetType()
             .GetProperty("Steps", BindingFlags.Public | BindingFlags.Instance)!
             .GetValue(stepSet)!;
@@ -201,7 +201,7 @@ public sealed class DataverseTargetOperationsTests
         var createGraph = factory.GetMethod("CreateGraph", BindingFlags.Public | BindingFlags.Static)!;
 
         var exception = Assert.Throws<TargetInvocationException>(
-            () => createGraph.Invoke(null, [steps, connections, executor, 1, false, null, 8, false, false]));
+            () => createGraph.Invoke(null, [steps, connections, executor, 1, false, null, 8, false, false, null, null]));
 
         Assert.IsType<ArgumentException>(exception.InnerException);
         Assert.Contains("Dataverse target operation", exception.InnerException.Message);
@@ -229,7 +229,7 @@ public sealed class DataverseTargetOperationsTests
         var createGraph = factory.GetMethod("CreateGraph", BindingFlags.Public | BindingFlags.Static)!;
 
         var exception = Assert.Throws<TargetInvocationException>(
-            () => createGraph.Invoke(null, [steps, connections, executor, 1, false, null, 8, false, false]));
+            () => createGraph.Invoke(null, [steps, connections, executor, 1, false, null, 8, false, false, null, null]));
 
         Assert.IsType<ArgumentException>(exception.InnerException);
         Assert.Contains("does not support Set-DataverseRecord options", exception.InnerException.Message);

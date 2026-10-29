@@ -65,6 +65,39 @@ public sealed class DependencySchedulerTests
         Assert.Equal("Failed", store.GetDashboardRun("completion-hook-run").Status);
     }
 
+    [Theory]
+    [InlineData(128, true)]
+    [InlineData(0, false)]
+    public async Task MaxDegreeOfParallelismMustBePositiveWithoutAFixedCeiling(
+        int maxDegreeOfParallelism,
+        bool isPositive)
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        const string runId = "max-dop-limit-run";
+        var step = new MigrationStepDefinition(
+            "Root",
+            inputs: null,
+            (checkpoint, token) => SingleBatch("{}", token),
+            (_, _) => Task.FromResult(new MigrationBatchResult("{}")));
+        var runTask = new DependencyScheduler(store).ExecuteAsync(
+            runId,
+            "max-dop-limit-test",
+            "hash-1",
+            [step],
+            CreateOptions(maxDegreeOfParallelism, maxQueuedBatches: 1));
+
+        if (!isPositive)
+        {
+            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => runTask);
+            Assert.Throws<KeyNotFoundException>(() => store.GetRunProgress(runId));
+            return;
+        }
+
+        await runTask;
+        Assert.Equal("Completed", store.GetDashboardRun(runId).Status);
+    }
+
     [Fact]
     public void HigherPipelineImpactGetsMoreDispatchesWithoutStarvingOtherTargets()
     {

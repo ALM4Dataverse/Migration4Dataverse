@@ -63,7 +63,7 @@ public sealed class DataFlowPipelineDefinition
             }
 
             var sourceType = source.Type.Trim().ToLowerInvariant();
-            if (sourceType is "jsonl" or "csv" or "parquet" &&
+            if (sourceType is "jsonl" or "csv" or "parquet" or "excel" &&
                 string.IsNullOrWhiteSpace(source.Path))
             {
                 throw new ArgumentException(

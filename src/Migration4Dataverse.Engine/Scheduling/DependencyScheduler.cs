@@ -1540,12 +1540,6 @@ public sealed class DependencyScheduler
     private static void ValidateOptions(DependencySchedulerOptions options)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxDegreeOfParallelism);
-        if (options.MaxDegreeOfParallelism > 32)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(options.MaxDegreeOfParallelism),
-                "Maximum degree of parallelism cannot exceed 32.");
-        }
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxQueuedBatches);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxQueuedBatchesPerStep);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxAttempts);

@@ -72,7 +72,7 @@ Options = @{
 
 See the upstream [`Get-DataverseRecord` help](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Get-DataverseRecord.md) and Microsoft's [FetchXML overview](https://learn.microsoft.com/power-apps/developer/data-platform/fetchxml/overview).
 
-## Sql4Cds query
+## Cds4Sql query
 
 Set `QueryType = 'Cds4Sql'` to run a read-only `SELECT` through `Invoke-DataverseSql`. Use parameters rather than interpolating values into the SQL text, and order the result by the configured source key.
 
@@ -85,8 +85,66 @@ Options = @{
 }
 ```
 
-The adapter rejects statements that are not a single read-only `SELECT`; it does not use this source to run DML. See upstream [`Invoke-DataverseSql`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Invoke-DataverseSql.md) for SQL4CDS options and limits.
+The adapter rejects statements that are not a single read-only `SELECT`; it does not use this source to run DML. See upstream [`Invoke-DataverseSql`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Invoke-DataverseSql.md) for Cds4Sql options and limits.
+
+## Parallel source partitions
+
+A root Dataverse source can split one logical read into explicitly configured, independently queried partitions. The adapter runs the partition readers concurrently, merges their rows by the configured ascending `Key`, and rejects duplicate or incorrectly ordered keys.
+
+```powershell
+Source = @{
+    Type = 'dataverse'
+    ConnectionId = 'crm'
+    Key = 'accountid'
+    Options = @{
+        QueryType = 'FetchXml'
+        FetchXml = @'
+<fetch><entity name="account">
+  <attribute name="accountid" />
+  <order attribute="accountid" />
+</entity></fetch>
+'@
+    }
+    Partitions = @(
+        @{
+            Id = 'active'
+            Options = @{
+                FetchXml = @'
+<fetch><entity name="account">
+  <attribute name="accountid" />
+  <filter><condition attribute="statecode" operator="eq" value="0" /></filter>
+  <order attribute="accountid" />
+</entity></fetch>
+'@
+            }
+        }
+        @{
+            Id = 'inactive'
+            Options = @{
+                FetchXml = @'
+<fetch><entity name="account">
+  <attribute name="accountid" />
+  <filter><condition attribute="statecode" operator="eq" value="1" /></filter>
+  <order attribute="accountid" />
+</entity></fetch>
+'@
+            }
+        }
+    )
+}
+```
+
+Each partition needs a unique, stable `Id`. Its `Options` are merged over the source's `Options`: omitted fields inherit the base value, and supplied fields replace it. All partitions must use the source's `QueryType`, and each query must independently return rows in ascending `Key` order. You are responsible for making the partitions complete and non-overlapping; the adapter detects duplicate keys but cannot detect gaps. For Simple and FetchXML sources, count preflight sums the per-partition counts. Partitioned sources require at least two partitions, and the number of partitions cannot exceed `Invoke-Migration -MaxDegreeOfParallelism`. The migration checkpoints a cursor for every partition, so preserve the partition IDs, filters, and query behavior when resuming a run.
+
+## Connection pools and request balancing
+
+`ConnectionId` can resolve to one connection or an array, for example `crm = @($crmAsUserA, $crmAsUserB)`. Pooled connections must belong to the same Dataverse organization and use the same `MaxRetryCount`. The same named pool is shared by typed Dataverse sources and targets.
+
+For a pool, the adapter routes individual Dataverse service calls across members using calculated request units in a rolling five-minute window. Calls to `ExecuteMultiple` and `ExecuteTransaction` are expanded into their nested operations; bulk `*Multiple` requests with a `Targets` collection are charged by target count. `RetrieveMultiple` is a regular single service request. Retries are separate attempts. Each identity has an active-request limit based on its connection's `RecommendedDegreesOfParallelism` (falling back to 4); connections reporting the same Dataverse user share one limit. Only identities below their limit can receive new calls, and callers wait when all identity budgets are full. The adapter does not assume a universal request quota or dynamically change concurrency based on throttle signals; normal retries remain enabled. Pooled Cds4Sql sources must set `MaxDegreeOfParallelism` to `1`; the adapter rejects higher values because the upstream cmdlet's internal parallel requests cannot be individually routed through the pool.
+
+> [!IMPORTANT]
+> If using parallel `Partitions`, ensure the queries form a complete, disjoint set and keep their stable IDs and query behavior unchanged for the life of a run.
 
 ## Connections and authentication
 
-Create and authenticate the connection using the upstream module, then place the resulting connection object in `-Connections`. See upstream [`Get-DataverseConnection`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Get-DataverseConnection.md), the [connections concept](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/core-concepts/connections.md), and the [authentication guide](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/getting-started/authentication.md).
+Create and authenticate each connection using the upstream module, then place it in `-Connections`. See upstream [`Get-DataverseConnection`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Get-DataverseConnection.md), the [connections concept](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/core-concepts/connections.md), and the [authentication guide](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/getting-started/authentication.md).

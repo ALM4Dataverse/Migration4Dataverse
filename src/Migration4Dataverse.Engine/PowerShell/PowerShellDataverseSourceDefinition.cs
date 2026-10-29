@@ -7,7 +7,8 @@ public sealed class PowerShellDataverseSourceDefinition
     public PowerShellDataverseSourceDefinition(
         object connection,
         IDictionary options,
-        string queryType)
+        string queryType,
+        IReadOnlyList<DataverseSourcePartition>? partitions = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(options);
@@ -16,6 +17,7 @@ public sealed class PowerShellDataverseSourceDefinition
         Connection = connection;
         Options = options;
         QueryType = queryType;
+        Partitions = partitions?.ToArray() ?? Array.Empty<DataverseSourcePartition>();
     }
 
     public object Connection { get; }
@@ -23,4 +25,8 @@ public sealed class PowerShellDataverseSourceDefinition
     public IDictionary Options { get; }
 
     public string QueryType { get; }
+
+    public IReadOnlyList<DataverseSourcePartition> Partitions { get; }
 }
+
+public sealed record DataverseSourcePartition(string Id, IDictionary Options);

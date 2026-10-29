@@ -1,6 +1,6 @@
 # Internal data-flow transformations
 
-This reference describes the engine's separate data-flow pipeline. It is not part of the supported `Invoke-Migration` step contract.
+This reference primarily describes the engine's separate data-flow pipeline. Except for the database-backed transform sections in [transform.md](./transform.md#database-backed-migration-graph-transforms), it is not part of the supported `Invoke-Migration` step contract.
 
 > [!IMPORTANT]
 > The C# transformation types and this pipeline are internal implementation details, not a supported public C# API. For the PowerShell steps supported by `Invoke-Migration`, see [migration step configuration](../../configuration.md).
@@ -9,7 +9,7 @@ PowerShell callers of this internal pipeline define it as a hashtable and put ea
 
 ## PowerShell configuration
 
-`WriteJsonLinesAsync` reads JSON Lines, CSV, or Parquet file sources and writes the pipeline output as JSON Lines. This example uses PowerShell hashtables throughout and keeps the scripts inline:
+The default `WriteJsonLinesAsync` helper reads JSON Lines file sources and writes the pipeline output as JSON Lines. To use CSV, Parquet, or custom sources, construct a `DataFlowPipeline` and call its `ReadAsync` overload with an appropriate `DataFlowSourceReader`. This example uses PowerShell hashtables throughout and keeps the scripts inline:
 
 ```powershell
 $pipeline = [ordered]@{
@@ -73,11 +73,11 @@ A pipeline has `Sources`, `Nodes`, and one `OutputNodeId`. A source node refers 
 | Field | Required | Description |
 |---|---:|---|
 | `Sources[].Id` | Yes | Unique source ID. |
-| `Sources[].Type` | Yes | Connector type interpreted by the reader. The JSONL writer supports `jsonl`, `csv`, and `parquet` file sources. |
+| `Sources[].Type` | Yes | Connector type interpreted by the source reader. The built-in `WriteJsonLinesAsync` helper supports only `jsonl`; other types require a custom `DataFlowSourceReader` passed to `ReadAsync`. |
 | `Sources[].ConnectionId` | Yes | Non-empty connector connection identifier. |
 | `Sources[].Path` | File sources | Required for file source types. |
 | `Sources[].Options` | No | Optional source options hashtable. |
-| `Sources[].Identity` | Custom source | Stable identity required when `Type` is `custom`. |
+| `Sources[].Identity` | Custom source | Stable identity required when `Type` is `custom`. The built-in JSONL helper cannot read custom sources; use `ReadAsync` with a custom reader. |
 | `Nodes[].Id` | Yes | Unique node ID. |
 | `Nodes[].Type` | Yes | `source`, `append` (aliases `union-all`, `union_all`, `union all`), `merge`, `sort`, `transform`, or `filter`. |
 | `Nodes[].SourceId` | Source node | ID of exactly one declared source. |

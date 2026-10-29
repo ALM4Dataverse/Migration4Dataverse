@@ -2,7 +2,11 @@ using System.Data.Common;
 using System.Security.Cryptography;
 using System.Text;
 using DuckDB.NET.Data;
+using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
+using MySqlConnector;
+using Npgsql;
+using Oracle.ManagedDataAccess.Client;
 using Migration4Dataverse.Engine.Storage;
 
 namespace Migration4Dataverse.Engine.Connectors;
@@ -57,10 +61,14 @@ public static class MigrationDatabaseConnectionFactory
         {
             "sqlite" => CreateSqliteConnection(connectionString),
             "duckdb" => CreateDuckDbConnection(connectionString),
+            "sqlserver" => new SqlConnection(connectionString),
+            "postgresql" => new NpgsqlConnection(connectionString),
+            "mysql" => new MySqlConnection(connectionString),
+            "oracle" => new OracleConnection(connectionString),
             _ => throw new ArgumentOutOfRangeException(
                 nameof(provider),
                 provider,
-                "The database provider must be SQLite or DuckDB.")
+                "The database provider must be SQLite, DuckDB, SQL Server, PostgreSQL, MySQL, or Oracle.")
         };
     }
 

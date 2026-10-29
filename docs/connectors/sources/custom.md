@@ -1,6 +1,6 @@
 # Custom PowerShell source
 
-The `custom` source calls a paged PowerShell callback. It may use any caller-provided non-null runtime connection object and does not require a file path.
+The `custom` source calls a paged PowerShell callback. It may use any caller-provided non-null runtime connection object and does not require a file path. An optional `Path` is resolved against a `DirectoryInfo` connection and passed to the callback; when omitted, the callback receives an empty string.
 
 ## Configuration and callback example
 
@@ -30,7 +30,7 @@ Source = @{
 }
 ```
 
-`Callback` receives the runtime connection, prior cursor (`$null` on first call), configured page size, step ID, and path argument (null for this connector). It must emit exactly one page object:
+`Callback` receives the runtime connection, prior cursor (`$null` on first call), configured page size, step ID, and path argument. The path is the configured `Path`, or an empty string when `Path` is omitted. It must emit exactly one page object:
 
 - `Records`: required array of record objects.
 - `Done`: required Boolean.

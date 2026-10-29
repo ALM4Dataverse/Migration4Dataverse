@@ -39,6 +39,11 @@ public sealed class PowerShellHierarchyRecordReaderFactory
         return CreateReader;
     }
 
+    public Func<HierarchySourceLevel, string?, IHierarchyRecordReader> CreateCheckpointAwareDelegate()
+    {
+        return CreateReader;
+    }
+
     public IHierarchyRecordReader CreateReader(HierarchySourceLevel level)
     {
         ArgumentNullException.ThrowIfNull(level);
@@ -77,5 +82,30 @@ public sealed class PowerShellHierarchyRecordReaderFactory
             customSource.Connection,
             customSource.ScriptText,
             customSource.PageSize);
+    }
+
+    public IHierarchyRecordReader CreateReader(HierarchySourceLevel level, string? checkpointJson)
+    {
+        ArgumentNullException.ThrowIfNull(level);
+        if (level.Type == "dataverse" &&
+            _dataverseSources.TryGetValue(level.StepId, out var definition) &&
+            definition.Partitions.Count > 0)
+        {
+            if (definition.Partitions.Count > _executor.MaxRunspaces)
+            {
+                throw new ArgumentException(
+                    $"Partitioned Dataverse source '{level.StepId}' has {definition.Partitions.Count} partitions, " +
+                    $"but the executor has only {_executor.MaxRunspaces} runspaces. Increase Invoke-Migration -MaxDegreeOfParallelism " +
+                    "or reduce the number of partitions.");
+            }
+
+            return new PowerShellDataversePartitionedHierarchyRecordReader(
+                _executor,
+                level,
+                definition,
+                checkpointJson);
+        }
+
+        return CreateReader(level);
     }
 }

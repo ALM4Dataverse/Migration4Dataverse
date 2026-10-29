@@ -14,6 +14,11 @@ public interface IHierarchyRecordReader : IAsyncDisposable
     JsonElement Take();
 }
 
+public interface IHierarchyRecordCheckpointReader
+{
+    string CreateCheckpointJson(string lastKey);
+}
+
 public sealed class JsonLinesHierarchyLevel
 {
     public JsonLinesHierarchyLevel(
@@ -70,6 +75,7 @@ public class HierarchyBatchSource
     private readonly int _batchSize;
     private readonly IReadOnlyDictionary<string, HierarchySourceLevel> _levels;
     private readonly Func<HierarchySourceLevel, IHierarchyRecordReader> _readerFactory;
+    private readonly Func<HierarchySourceLevel, string?, IHierarchyRecordReader>? _checkpointReaderFactory;
 
     protected HierarchyBatchSource(JsonLinesHierarchyLevel root, int batchSize)
         : this(ConvertLevel(root), batchSize, level => new JsonLinesReader(level))
@@ -79,7 +85,8 @@ public class HierarchyBatchSource
     public HierarchyBatchSource(
         HierarchySourceLevel root,
         int batchSize,
-        Func<HierarchySourceLevel, IHierarchyRecordReader> readerFactory)
+        Func<HierarchySourceLevel, IHierarchyRecordReader> readerFactory,
+        Func<HierarchySourceLevel, string?, IHierarchyRecordReader>? checkpointReaderFactory = null)
     {
         ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(readerFactory);
@@ -92,6 +99,7 @@ public class HierarchyBatchSource
         _root = root;
         _batchSize = batchSize;
         _readerFactory = readerFactory;
+        _checkpointReaderFactory = checkpointReaderFactory;
         _levels = ValidateHierarchy(root);
     }
 
@@ -130,12 +138,16 @@ public class HierarchyBatchSource
             foreach (var level in _levels.Values)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                readers.Add(level.StepId, _readerFactory(level));
+                var reader = level.StepId == _root.StepId && _checkpointReaderFactory is not null
+                    ? _checkpointReaderFactory(level, checkpoint.ResumeCursorJson)
+                    : _readerFactory(level);
+                readers.Add(level.StepId, reader);
             }
 
             var rootReader = readers[_root.StepId];
-            var previousRootKey = (string?)null;
-            var cursorFound = cursor is null;
+            var resumesCompositeCursor = rootReader is IHierarchyRecordCheckpointReader;
+            var previousRootKey = resumesCompositeCursor ? cursor : null;
+            var cursorFound = cursor is null || resumesCompositeCursor;
             var batch = new List<JsonLinesHierarchyRecord>(_batchSize);
             var previousChildOrder = new Dictionary<string, (string ParentKey, string Key)>(
                 StringComparer.Ordinal);
@@ -191,7 +203,7 @@ public class HierarchyBatchSource
                 lastKeyInBatch = rootKey;
                 if (batch.Count == _batchSize)
                 {
-                    yield return CreateWorkBatch(batch, lastKeyInBatch);
+                    yield return CreateWorkBatch(batch, lastKeyInBatch, rootReader);
                     batch.Clear();
                     lastKeyInBatch = null;
                 }
@@ -222,8 +234,11 @@ public class HierarchyBatchSource
 
             if (batch.Count > 0)
             {
-                yield return CreateWorkBatch(batch, lastKeyInBatch
-                    ?? throw new InvalidOperationException("A non-empty source batch has no cursor key."));
+                yield return CreateWorkBatch(
+                    batch,
+                    lastKeyInBatch ?? throw new InvalidOperationException(
+                        "A non-empty source batch has no cursor key."),
+                    rootReader);
             }
         }
         finally
@@ -267,11 +282,14 @@ public class HierarchyBatchSource
 
     private static MigrationWorkBatch CreateWorkBatch(
         IReadOnlyList<JsonLinesHierarchyRecord> records,
-        string lastKey)
+        string lastKey,
+        IHierarchyRecordReader rootReader)
     {
         return new MigrationWorkBatch(
             JsonSerializer.Serialize(new { Records = records }),
-            JsonSerializer.Serialize(new { LastKey = lastKey }));
+            rootReader is IHierarchyRecordCheckpointReader checkpointReader
+                ? checkpointReader.CreateCheckpointJson(lastKey)
+                : JsonSerializer.Serialize(new { LastKey = lastKey }));
     }
 
     private static async Task<IReadOnlyDictionary<string, IReadOnlyList<JsonLinesHierarchyRecord>>> ReadChildrenAsync(
@@ -411,7 +429,7 @@ public class HierarchyBatchSource
                     $"Source '{level.StepId}' has an invalid parent-key definition.",
                     nameof(root));
             }
-            if (level.Type is "jsonl" or "csv" or "parquet" && !File.Exists(level.Path))
+            if (level.Type is "jsonl" or "csv" or "parquet" or "excel" && !File.Exists(level.Path))
             {
                 throw new FileNotFoundException(
                     $"{level.Type} source for job '{level.StepId}' was not found.",

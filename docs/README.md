@@ -16,8 +16,8 @@ Start with the [repository README](../README.md) to build the module and run an 
 
 ### Choose connectors
 
-- [Source connectors](./connectors/sources/README.md) — CSV, JSON Lines, Parquet, SQLite, DuckDB, Dataverse, and custom readers.
-- [Target connectors](./connectors/targets/README.md) — file, database, Dataverse, and custom writers.
+- [Source connectors](./connectors/sources/README.md) — file, SQL database, object storage, HTTP/OData, Salesforce, SharePoint, HubSpot, Zendesk, ServiceNow, MongoDB, Dataverse, and custom readers.
+- [Target connectors](./connectors/targets/README.md) — file, SQL database, object storage, MongoDB, Dataverse, and custom writers.
 - [Dataverse source](./connectors/sources/dataverse.md) and [Dataverse target](./connectors/targets/dataverse.md) — Migration4Dataverse-specific behavior and links to the upstream command references.
 
 ### Run and monitor

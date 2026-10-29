@@ -8,9 +8,11 @@ SQLite writes are serialized through the owner, while readers can continue along
 
 ## Resume compatibility
 
-A run is bound to its `RunName` and `StepHash`. By default, the cmdlet computes the step hash from normalized step definitions and module names. Changing a script, connection ID, path, or other hashed step data can make the run incompatible. If supplying `StepHash` explicitly, the caller owns this compatibility decision.
+A run is bound to its `RunName` and `StepHash`. By default, the cmdlet computes the step hash from normalized step definitions, module requirements and resolved versions, helper script contents, and shared scripts. Changing a script, connection ID, path, or other hashed step data can make the run incompatible. If supplying `StepHash` explicitly, the caller owns this compatibility decision.
 
 Root readers receive the last contiguous completed checkpoint (`LastCompletedSequence` and `CursorJson`) and the latest durable source position (`ResumeSequence` and `ResumeCursorJson`). They continue after that latest enqueued batch; pending and in-flight batches are replayed from their stored SQLite payloads rather than reconstructed. Custom typed sources may restart their page cursor at the beginning on enumeration and replay records through the last durable source key, so their records must be stable, replayable, and ordered by the source key.
+
+Partitioned Dataverse root sources store the last emitted key for each stable partition ID alongside the overall source key. On resume, each partition query is rerun and skips through its own saved key before the readers merge again. Keep partition IDs and query behavior unchanged when resuming; changing the partition set is not compatible with the saved cursor.
 
 ## At-least-once external effects
 

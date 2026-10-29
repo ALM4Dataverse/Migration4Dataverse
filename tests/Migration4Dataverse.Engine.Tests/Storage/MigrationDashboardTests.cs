@@ -8,6 +8,7 @@ using Migration4Dataverse.Engine.Dashboard;
 using Migration4Dataverse.Engine.PowerShell;
 using Migration4Dataverse.Engine.Scheduling;
 using Migration4Dataverse.Engine.Storage;
+using ServiceClient = Migration4Dataverse.Engine.Tests.PowerShell.Fakes.ServiceClient;
 
 namespace Migration4Dataverse.Engine.Tests.Storage;
 
@@ -62,6 +63,41 @@ public sealed class MigrationDashboardTests
                 Assert.Equal(new[] { "Customers" }, contacts.Inputs);
             });
         Assert.Empty(store.GetDebugSnapshots("metadata-run"));
+    }
+
+    [Fact]
+    public async Task DashboardServesLiveDataverseConnectionPoolThroughput()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        const string runId = "pool-dashboard-run";
+        store.CreateRun(runId, "pool-dashboard-test", "hash");
+        using var first = new ServiceClient(Guid.NewGuid(), 3);
+        using var second = new ServiceClient(Guid.NewGuid(), 3);
+        using var pool = DataverseConnectionPool.Create(
+            "crm",
+            [first, second],
+            disableRetries: false,
+            runId: runId,
+            databasePath: database.Path);
+        var service = Assert.IsAssignableFrom<Microsoft.Xrm.Sdk.IOrganizationService>(pool.Connection);
+        service.Execute(new Microsoft.Xrm.Sdk.OrganizationRequest("Update"));
+        service.Execute(new Microsoft.Xrm.Sdk.OrganizationRequest("Update"));
+
+        var port = GetAvailablePort();
+        await using var dashboard = await MigrationDashboardServer.StartAsync(
+            database.Path,
+            $"http://127.0.0.1:{port}");
+        using var client = new HttpClient();
+        var response = await client.GetFromJsonAsync<JsonElement>(
+            new Uri(dashboard.Url, $"/api/runs/{runId}/dataverse-connection-throughput"));
+
+        var connection = Assert.Single(response.EnumerateArray().ToArray());
+        Assert.Equal("crm", connection.GetProperty("connectionId").GetString());
+        var members = connection.GetProperty("members").EnumerateArray().ToArray();
+        Assert.Equal(2, members.Length);
+        Assert.Equal(2, members.Sum(member => member.GetProperty("totalRequests").GetInt64()));
+        Assert.Equal(2, members.Sum(member => member.GetProperty("totalRequestUnits").GetInt64()));
     }
 
     [Fact]
@@ -193,15 +229,15 @@ public sealed class MigrationDashboardTests
             "AccountsTarget",
             "accounts-target-batch",
             """{"Records":[{"id":1}]}""",
-            """{"Succeeded":1,"Failed":0,"SpecialistInfo":{"BatchSize":100,"BatchSizeAuto":true,"BatchSizeState":"tuning candidate (2/3 samples)","MaxConcurrency":2,"ConcurrencyAuto":true,"ConcurrencyState":"waiting for batch-size tuning"}}""");
+            """{"Succeeded":1,"Failed":0,"SpecialistInfo":{"BatchSize":10,"BatchSizeState":"fixed","MaxConcurrency":2,"ConcurrencyState":"fixed connection budget"}}""");
 
         var target = Assert.Single(store.GetDashboardRun("specialist-info-run").Steps);
         Assert.True(target.SpecialistInfo.HasValue);
         var specialistInfo = target.SpecialistInfo.Value;
-        Assert.Equal(100, specialistInfo.GetProperty("BatchSize").GetInt32());
-        Assert.Equal("tuning candidate (2/3 samples)", specialistInfo.GetProperty("BatchSizeState").GetString());
+        Assert.Equal(10, specialistInfo.GetProperty("BatchSize").GetInt32());
+        Assert.Equal("fixed", specialistInfo.GetProperty("BatchSizeState").GetString());
         Assert.Equal(2, specialistInfo.GetProperty("MaxConcurrency").GetInt32());
-        Assert.Equal("waiting for batch-size tuning", specialistInfo.GetProperty("ConcurrencyState").GetString());
+        Assert.Equal("fixed connection budget", specialistInfo.GetProperty("ConcurrencyState").GetString());
     }
 
     [Fact]

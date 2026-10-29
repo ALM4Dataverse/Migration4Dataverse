@@ -125,6 +125,8 @@ public sealed class PowerShellDataverseHierarchyRecordReader : IHierarchyRecordR
 
     private readonly HierarchySourceLevel _level;
     private readonly IAsyncEnumerable<System.Management.Automation.PSObject> _recordStream;
+    private readonly string? _resumeKey;
+    private bool _resumeKeyFound;
     private IAsyncEnumerator<System.Management.Automation.PSObject>? _records;
     private JsonElement? _lookahead;
     private bool _disposed;
@@ -132,7 +134,8 @@ public sealed class PowerShellDataverseHierarchyRecordReader : IHierarchyRecordR
     public PowerShellDataverseHierarchyRecordReader(
         PowerShellScriptExecutor executor,
         HierarchySourceLevel level,
-        PowerShellDataverseSourceDefinition definition)
+        PowerShellDataverseSourceDefinition definition,
+        string? resumeKey = null)
     {
         ArgumentNullException.ThrowIfNull(executor);
         ArgumentNullException.ThrowIfNull(level);
@@ -145,6 +148,8 @@ public sealed class PowerShellDataverseHierarchyRecordReader : IHierarchyRecordR
         }
 
         _level = level;
+        _resumeKey = resumeKey;
+        _resumeKeyFound = resumeKey is null;
         _recordStream = executor.InvokeStreamingAsync(
             ReadRecordsScript,
             [
@@ -237,27 +242,52 @@ public sealed class PowerShellDataverseHierarchyRecordReader : IHierarchyRecordR
         }
 
         _records ??= _recordStream.GetAsyncEnumerator(cancellationToken);
-        if (!await _records.MoveNextAsync().ConfigureAwait(false))
+        while (await _records.MoveNextAsync().ConfigureAwait(false))
         {
-            return null;
+            if (_records.Current.BaseObject is not string json)
+            {
+                throw new InvalidDataException(
+                    $"Dataverse source for job '{_level.StepId}' returned a record that was not serialized as JSON.");
+            }
+
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException(
+                    $"Dataverse source for job '{_level.StepId}' returned a record that is not a JSON object.");
+            }
+
+            var record = document.RootElement.Clone();
+            RecordCount++;
+            if (!_resumeKeyFound)
+            {
+                var recordKey = GetKey(record);
+                var comparison = string.Compare(recordKey, _resumeKey, StringComparison.OrdinalIgnoreCase);
+                if (comparison < 0)
+                {
+                    continue;
+                }
+                if (comparison == 0)
+                {
+                    _resumeKeyFound = true;
+                    continue;
+                }
+
+                throw new InvalidDataException(
+                    $"Checkpoint key '{_resumeKey}' is missing from Dataverse source '{_level.StepId}'.");
+            }
+
+            _lookahead = record;
+            return _lookahead;
         }
 
-        if (_records.Current.BaseObject is not string json)
+        if (!_resumeKeyFound)
         {
             throw new InvalidDataException(
-                $"Dataverse source for job '{_level.StepId}' returned a record that was not serialized as JSON.");
+                $"Checkpoint key '{_resumeKey}' is missing from Dataverse source '{_level.StepId}'.");
         }
 
-        using var document = JsonDocument.Parse(json);
-        if (document.RootElement.ValueKind != JsonValueKind.Object)
-        {
-            throw new InvalidDataException(
-                $"Dataverse source for job '{_level.StepId}' returned a record that is not a JSON object.");
-        }
-
-        _lookahead = document.RootElement.Clone();
-        RecordCount++;
-        return _lookahead;
+        return null;
     }
 
     public JsonElement Take()
@@ -279,5 +309,28 @@ public sealed class PowerShellDataverseHierarchyRecordReader : IHierarchyRecordR
             }
             _disposed = true;
         }
+    }
+
+    private string GetKey(JsonElement record)
+    {
+        if (!record.TryGetProperty(_level.KeyProperty, out var keyElement))
+        {
+            throw new InvalidDataException(
+                $"A source row for job '{_level.StepId}' is missing key property '{_level.KeyProperty}'.");
+        }
+
+        var key = keyElement.ValueKind switch
+        {
+            JsonValueKind.String => keyElement.GetString(),
+            JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False => keyElement.ToString(),
+            _ => null
+        };
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            throw new InvalidDataException(
+                $"A source row for job '{_level.StepId}' has an invalid key in property '{_level.KeyProperty}'.");
+        }
+
+        return key;
     }
 }

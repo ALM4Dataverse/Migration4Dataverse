@@ -11,7 +11,7 @@
 
 Migration4Dataverse lets you describe a migration as PowerShell steps and run it with `Invoke-Migration`. Source and target connections are supplied separately from the step definitions. The engine handles batching, dependencies, local run history, and recovery.
 
-Supported connectors include CSV, JSON Lines, Parquet, SQLite, DuckDB, Dataverse, and custom PowerShell callbacks. A local dashboard can show run progress, outcomes, and optional captured-row lineage.
+Supported connectors include CSV, JSON Lines, Parquet, Excel, SQLite, DuckDB, SQL Server, PostgreSQL, MySQL, Oracle, Azure Blob, Amazon S3, Azure Data Lake Storage Gen2, Google Cloud Storage, HTTP/OData, Salesforce Sales Cloud, SharePoint lists, HubSpot, Zendesk, ServiceNow, MongoDB, Dataverse, and custom PowerShell callbacks. A local dashboard can show run progress, outcomes, and optional captured-row lineage.
 
 ## Why Migration4Dataverse?
 
@@ -37,7 +37,7 @@ pwsh ./examples/csv/example.ps1
 > [!NOTE]
 > The examples import the PowerShell module from this checkout. Build the solution in Release configuration before running them.
 
-The setup script prepares the sample input; the example reads it, transforms each row, and publishes one complete CSV output file after the run succeeds. For a different connector, choose one of the examples below.
+The setup script prepares the sample input; the example reads it, transforms each row, and publishes one complete CSV output file after the run succeeds. For a different connector, use the examples below as a template and see the connector guides for its connection objects and options.
 
 ## Define a migration
 
@@ -108,7 +108,7 @@ Start with the [migration basics](./docs/concepts/migration-basics.md) for a pla
 
 ## Example migrations
 
-Each target folder contains its own `Setup-Example.ps1` and `example.ps1`. The Dataverse example uses the full [Sample Sales CRM Data](https://www.kaggle.com/datasets/sushicatsan/sample-sales-crm-data) dataset; the other examples use generated Accounts data.
+Each target folder contains its own `Setup-Example.ps1` and `example.ps1`. The Dataverse example uses the full [Sample Sales CRM Data](https://www.kaggle.com/datasets/sushicatsan/sample-sales-crm-data) dataset; the other examples use small generated or handcrafted datasets, and the dashboard demo uses synthetic customer records.
 
 | Target | Example | Setup | Demonstrates |
 |---|---|---|---|

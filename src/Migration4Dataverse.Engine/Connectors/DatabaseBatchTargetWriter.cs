@@ -78,11 +78,36 @@ public sealed class DatabaseBatchTargetOptions
                         $"Database target '{stepId}' declares duplicate index name '{index.Name}'.");
                 }
             }
+            return;
         }
-        else if (KeyColumns is { Length: > 0 } || Indexes is { Length: > 0 })
+
+        if (Indexes is { Length: > 0 })
         {
             throw new NotSupportedException(
-                $"Database target '{stepId}' KeyColumns and Indexes are currently supported only for SQLite.");
+                $"Database target '{stepId}' Indexes are currently supported only for SQLite.");
+        }
+        if (KeyColumns is { Length: > 0 })
+        {
+            if (KeyColumns.Any(string.IsNullOrWhiteSpace) ||
+                KeyColumns.Distinct(StringComparer.OrdinalIgnoreCase).Count() != KeyColumns.Length)
+            {
+                throw new ArgumentException(
+                    $"Database target '{stepId}' KeyColumns must be distinct non-empty columns.");
+            }
+            if (Schema is not null)
+            {
+                var columnNames = Schema.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+                if (KeyColumns.Any(key => !columnNames.Contains(key)))
+                {
+                    throw new ArgumentException(
+                        $"Database target '{stepId}' KeyColumns must be columns declared in Schema.");
+                }
+            }
+        }
+        if (connectorType == "duckdb" && KeyColumns is { Length: > 0 })
+        {
+            throw new NotSupportedException(
+                $"Database target '{stepId}' KeyColumns are currently supported only for SQLite, SQL Server, PostgreSQL, MySQL, and Oracle.");
         }
     }
 }
@@ -112,10 +137,6 @@ public sealed class DatabaseIndexDefinition
 public static class DatabaseBatchTargetWriter
 {
     private const string BatchTableName = "__migration4dataverse_batches";
-    private const string CreateBatchTableSql =
-        "CREATE TABLE IF NOT EXISTS \"__migration4dataverse_batches\" (" +
-        "\"RunId\" VARCHAR NOT NULL, \"StepId\" VARCHAR NOT NULL, \"BatchId\" VARCHAR NOT NULL, " +
-        "\"PayloadHash\" VARCHAR NOT NULL, PRIMARY KEY (\"RunId\", \"StepId\", \"BatchId\"))";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -172,9 +193,7 @@ public static class DatabaseBatchTargetWriter
                 Execute(
                     connection,
                     transaction,
-                    $"CREATE TABLE {DatabaseConnectorSupport.QuoteTable(connectorType, tableName)} " +
-                    $"({string.Join(", ", declaredSchema.Select(column =>
-                        $"{QuoteIdentifier(column.Name)} {column.SqlType}"))})",
+                    GetCreateTableSql(connectorType, tableName, declaredSchema, options.KeyColumns),
                     options.CommandTimeoutSeconds);
                 actualSchema = ReadTableSchema(
                     connection,
@@ -249,7 +268,11 @@ public static class DatabaseBatchTargetWriter
         try
         {
             using var transaction = connection.BeginTransaction();
-            Execute(connection, transaction, CreateBatchTableSql, options.CommandTimeoutSeconds);
+            Execute(
+                connection,
+                transaction,
+                GetCreateBatchTableSql(connectorType),
+                options.CommandTimeoutSeconds);
 
             var payloadHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(recordsJson)));
             var quotedTable = DatabaseConnectorSupport.QuoteTable(connectorType, tableName);
@@ -273,8 +296,7 @@ public static class DatabaseBatchTargetWriter
                 Execute(
                     connection,
                     transaction,
-                    $"CREATE TABLE {quotedTable} ({string.Join(", ", schema.Select(column =>
-                        $"{QuoteIdentifier(column.Name)} {column.SqlType}"))})",
+                    GetCreateTableSql(connectorType, tableName, schema, options.KeyColumns),
                     options.CommandTimeoutSeconds);
                 tableSchema = ReadTableSchema(
                     connection,
@@ -319,7 +341,7 @@ public static class DatabaseBatchTargetWriter
                 quotedTable,
                 tableSchema,
                 records,
-                connectorType == "sqlite" ? options.KeyColumns : null,
+                options.KeyColumns,
                 options.CommandTimeoutSeconds);
             InsertBatchMarker(
                 connection,
@@ -407,13 +429,23 @@ public static class DatabaseBatchTargetWriter
                 }
                 else if (!string.Equals(inferredType, currentType, StringComparison.Ordinal))
                 {
-                    inferredType = connectorType == "sqlite" ? "NUMERIC" : "VARCHAR";
+                    inferredType = connectorType switch
+                    {
+                        "sqlite" => "NUMERIC",
+                        "sqlserver" => "NVARCHAR(MAX)",
+                        _ => "TEXT"
+                    };
                 }
             }
 
             columns.Add(new DatabaseColumn(
                 name,
-                inferredType ?? (connectorType == "sqlite" ? "TEXT" : "VARCHAR")));
+                inferredType ?? connectorType switch
+                {
+                    "sqlite" => "TEXT",
+                    "sqlserver" => "NVARCHAR(MAX)",
+                    _ => "TEXT"
+                }));
         }
         return columns;
     }
@@ -438,26 +470,17 @@ public static class DatabaseBatchTargetWriter
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandTimeout = commandTimeoutSeconds;
-        if (connectorType == "sqlite")
-        {
-            command.CommandText =
-                $"PRAGMA {QuoteIdentifier(schemaName)}.table_info({QuoteIdentifier(actualTableName)})";
-        }
-        else
-        {
-            command.CommandText =
-                "SELECT column_name, data_type FROM information_schema.columns " +
-                $"WHERE table_schema = {QuoteLiteral(schemaName)} " +
-                $"AND table_name = {QuoteLiteral(actualTableName)} ORDER BY ordinal_position";
-        }
+        command.CommandText = DatabaseConnectorSupport.GetSchemaQuery(
+            connectorType,
+            schemaName,
+            actualTableName);
 
         using var reader = command.ExecuteReader();
         var result = new List<DatabaseColumn>();
         while (reader.Read())
         {
-            var name = connectorType == "sqlite" ? reader.GetString(1) : reader.GetString(0);
-            var type = connectorType == "sqlite" ? reader.GetString(2) : reader.GetString(1);
-            result.Add(new DatabaseColumn(name, DatabaseConnectorSupport.NormalizeSqlType(type)));
+            var (name, type) = DatabaseConnectorSupport.ReadSchemaColumn(connectorType, reader);
+            result.Add(new DatabaseColumn(name, type));
         }
         return result;
     }
@@ -586,7 +609,8 @@ public static class DatabaseBatchTargetWriter
         {
             command.Transaction = transaction;
             command.CommandText =
-                $"PRAGMA {QuoteIdentifier(schemaName)}.index_list({QuoteIdentifier(actualTableName)})";
+                $"PRAGMA {DatabaseConnectorSupport.QuoteIdentifier("sqlite", schemaName)}." +
+                $"index_list({DatabaseConnectorSupport.QuoteIdentifier("sqlite", actualTableName)})";
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
@@ -603,7 +627,8 @@ public static class DatabaseBatchTargetWriter
             {
                 command.Transaction = transaction;
                 command.CommandText =
-                    $"PRAGMA {QuoteIdentifier(schemaName)}.index_info({QuoteIdentifier(name)})";
+                    $"PRAGMA {DatabaseConnectorSupport.QuoteIdentifier("sqlite", schemaName)}." +
+                    $"index_info({DatabaseConnectorSupport.QuoteIdentifier("sqlite", name)})";
                 using var reader = command.ExecuteReader();
                 while (reader.Read())
                 {
@@ -646,13 +671,16 @@ public static class DatabaseBatchTargetWriter
         int commandTimeoutSeconds)
     {
         var (schemaName, actualTableName) = DatabaseConnectorSupport.SplitTableName("sqlite", tableName);
-        var qualifiedIndex = $"{QuoteIdentifier(schemaName)}.{QuoteIdentifier(indexName)}";
-        var columnNames = string.Join(", ", columns.Select(QuoteIdentifier));
+        var qualifiedIndex =
+            $"{DatabaseConnectorSupport.QuoteIdentifier("sqlite", schemaName)}." +
+            $"{DatabaseConnectorSupport.QuoteIdentifier("sqlite", indexName)}";
+        var columnNames = string.Join(", ", columns.Select(column =>
+            DatabaseConnectorSupport.QuoteIdentifier("sqlite", column)));
         Execute(
             connection,
             transaction,
             $"CREATE {(unique ? "UNIQUE " : string.Empty)}INDEX {qualifiedIndex} " +
-            $"ON {QuoteIdentifier(actualTableName)} ({columnNames})",
+            $"ON {DatabaseConnectorSupport.QuoteIdentifier("sqlite", actualTableName)} ({columnNames})",
             commandTimeoutSeconds);
     }
 
@@ -661,6 +689,172 @@ public static class DatabaseBatchTargetWriter
         var identity = $"{tableName}\0{string.Join("\0", keyColumns)}";
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)))[..16].ToLowerInvariant();
         return $"UX_m4d_{hash}";
+    }
+
+    internal static string GetCreateBatchTableSql(string connectorType)
+    {
+        var table = DatabaseConnectorSupport.QuoteIdentifier(connectorType, BatchTableName);
+        var runId = DatabaseConnectorSupport.QuoteIdentifier(connectorType, "RunId");
+        var stepId = DatabaseConnectorSupport.QuoteIdentifier(connectorType, "StepId");
+        var batchId = DatabaseConnectorSupport.QuoteIdentifier(connectorType, "BatchId");
+        var payloadHash = DatabaseConnectorSupport.QuoteIdentifier(connectorType, "PayloadHash");
+        var stringType = DatabaseConnectorSupport.IsSqlServer(connectorType)
+            ? "NVARCHAR(100)"
+            : DatabaseConnectorSupport.IsOracle(connectorType)
+                ? "VARCHAR2(256)"
+                : DatabaseConnectorSupport.IsMySql(connectorType)
+                    ? "VARCHAR(128)"
+                    : "VARCHAR";
+        var columns =
+            $"{runId} {stringType} NOT NULL, {stepId} {stringType} NOT NULL, " +
+            $"{batchId} {stringType} NOT NULL, {payloadHash} {stringType} NOT NULL, " +
+            $"PRIMARY KEY ({runId}, {stepId}, {batchId})";
+        if (DatabaseConnectorSupport.IsSqlServer(connectorType))
+        {
+            return $"IF OBJECT_ID(N'{BatchTableName}', N'U') IS NULL CREATE TABLE {table} ({columns})";
+        }
+        if (DatabaseConnectorSupport.IsOracle(connectorType))
+        {
+            return "BEGIN" + Environment.NewLine +
+                $"    EXECUTE IMMEDIATE 'CREATE TABLE {table} ({columns})';" + Environment.NewLine +
+                "EXCEPTION" + Environment.NewLine +
+                "    WHEN OTHERS THEN" + Environment.NewLine +
+                "        IF SQLCODE != -955 THEN RAISE; END IF;" + Environment.NewLine +
+                "END;";
+        }
+        return $"CREATE TABLE IF NOT EXISTS {table} ({columns})";
+    }
+
+    private static string GetCreateTableSql(
+        string connectorType,
+        string tableName,
+        IReadOnlyList<DatabaseColumn> schema,
+        IReadOnlyList<string>? keyColumns)
+    {
+        var columns = schema
+            .Select(column =>
+                $"{DatabaseConnectorSupport.QuoteIdentifier(connectorType, column.Name)} {column.SqlType}")
+            .ToList();
+        if (keyColumns is { Count: > 0 } &&
+            (DatabaseConnectorSupport.IsPostgreSql(connectorType) ||
+             DatabaseConnectorSupport.IsSqlServer(connectorType) ||
+             DatabaseConnectorSupport.IsMySql(connectorType) ||
+             DatabaseConnectorSupport.IsOracle(connectorType)))
+        {
+            columns.Add(
+                $"PRIMARY KEY ({string.Join(", ", keyColumns.Select(key =>
+                    DatabaseConnectorSupport.QuoteIdentifier(connectorType, key)))})");
+        }
+        return $"CREATE TABLE {DatabaseConnectorSupport.QuoteTable(connectorType, tableName)} " +
+            $"({string.Join(", ", columns)})";
+    }
+
+    private static string BuildUpsertSql(
+        string connectorType,
+        string quotedTable,
+        IReadOnlyList<DatabaseColumn> schema,
+        IReadOnlyList<string>? keyColumns,
+        string[] names,
+        string[] parameterNames,
+        string insertSql)
+    {
+        if (keyColumns is not { Count: > 0 })
+        {
+            return insertSql;
+        }
+
+        var keySet = keyColumns.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var indexes = schema
+            .Select((column, index) => (column.Name, Index: index))
+            .ToDictionary(item => item.Name, item => item.Index, StringComparer.OrdinalIgnoreCase);
+        var conflictColumns = string.Join(", ", keyColumns.Select(key =>
+            DatabaseConnectorSupport.QuoteIdentifier(connectorType, key)));
+        var updateColumns = schema
+            .Where(column => !keySet.Contains(column.Name))
+            .Select(column =>
+            {
+                var quoted = DatabaseConnectorSupport.QuoteIdentifier(connectorType, column.Name);
+                return $"{quoted} = EXCLUDED.{quoted}";
+            })
+            .ToArray();
+
+        if (connectorType == "sqlite")
+        {
+            return insertSql + (updateColumns.Length == 0
+                ? $" ON CONFLICT ({conflictColumns}) DO NOTHING"
+                : $" ON CONFLICT ({conflictColumns}) DO UPDATE SET {string.Join(", ", updateColumns)}");
+        }
+
+        if (DatabaseConnectorSupport.IsPostgreSql(connectorType))
+        {
+            return insertSql + (updateColumns.Length == 0
+                ? $" ON CONFLICT ({conflictColumns}) DO NOTHING"
+                : $" ON CONFLICT ({conflictColumns}) DO UPDATE SET {string.Join(", ", updateColumns)}");
+        }
+
+        if (DatabaseConnectorSupport.IsMySql(connectorType))
+        {
+            var assignments = schema
+                .Where(column => !keySet.Contains(column.Name))
+                .Select(column =>
+                {
+                    var quoted = DatabaseConnectorSupport.QuoteIdentifier(connectorType, column.Name);
+                    return $"{quoted} = VALUES({quoted})";
+                })
+                .ToArray();
+            return assignments.Length == 0
+                ? $"{insertSql} ON DUPLICATE KEY UPDATE {DatabaseConnectorSupport.QuoteIdentifier(connectorType, keyColumns[0])} = {DatabaseConnectorSupport.QuoteIdentifier(connectorType, keyColumns[0])}"
+                : $"{insertSql} ON DUPLICATE KEY UPDATE {string.Join(", ", assignments)}";
+        }
+
+        if (DatabaseConnectorSupport.IsOracle(connectorType))
+        {
+            var where = string.Join(" AND ", keyColumns.Select(key =>
+                $"{DatabaseConnectorSupport.QuoteIdentifier(connectorType, key)} = {parameterNames[indexes[key]]}"));
+            var assignments = schema
+                .Where(column => !keySet.Contains(column.Name))
+                .Select(column =>
+                {
+                    var quoted = DatabaseConnectorSupport.QuoteIdentifier(connectorType, column.Name);
+                    return $"{quoted} = {parameterNames[indexes[column.Name]]}";
+                })
+                .ToArray();
+            if (assignments.Length == 0)
+            {
+                var firstKey = DatabaseConnectorSupport.QuoteIdentifier(connectorType, keyColumns[0]);
+                assignments = new[] { $"{firstKey} = {firstKey}" };
+            }
+            return "BEGIN" + Environment.NewLine +
+                $"    UPDATE {quotedTable} SET {string.Join(", ", assignments)} WHERE {where};" +
+                Environment.NewLine +
+                "    IF SQL%ROWCOUNT = 0 THEN" + Environment.NewLine +
+                $"        {insertSql};" + Environment.NewLine +
+                "    END IF;" + Environment.NewLine +
+                "END;";
+        }
+
+        if (DatabaseConnectorSupport.IsSqlServer(connectorType))
+        {
+            var where = string.Join(" AND ", keyColumns.Select(key =>
+                $"{DatabaseConnectorSupport.QuoteIdentifier(connectorType, key)} = {parameterNames[indexes[key]]}"));
+            var assignments = schema
+                .Where(column => !keySet.Contains(column.Name))
+                .Select(column =>
+                {
+                    var quoted = DatabaseConnectorSupport.QuoteIdentifier(connectorType, column.Name);
+                    return $"{quoted} = {parameterNames[indexes[column.Name]]}";
+                })
+                .ToArray();
+            if (assignments.Length == 0)
+            {
+                var firstKey = DatabaseConnectorSupport.QuoteIdentifier(connectorType, keyColumns[0]);
+                assignments = new[] { $"{firstKey} = {firstKey}" };
+            }
+            return $"UPDATE {quotedTable} SET {string.Join(", ", assignments)} WHERE {where};" +
+                $"{Environment.NewLine}IF @@ROWCOUNT = 0{Environment.NewLine}    {insertSql}";
+        }
+
+        return insertSql;
     }
 
     private static void InsertRecords(
@@ -676,25 +870,20 @@ public static class DatabaseBatchTargetWriter
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandTimeout = commandTimeoutSeconds;
-        var names = schema.Select(column => QuoteIdentifier(column.Name)).ToArray();
-        var parameterNames = schema.Select((_, index) => ParameterName(connectorType, $"p{index}")).ToArray();
-        command.CommandText =
+        var names = schema.Select(column => DatabaseConnectorSupport.QuoteIdentifier(connectorType, column.Name)).ToArray();
+        var parameterNames = schema
+            .Select((_, index) => DatabaseConnectorSupport.ParameterName(connectorType, $"p{index}"))
+            .ToArray();
+        var insertSql =
             $"INSERT INTO {quotedTable} ({string.Join(", ", names)}) VALUES ({string.Join(", ", parameterNames)})";
-        if (connectorType == "sqlite" && keyColumns is { Count: > 0 })
-        {
-            var conflictColumns = string.Join(", ", keyColumns.Select(QuoteIdentifier));
-            var updateColumns = schema
-                .Where(column => !keyColumns.Contains(column.Name, StringComparer.OrdinalIgnoreCase))
-                .Select(column =>
-                {
-                    var quotedColumn = QuoteIdentifier(column.Name);
-                    return $"{quotedColumn} = excluded.{quotedColumn}";
-                })
-                .ToArray();
-            command.CommandText += updateColumns.Length == 0
-                ? $" ON CONFLICT ({conflictColumns}) DO NOTHING"
-                : $" ON CONFLICT ({conflictColumns}) DO UPDATE SET {string.Join(", ", updateColumns)}";
-        }
+        command.CommandText = BuildUpsertSql(
+            connectorType,
+            quotedTable,
+            schema,
+            keyColumns,
+            names,
+            parameterNames,
+            insertSql);
         var parameters = schema.Select((_, index) =>
         {
             var parameter = command.CreateParameter();
@@ -731,11 +920,15 @@ public static class DatabaseBatchTargetWriter
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandTimeout = commandTimeoutSeconds;
+        var payloadHashColumn = DatabaseConnectorSupport.QuoteIdentifier(connectorType, "PayloadHash");
+        var runIdColumn = DatabaseConnectorSupport.QuoteIdentifier(connectorType, "RunId");
+        var stepIdColumn = DatabaseConnectorSupport.QuoteIdentifier(connectorType, "StepId");
+        var batchIdColumn = DatabaseConnectorSupport.QuoteIdentifier(connectorType, "BatchId");
         command.CommandText =
-            $"SELECT \"PayloadHash\" FROM {QuoteIdentifier(BatchTableName)} " +
-            $"WHERE \"RunId\" = {ParameterName(connectorType, "run")} " +
-            $"AND \"StepId\" = {ParameterName(connectorType, "step")} " +
-            $"AND \"BatchId\" = {ParameterName(connectorType, "batch")}";
+            $"SELECT {payloadHashColumn} FROM {DatabaseConnectorSupport.QuoteIdentifier(connectorType, BatchTableName)} " +
+            $"WHERE {runIdColumn} = {DatabaseConnectorSupport.ParameterName(connectorType, "run")} " +
+            $"AND {stepIdColumn} = {DatabaseConnectorSupport.ParameterName(connectorType, "step")} " +
+            $"AND {batchIdColumn} = {DatabaseConnectorSupport.ParameterName(connectorType, "batch")}";
         AddParameter(command, connectorType, "run", runId);
         AddParameter(command, connectorType, "step", stepId);
         AddParameter(command, connectorType, "batch", batchId);
@@ -756,11 +949,12 @@ public static class DatabaseBatchTargetWriter
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandTimeout = commandTimeoutSeconds;
-        command.CommandText =
-            $"INSERT INTO {QuoteIdentifier(BatchTableName)} " +
-            $"(\"RunId\", \"StepId\", \"BatchId\", \"PayloadHash\") VALUES " +
-            $"({ParameterName(connectorType, "run")}, {ParameterName(connectorType, "step")}, " +
-            $"{ParameterName(connectorType, "batch")}, {ParameterName(connectorType, "hash")})";
+        var quotedTable = DatabaseConnectorSupport.QuoteIdentifier(connectorType, BatchTableName);
+        var columns = string.Join(", ", new[] { "RunId", "StepId", "BatchId", "PayloadHash" }
+            .Select(column => DatabaseConnectorSupport.QuoteIdentifier(connectorType, column)));
+        var values = string.Join(", ", new[] { "run", "step", "batch", "hash" }
+            .Select(name => DatabaseConnectorSupport.ParameterName(connectorType, name)));
+        command.CommandText = $"INSERT INTO {quotedTable} ({columns}) VALUES ({values})";
         AddParameter(command, connectorType, "run", runId);
         AddParameter(command, connectorType, "step", stepId);
         AddParameter(command, connectorType, "batch", batchId);
@@ -789,21 +983,6 @@ public static class DatabaseBatchTargetWriter
             : name;
         parameter.Value = value;
         command.Parameters.Add(parameter);
-    }
-
-    private static string ParameterName(string connectorType, string name)
-    {
-        return connectorType == "duckdb" ? "?" : $"@{name}";
-    }
-
-    private static string QuoteLiteral(string value)
-    {
-        return $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
-    }
-
-    private static string QuoteIdentifier(string identifier)
-    {
-        return $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
     }
 
     private static void EnsureTargetNameIsNotReserved(string connectorType, string tableName)

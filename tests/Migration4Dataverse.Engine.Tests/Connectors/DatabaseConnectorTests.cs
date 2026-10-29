@@ -2,7 +2,11 @@ using System.Collections;
 using System.Text.Json;
 using DuckDB.NET.Data;
 using System.Management.Automation;
+using Microsoft.Data.SqlClient;
 using Microsoft.Data.Sqlite;
+using MySqlConnector;
+using Npgsql;
+using Oracle.ManagedDataAccess.Client;
 using Migration4Dataverse.Engine.Connectors;
 using Migration4Dataverse.Engine.PowerShell;
 using Migration4Dataverse.Engine.Scheduling;
@@ -14,13 +18,29 @@ namespace Migration4Dataverse.Engine.Tests.Connectors;
 public sealed class DatabaseConnectorTests
 {
     [Theory]
-    [InlineData("SQLite", typeof(SqliteConnection))]
-    [InlineData("DuckDB", typeof(DuckDBConnection))]
-    public void CreatesSupportedDatabaseConnections(string provider, Type expectedType)
+    [InlineData("SQLite", typeof(SqliteConnection), "Data Source=:memory:")]
+    [InlineData("DuckDB", typeof(DuckDBConnection), "Data Source=:memory:")]
+    [InlineData("SQLServer", typeof(SqlConnection), "Server=localhost;Database=test;Integrated Security=true")]
+    [InlineData("PostgreSQL", typeof(NpgsqlConnection), "Host=localhost;Database=test;Username=test;Password=test")]
+    [InlineData("MySQL", typeof(MySqlConnection), "Server=localhost;Database=test;User=test;Password=test")]
+    [InlineData("Oracle", typeof(OracleConnection), "User Id=test;Password=test;Data Source=localhost:1521/test")]
+    public void CreatesSupportedDatabaseConnections(string provider, Type expectedType, string connectionString)
     {
-        using var connection = MigrationDatabaseConnectionFactory.Create(provider, "Data Source=:memory:");
+        using var connection = MigrationDatabaseConnectionFactory.Create(provider, connectionString);
 
         Assert.IsType(expectedType, connection);
+    }
+
+    [Fact]
+    public void ValidatesConnectionProviderTypesWithoutSqlServerAliasing()
+    {
+        using var mysql = new MySqlConnection("Server=localhost;Database=test;User=test;Password=test");
+        using var sqlServer = new SqlConnection("Server=localhost;Database=test;Integrated Security=true");
+
+        DatabaseConnectorSupport.ValidateConnection("mysql", mysql, "target");
+        DatabaseConnectorSupport.ValidateConnection("sqlserver", sqlServer, "target");
+        Assert.Throws<ArgumentException>(
+            () => DatabaseConnectorSupport.ValidateConnection("sqlserver", mysql, "target"));
     }
 
     [Fact]
@@ -29,7 +49,10 @@ public sealed class DatabaseConnectorTests
         var exception = Assert.Throws<ArgumentOutOfRangeException>(
             () => MigrationDatabaseConnectionFactory.Create("Postgres", "Host=localhost"));
 
-        Assert.Contains("SQLite or DuckDB", exception.Message, StringComparison.Ordinal);
+        Assert.Contains(
+            "SQLite, DuckDB, SQL Server, PostgreSQL, MySQL, or Oracle",
+            exception.Message,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -879,5 +902,144 @@ public sealed class DatabaseConnectorTests
             GC.WaitForPendingFinalizers();
             Directory.Delete(Root, recursive: true);
         }
+    }
+
+    [Theory]
+    [InlineData("sqlserver", "[dbo].[records]", "[records]")]
+    [InlineData("postgresql", "\"public\".\"records\"", "\"records\"")]
+    [InlineData("mysql", "`records`", "`records`")]
+    [InlineData("oracle", "\"RECORDS\"", "\"RECORDS\"")]
+    [InlineData("sqlite", "\"main\".\"records\"", "\"records\"")]
+    [InlineData("duckdb", "\"main\".\"records\"", "\"records\"")]
+    public void QuotesDatabaseIdentifiers(string provider, string table, string identifier)
+    {
+        Assert.Equal(table, DatabaseConnectorSupport.QuoteTable(provider, "records"));
+        Assert.Equal(identifier, DatabaseConnectorSupport.QuoteIdentifier(provider, "records"));
+    }
+
+    [Theory]
+    [InlineData("sqlserver", "NVARCHAR(MAX)", "NVARCHAR(MAX)")]
+    [InlineData("sqlserver", "int", "INT")]
+    [InlineData("sqlserver", "decimal(18,2)", "DECIMAL(18,2)")]
+    [InlineData("postgresql", "character varying(100)", "VARCHAR(100)")]
+    [InlineData("postgresql", "timestamp with time zone", "TIMESTAMPTZ")]
+    [InlineData("postgresql", "double precision", "DOUBLEPRECISION")]
+    [InlineData("mysql", "boolean", "TINYINT")]
+    [InlineData("mysql", "varchar(100)", "VARCHAR(100)")]
+    [InlineData("mysql", "decimal(18,2)", "DECIMAL(18,2)")]
+    [InlineData("oracle", "varchar2(100)", "VARCHAR2(100)")]
+    [InlineData("oracle", "number(18,2)", "NUMBER(18,2)")]
+    [InlineData("oracle", "timestamp", "TIMESTAMP(6)")]
+    [InlineData("oracle", "timestamp(6)", "TIMESTAMP(6)")]
+    [InlineData("oracle", "timestamp(6) with time zone", "TIMESTAMPWITHTIMEZONE")]
+    [InlineData("oracle", "interval day(2) to second(6)", "INTERVALDAY(2)TOSECOND(6)")]
+    public void NormalizesProviderSchemaTypes(string provider, string declared, string expected)
+    {
+        Assert.Equal(
+            expected,
+            DatabaseConnectorSupport.NormalizeSchemaType(provider, declared));
+    }
+
+    [Theory]
+    [InlineData("sqlserver", "NVARCHAR", -1L, null, null, "NVARCHAR(MAX)")]
+    [InlineData("sqlserver", "DECIMAL", null, 18, 2, "DECIMAL(18,2)")]
+    [InlineData("postgresql", "VARCHAR", 100L, null, null, "VARCHAR(100)")]
+    [InlineData("mysql", "VARCHAR", 100L, null, null, "VARCHAR(100)")]
+    [InlineData("mysql", "TINYINT", null, 3, 0, "TINYINT")]
+    [InlineData("oracle", "VARCHAR2", 100L, null, null, "VARCHAR2(100)")]
+    [InlineData("oracle", "NUMBER", null, 18, 2, "NUMBER(18,2)")]
+    [InlineData("oracle", "TIMESTAMP(6)", null, null, 6, "TIMESTAMP(6)")]
+    [InlineData("oracle", "INTERVAL DAY(2) TO SECOND(6)", null, null, null, "INTERVALDAY(2)TOSECOND(6)")]
+    public void BuildsProviderSchemaTypesFromCatalogMetadata(
+        string provider,
+        string dataType,
+        long? maxLength,
+        int? precision,
+        int? scale,
+        string expected)
+    {
+        Assert.Equal(
+            expected,
+            DatabaseConnectorSupport.BuildSchemaType(provider, dataType, maxLength, precision, scale));
+    }
+
+    [Theory]
+    [InlineData("sqlserver", "NVARCHAR(MAX)")]
+    [InlineData("sqlserver", "DATETIMEOFFSET")]
+    [InlineData("postgresql", "UUID")]
+    [InlineData("postgresql", "NUMERIC(18,2)")]
+    [InlineData("mysql", "TINYINT(1)")]
+    [InlineData("mysql", "JSON")]
+    [InlineData("oracle", "VARCHAR2(100)")]
+    [InlineData("oracle", "NUMBER(18,2)")]
+    [InlineData("oracle", "TIMESTAMP WITH TIME ZONE")]
+    [InlineData("oracle", "INTERVAL DAY(2) TO SECOND(6)")]
+    public void AcceptsProviderSqlTypes(string provider, string type)
+    {
+        Assert.Equal(
+            DatabaseConnectorSupport.NormalizeSqlType(type),
+            DatabaseConnectorSupport.ValidateSqlType(provider, "column", type));
+    }
+
+    [Theory]
+    [InlineData("sqlserver", "GEOGRAPHY")]
+    [InlineData("postgresql", "MONEY")]
+    [InlineData("mysql", "GEOGRAPHY")]
+    [InlineData("oracle", "GEOGRAPHY")]
+    public void RejectsUnsupportedProviderSqlTypes(string provider, string type)
+    {
+        Assert.Throws<ArgumentException>(
+            () => DatabaseConnectorSupport.ValidateSqlType(provider, "column", type));
+    }
+
+    [Theory]
+    [InlineData("sqlserver", "NVARCHAR(100)")]
+    [InlineData("postgresql", "VARCHAR")]
+    [InlineData("mysql", "VARCHAR(128)")]
+    [InlineData("oracle", "VARCHAR2(256)")]
+    [InlineData("sqlite", "VARCHAR")]
+    [InlineData("duckdb", "VARCHAR")]
+    public void BatchLedgerUsesProviderSafeStringTypes(string provider, string expectedType)
+    {
+        var sql = DatabaseBatchTargetWriter.GetCreateBatchTableSql(provider);
+
+        Assert.Contains($"{expectedType} NOT NULL", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NewDatabaseTargetsAllowOptionalSchemaAndRejectIndexes()
+    {
+        var options = new DatabaseBatchTargetOptions
+        {
+            KeyColumns = new[] { "id" },
+            Schema = new Dictionary<string, string>
+            {
+                ["id"] = "BIGINT",
+                ["name"] = "NVARCHAR(100)"
+            }
+        };
+        options.Validate("sqlserver", "Target");
+
+        Assert.Throws<NotSupportedException>(() => new DatabaseBatchTargetOptions
+        {
+            Indexes = new[] { new DatabaseIndexDefinition { Name = "IX_name", Columns = new[] { "name" } } }
+        }.Validate("postgresql", "Target"));
+    }
+
+    [Fact]
+    public void SqlServerSourceCountRequiresOverrideForOrderedQueries()
+    {
+        var options = new DatabaseSourceOptions
+        {
+            Query = "SELECT id FROM records ORDER BY id"
+        };
+
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => options.GetCountQuery("sqlserver"));
+
+        Assert.Contains("CountQuery", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(
+            "SELECT COUNT(*) FROM (SELECT id FROM records ORDER BY id) AS __migration_count",
+            options.GetCountQuery("postgresql"));
     }
 }

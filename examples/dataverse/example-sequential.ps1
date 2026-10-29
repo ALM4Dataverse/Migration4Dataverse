@@ -63,7 +63,7 @@ $steps = @(
             param($row)
             $sourceId = [string]$row.id
             @{
-                new_salesforceid = $sourceId
+                new_salesforceid = "run2-$sourceId"
                 new_name = [string]$row.name
                 new_sourcerowjson = ConvertTo-Json -InputObject $row -Depth 8 -Compress
             }
@@ -77,10 +77,9 @@ $steps = @(
         Target = @{
             Type = 'dataverse'
             ConnectionId = 'example-dataverse'
-            MaxConcurrency = 'auto'
             Table = 'new_m4dsalesuser'
             Operation = 'Upsert'
-            BatchSize = 'auto'
+            BatchSize = 10
             Options = @{
                 MatchOn = ,@('new_salesforceid')
             }
@@ -108,7 +107,7 @@ $steps = @(
             param($row)
             $sourceId = [string]$row.id
             @{
-                new_salesforceid = $sourceId
+                new_salesforceid = "run2-$sourceId"
                 new_sourceownerid = [string]$row.owner_id
                 new_sourcerowjson = ConvertTo-Json -InputObject $row -Depth 8 -Compress
                 name = [string]$row.name
@@ -129,10 +128,9 @@ $steps = @(
         Target = @{
             Type = 'dataverse'
             ConnectionId = 'example-dataverse'
-            MaxConcurrency = 'auto'
             Table = 'account'
             Operation = 'Upsert'
-            BatchSize = 'auto'
+            BatchSize = 10
             Options = @{
                 MatchOn = ,@('new_salesforceid')
             }
@@ -181,7 +179,7 @@ $steps = @(
             $sourceId = [string]$row.id
             $subject = '{0} {1} - {2}' -f $row.first_name, $row.last_name, $row.company
             @{
-                new_salesforceid = $sourceId
+                new_salesforceid = "run2-$sourceId"
                 new_sourceownerid = [string]$row.owner_id
                 new_sourcerowjson = ConvertTo-Json -InputObject $row -Depth 8 -Compress
                 subject = $subject
@@ -201,10 +199,9 @@ $steps = @(
         Target = @{
             Type = 'dataverse'
             ConnectionId = 'example-dataverse'
-            MaxConcurrency = 'auto'
             Table = 'lead'
             Operation = 'Upsert'
-            BatchSize = 'auto'
+            BatchSize = 10
             Options = @{
                 MatchOn = ,@('new_salesforceid')
             }
@@ -235,7 +232,7 @@ $steps += @(
         Script = {
             param($row)
             $fields = [ordered]@{
-                new_salesforceid = [string]$row.id
+                new_salesforceid = "run2-$([string]$row.id)"
                 new_sourceownerid = [string]$row.owner_id
                 new_sourcerowjson = ConvertTo-Json -InputObject $row -Depth 8 -Compress
                 firstname = [string]$row.first_name
@@ -249,7 +246,7 @@ $steps += @(
             if (-not [string]::IsNullOrWhiteSpace($accountId)) {
                 $fields.parentcustomerid = @{
                     TableName = 'account'
-                    KeyAttributes = @{ new_salesforceid = $accountId }
+                    KeyAttributes = @{ new_salesforceid = "run2-$accountId" }
                 }
             }
             $fields
@@ -263,10 +260,9 @@ $steps += @(
         Target = @{
             Type = 'dataverse'
             ConnectionId = 'example-dataverse'
-            MaxConcurrency = 'auto'
             Table = 'contact'
             Operation = 'Upsert'
-            BatchSize = 'auto'
+            BatchSize = 10
             Options = @{
                 MatchOn = ,@('new_salesforceid')
             }
@@ -296,7 +292,7 @@ $steps += @(
             $opportunity = $row
             $accountId = [string]$opportunity.account_id
             $fields = [ordered]@{
-                new_salesforceid = [string]$opportunity.id
+                new_salesforceid = "run2-$([string]$opportunity.id)"
                 new_sourceownerid = [string]$opportunity.owner_id
                 new_sourcerowjson = ConvertTo-Json -InputObject $opportunity -Depth 8 -Compress
                 name = [string]$opportunity.name
@@ -307,14 +303,14 @@ $steps += @(
             if (-not [string]::IsNullOrWhiteSpace($accountId)) {
                 $fields.accountid = @{
                     TableName = 'account'
-                    KeyAttributes = @{ new_salesforceid = $accountId }
+                    KeyAttributes = @{ new_salesforceid = "run2-$accountId" }
                 }
             }
             $leadId = [string]$opportunity.lead_source_id
             if (-not [string]::IsNullOrWhiteSpace($leadId)) {
                 $fields.originatingleadid = @{
                     TableName = 'lead'
-                    KeyAttributes = @{ new_salesforceid = $leadId }
+                    KeyAttributes = @{ new_salesforceid = "run2-$leadId" }
                 }
             }
             $fields
@@ -328,10 +324,9 @@ $steps += @(
         Target = @{
             Type = 'dataverse'
             ConnectionId = 'example-dataverse'
-            MaxConcurrency = 'auto'
             Table = 'opportunity'
             Operation = 'CreateOrUpdateIfNeeded'
-            BatchSize = 'auto'
+            BatchSize = 10
             Options = @{
                 MatchOn = ,@('new_salesforceid')
             }
@@ -388,20 +383,20 @@ $steps += @(
                 throw "Salesforce order '$sourceId' has no account_id and cannot be mapped to a Dataverse order."
             }
             $orderFields = [ordered]@{
-                new_salesforceid = $sourceId
+                new_salesforceid = "run2-$sourceId"
                 new_sourceownerid = [string]$order.owner_id
                 new_sourcerowjson = ConvertTo-Json -InputObject $order -Depth 8 -Compress
                 name = [string]$order.order_number
                 customerid = @{
                     TableName = 'account'
-                    KeyAttributes = @{ new_salesforceid = $accountId }
+                    KeyAttributes = @{ new_salesforceid = "run2-$accountId" }
                 }
             }
             $opportunityId = [string]$order.opportunity_id
             if (-not [string]::IsNullOrWhiteSpace($opportunityId)) {
                 $orderFields.opportunityid = @{
                     TableName = 'opportunity'
-                    KeyAttributes = @{ new_salesforceid = $opportunityId }
+                    KeyAttributes = @{ new_salesforceid = "run2-$opportunityId" }
                 }
             }
             # The configured Dataverse organization has one active price list.
@@ -421,10 +416,9 @@ $steps += @(
         Target = @{
             Type = 'dataverse'
             ConnectionId = 'example-dataverse'
-            MaxConcurrency = 'auto'
             Table = 'salesorder'
             Operation = 'Upsert'
-            BatchSize = 'auto'
+            BatchSize = 10
             Options = @{
                 MatchOn = ,@('new_salesforceid')
             }
@@ -456,11 +450,11 @@ $steps += @(
             param($row)
             $sourceId = [string]$row.id
             @{
-                new_salesforceid = $sourceId
+                new_salesforceid = "run2-$sourceId"
                 new_sourcerowjson = ConvertTo-Json -InputObject $row -Depth 8 -Compress
                 salesorderid = @{
                     TableName = 'salesorder'
-                    KeyAttributes = @{ new_salesforceid = [string]$row.order_id }
+                    KeyAttributes = @{ new_salesforceid = "run2-$([string]$row.order_id)" }
                 }
                 isproductoverridden = $true
                 productdescription = [string]$row.product_name
@@ -477,10 +471,9 @@ $steps += @(
         Target = @{
             Type = 'dataverse'
             ConnectionId = 'example-dataverse'
-            MaxConcurrency = 'auto'
             Table = 'salesorderdetail'
             Operation = 'Upsert'
-            BatchSize = 'auto'
+            BatchSize = 10
             Options = @{
                 MatchOn = ,@('new_salesforceid')
             }
@@ -504,15 +497,32 @@ $steps += @(
         }
     }
     @{
+        # Builds run2 lookup keys without altering the captured source row.
+        Id = 'TasksJoinKeys'
+        Type = 'transform'
+        Inputs = @('TasksSource')
+        Script = {
+            param($row)
+            $fields = [ordered]@{}
+            foreach ($property in $row.PSObject.Properties) {
+                $fields[$property.Name] = $property.Value
+            }
+            $fields._sourceRowJson = ConvertTo-Json -InputObject $row -Depth 8 -Compress
+            $whatId = [string]$row.what_id
+            $fields.run2_what_id = if ([string]::IsNullOrWhiteSpace($whatId)) { $null } else { "run2-$whatId" }
+            $fields
+        }
+    }
+    @{
         # Resolves task account references while retaining tasks without an account match.
         Id = 'JoinTaskAccounts'
         Type = 'join'
         Inputs = @(
-            @{ Job = 'TasksSource'; As = 'Task' }
+            @{ Job = 'TasksJoinKeys'; As = 'Task' }
             @{
                 Job = 'AccountsLookupSource'
                 As = 'Account'
-                Keys = @(@{ Child = 'what_id'; Parent = 'new_salesforceid' })
+                Keys = @(@{ Child = 'run2_what_id'; Parent = 'new_salesforceid' })
             }
         )
         JoinType = 'left'
@@ -526,7 +536,7 @@ $steps += @(
             @{
                 Job = 'OpportunitiesLookupSource'
                 As = 'Opportunity'
-                Keys = @(@{ Child = 'Task.what_id'; Parent = 'new_salesforceid' })
+                Keys = @(@{ Child = 'TaskAccount.Task.run2_what_id'; Parent = 'new_salesforceid' })
             }
         )
         JoinType = 'left'
@@ -539,10 +549,11 @@ $steps += @(
         Script = {
             param($row)
             $task = $row.TaskAccount.Task
+            $sourceId = [string]$task.id
             $fields = [ordered]@{
-                new_salesforceid = [string]$task.id
+                new_salesforceid = "run2-$sourceId"
                 new_sourceownerid = [string]$task.owner_id
-                new_sourcerowjson = ConvertTo-Json -InputObject $task -Depth 8 -Compress
+                new_sourcerowjson = [string]$task._sourceRowJson
                 subject = [string]$task.subject
                 prioritycode = [string]$task.priority
                 scheduledend = [datetime]::ParseExact([string]$task.activity_date, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
@@ -578,10 +589,9 @@ $steps += @(
         Target = @{
             Type = 'dataverse'
             ConnectionId = 'example-dataverse'
-            MaxConcurrency = 'auto'
             Table = 'task'
             Operation = 'Upsert'
-            BatchSize = 'auto'
+            BatchSize = 10
             Options = @{
                 MatchOn = ,@('new_salesforceid')
             }
@@ -602,15 +612,32 @@ $steps += @(
         }
     }
     @{
+        # Builds run2 lookup keys without altering the captured source row.
+        Id = 'EventsJoinKeys'
+        Type = 'transform'
+        Inputs = @('EventsSource')
+        Script = {
+            param($row)
+            $fields = [ordered]@{}
+            foreach ($property in $row.PSObject.Properties) {
+                $fields[$property.Name] = $property.Value
+            }
+            $fields._sourceRowJson = ConvertTo-Json -InputObject $row -Depth 8 -Compress
+            $whatId = [string]$row.what_id
+            $fields.run2_what_id = if ([string]::IsNullOrWhiteSpace($whatId)) { $null } else { "run2-$whatId" }
+            $fields
+        }
+    }
+    @{
         # Resolves event account references while retaining events without an account match.
         Id = 'JoinEventAccounts'
         Type = 'join'
         Inputs = @(
-            @{ Job = 'EventsSource'; As = 'Event' }
+            @{ Job = 'EventsJoinKeys'; As = 'Event' }
             @{
                 Job = 'AccountsLookupSource'
                 As = 'Account'
-                Keys = @(@{ Child = 'what_id'; Parent = 'new_salesforceid' })
+                Keys = @(@{ Child = 'run2_what_id'; Parent = 'new_salesforceid' })
             }
         )
         JoinType = 'left'
@@ -624,7 +651,7 @@ $steps += @(
             @{
                 Job = 'OpportunitiesLookupSource'
                 As = 'Opportunity'
-                Keys = @(@{ Child = 'Event.what_id'; Parent = 'new_salesforceid' })
+                Keys = @(@{ Child = 'EventAccount.Event.run2_what_id'; Parent = 'new_salesforceid' })
             }
         )
         JoinType = 'left'
@@ -637,10 +664,11 @@ $steps += @(
         Script = {
             param($row)
             $event = $row.EventAccount.Event
+            $sourceId = [string]$event.id
             $fields = [ordered]@{
-                new_salesforceid = [string]$event.id
+                new_salesforceid = "run2-$sourceId"
                 new_sourceownerid = [string]$event.owner_id
-                new_sourcerowjson = ConvertTo-Json -InputObject $event -Depth 8 -Compress
+                new_sourcerowjson = [string]$event._sourceRowJson
                 subject = [string]$event.subject
                 scheduledstart = [datetime]::Parse([string]$event.start_datetime, [Globalization.CultureInfo]::InvariantCulture)
                 scheduledend = [datetime]::Parse([string]$event.end_datetime, [Globalization.CultureInfo]::InvariantCulture)
@@ -678,10 +706,9 @@ $steps += @(
         Target = @{
             Type = 'dataverse'
             ConnectionId = 'example-dataverse'
-            MaxConcurrency = 'auto'
             Table = 'appointment'
             Operation = 'Upsert'
-            BatchSize = 'auto'
+            BatchSize = 10
             Options = @{
                 MatchOn = ,@('new_salesforceid')
             }
@@ -695,8 +722,8 @@ $dashboard = Start-MigrationDashboard -DatabasePath $databasePath
 try {
     Write-Host 'Migration dashboard is available at:'
     Write-Host "  $($dashboard.Url)"
-    # Auto-tuned Dataverse limits are reused by target step ID from this database on later runs.
-    # Clear one or all saved profiles with Clear-MigrationTargetTuning when retuning is needed.
+    # Dataverse target batch size and concurrency are fixed for the run; legacy tuning profiles are ignored.
+    # Clear legacy profiles from older versions with Clear-MigrationTargetTuning if needed.
     Invoke-Migration `
         -DatabasePath $databasePath `
         -RunName $runName `

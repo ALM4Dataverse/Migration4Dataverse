@@ -2,6 +2,12 @@
 
 Starts the local owner for a file-backed migration database and keeps the PowerShell process alive until stopped. The owner is the only Migration4Dataverse process that opens that database; other module processes use same-user local IPC for store operations.
 
+## Parameters
+
+| Parameter | Required | Default / validation | Description |
+|---|---:|---|---|
+| `-DatabasePath` | Yes | Non-empty path | File-backed SQLite migration database to own. |
+
 ```powershell
 Start-MigrationDatabaseServer -DatabasePath './state/migration.sqlite3'
 ```

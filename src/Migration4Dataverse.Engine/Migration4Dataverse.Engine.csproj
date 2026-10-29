@@ -14,16 +14,26 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="AWSSDK.S3" Version="4.0.104.7" />
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.30.1" />
+    <PackageReference Include="Azure.Storage.Files.DataLake" Version="12.28.0" />
     <PackageReference Include="CsvHelper" Version="33.1.0" />
     <PackageReference Include="DuckDB.NET.Data.Full" Version="1.5.6.1" />
+    <PackageReference Include="ExcelDataReader" Version="3.9.0" />
+    <PackageReference Include="Google.Cloud.Storage.V1" Version="5.0.0" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.1.1" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.13" />
     <PackageReference Include="Microsoft.PowerShell.SDK" Version="7.6.7" />
+    <PackageReference Include="MongoDB.Driver" Version="3.13.0" />
+    <PackageReference Include="MySqlConnector" Version="2.6.2" />
+    <PackageReference Include="Npgsql" Version="10.0.3" />
+    <PackageReference Include="Oracle.ManagedDataAccess.Core" Version="23.26.400" />
     <PackageReference Include="Parquet.Net" Version="6.1.0" />
     <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
     <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.13" />
   </ItemGroup>
 
-  <Target Name="BuildMigrationDashboardUi" BeforeTargets="PrepareForBuild" Inputs="$(DashboardProjectDirectory)/package.json;$(DashboardProjectDirectory)/package-lock.json;$(DashboardProjectDirectory)/index.html;$(DashboardProjectDirectory)/vite.config.ts;$(DashboardProjectDirectory)/tsconfig.json;$(DashboardProjectDirectory)/src/main.tsx;$(DashboardProjectDirectory)/src/App.tsx;$(DashboardProjectDirectory)/src/styles.css;$(DashboardProjectDirectory)/public/logo.png" Outputs="$(DashboardDistDirectory)/index.html">
+  <Target Name="BuildMigrationDashboardUi" BeforeTargets="PrepareForBuild" Inputs="$(DashboardProjectDirectory)/package.json;$(DashboardProjectDirectory)/package-lock.json;$(DashboardProjectDirectory)/index.html;$(DashboardProjectDirectory)/vite.config.ts;$(DashboardProjectDirectory)/tsconfig.json;$(DashboardProjectDirectory)/src/**/*.*;$(DashboardProjectDirectory)/public/**/*.*" Outputs="$(DashboardDistDirectory)/index.html">
     <Exec WorkingDirectory="$(DashboardProjectDirectory)" Command="npm ci" />
     <Exec WorkingDirectory="$(DashboardProjectDirectory)" Command="npm run build" />
   </Target>

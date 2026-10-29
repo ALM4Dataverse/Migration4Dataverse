@@ -12,7 +12,7 @@ This page indexes the supported PowerShell migration contract. Use the linked pa
 | Step type | Purpose |
 |---|---|
 | `source` | Read rows from a built-in or custom connector. |
-| `transform` | Map each input row with PowerShell or an engine-managed SQLite/DuckDB transform; both database providers support per-batch and whole-dataset SQL. |
+| `transform` | Map input with PowerShell or an engine-managed SQLite/DuckDB transform; database transforms support per-row scripts, per-batch SQL, and whole-dataset SQL. |
 | `filter` | Keep or discard each input row. |
 | `append` | Concatenate two or more row streams without deduplicating. |
 | `join` | Match a child stream to a keyed source or Dataverse target stream. |
@@ -28,7 +28,7 @@ Start with [step configuration](./configuration.md). For keyed dependencies, joi
 - [`Get-MigrationRun`](./cmdlets/get-migration-run.md) — list or inspect saved runs.
 - [Migration dashboard](./cmdlets/migration-dashboard.md) — view run history, progress, and optional row lineage.
 - [`Start-MigrationDatabaseServer`](./cmdlets/migration-database-server.md) — keep a local database owner available to multiple PowerShell processes.
-- [`Clear-MigrationTargetTuning`](./cmdlets/clear-migration-target-tuning.md) — clear saved Dataverse tuning profiles.
+- [`Clear-MigrationTargetTuning`](./cmdlets/clear-migration-target-tuning.md) — remove legacy Dataverse tuning profiles from older databases.
 
 The lower-level store functions are listed in the [cmdlet index](./cmdlets/README.md); ordinary migrations do not need to call them directly.
 
@@ -38,6 +38,16 @@ The lower-level store functions are listed in the [cmdlet index](./cmdlets/READM
 - [Target connectors](./connectors/targets/README.md)
 - [SQLite source SQL and parameters](./connectors/sources/sqlite.md)
 - [SQLite target schema, keys, indexes, and upsert](./connectors/targets/sqlite.md)
+- [SQL Server, PostgreSQL, MySQL, and Oracle](./connectors/sql-databases.md)
+- [Azure Blob, Amazon S3, ADLS Gen2, and Google Cloud Storage](./connectors/object-storage.md)
+- [HTTP and OData sources](./connectors/http.md)
+- [Salesforce Sales Cloud source](./connectors/sources/salesforce.md)
+- [Excel source](./connectors/sources/excel.md)
+- [SharePoint list source](./connectors/sources/sharepoint.md)
+- [HubSpot source](./connectors/sources/hubspot.md)
+- [Zendesk source](./connectors/sources/zendesk.md)
+- [ServiceNow source](./connectors/sources/servicenow.md)
+- [MongoDB source and target](./connectors/mongodb.md)
 - [Custom source callbacks](./connectors/sources/custom.md)
 - [Custom target callbacks](./connectors/targets/custom.md)
 - [Connections and callback execution](./concepts/connections-and-callbacks.md)
@@ -47,6 +57,7 @@ For Dataverse, these pages describe the Migration4Dataverse adapter only:
 
 - [Dataverse source](./connectors/sources/dataverse.md)
 - [Dataverse target](./connectors/targets/dataverse.md)
+- A Dataverse `ConnectionId` may resolve to a single connection or a per-run connection array shared by typed sources and targets; root Dataverse sources may define explicit query partitions. See the [source guide](./connectors/sources/dataverse.md#parallel-source-partitions) and [target guide](./connectors/targets/dataverse.md#connections-and-request-balancing).
 
 The complete upstream cmdlet and concept references are maintained by [`Rnwood.Dataverse.Data.PowerShell`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell):
 

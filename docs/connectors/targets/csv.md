@@ -23,7 +23,7 @@ Target = @{
 
 ## Options
 
-Defaults are shown below. `ColumnTypes` accepts `string` (default), `bool`/`boolean`, `byte`, `short`/`int16`, `int`/`int32`, `long`/`int64`, `float`/`single`, `double`, `decimal`, `guid`, `date`, `datetime`, `datetimeoffset`, `json`, and `binary`.
+Defaults are shown below. The source-reader `ColumnTypes` option accepts `string` (default), `bool`/`boolean`, `byte`, `short`/`int16`, `int`/`int32`, `long`/`int64`, `float`/`single`, `double`, `decimal`, `guid`, `date`, `datetime`, `datetimeoffset`, `json`, and `binary`.
 
 | Option | Default | Target behavior |
 |---|---|---|
@@ -37,11 +37,11 @@ Defaults are shown below. `ColumnTypes` accepts `string` (default), `bool`/`bool
 | `WriteHeaderRecord` | `true` | Include one configured column-name header at the beginning of the output file. |
 | `Headers` | `null` | Source-reader option for inputs without a header row. |
 | `Columns` | `null` | Source projection; not a target schema. |
-| `ColumnTypes` | `{}` | Source conversion map; target fields are formatted from mapped values. |
+| `ColumnTypes` | `{}` | Source-reader conversion map only; target output is formatted from the mapped record values. |
 | `NullValues` | `[]` | Source values treated as null. |
 | `NullValue` | `""` | Text written for a null field. |
 | `EmptyFieldAsNull` | `false` | Source-reader null handling. |
-| `Culture` | `InvariantCulture` | Culture used by the CSV parser and writer. |
+| `Culture` | `InvariantCulture` | Culture used when parsing source CSV; target values are written from their mapped JSON text. |
 | `NewLine` | LF (`\n`) | Output record separator. Allowed: LF, CR, CRLF. |
 | `IgnoreBlankLines` | `true` | Source-reader behavior. |
 | `AllowComments` | `false` | Source-reader comment-line handling. |

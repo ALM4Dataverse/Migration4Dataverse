@@ -11,6 +11,7 @@ namespace Migration4Dataverse.Engine.PowerShell;
 public sealed class PowerShellScriptExecutor : IDisposable
 {
     private readonly RunspacePool _runspacePool;
+    private readonly string[] _modulesToImport;
     private readonly string[] _sharedScripts;
     private readonly PSModuleInfo[] _resolvedRequiredModules;
     private bool _disposed;
@@ -27,20 +28,21 @@ public sealed class PowerShellScriptExecutor : IDisposable
         }
 
         _sharedScripts = sharedScripts?.ToArray() ?? Array.Empty<string>();
+        MaxRunspaces = maxRunspaces;
         _resolvedRequiredModules = ResolveRequiredModules(requiredModules);
         var initialSessionState = InitialSessionState.CreateDefault2();
         initialSessionState.Assemblies.Add(
             new SessionStateAssemblyEntry(typeof(Microsoft.Data.Sqlite.SqliteConnection).Assembly.Location));
         initialSessionState.Assemblies.Add(
             new SessionStateAssemblyEntry(typeof(DuckDB.NET.Data.DuckDBConnection).Assembly.Location));
-        var modules = (modulesToImport ?? Array.Empty<string>())
+        _modulesToImport = (modulesToImport ?? Array.Empty<string>())
             .Where(module => !string.IsNullOrWhiteSpace(module))
             .Concat(_resolvedRequiredModules.Select(module => module.Path))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        if (modules is { Length: > 0 })
+        if (_modulesToImport.Length > 0)
         {
-            initialSessionState.ImportPSModule(modules);
+            initialSessionState.ImportPSModule(_modulesToImport);
         }
 
         _runspacePool = RunspaceFactory.CreateRunspacePool(initialSessionState);
@@ -54,6 +56,8 @@ public sealed class PowerShellScriptExecutor : IDisposable
     }
 
     public IReadOnlyList<PSModuleInfo> ResolvedRequiredModules => _resolvedRequiredModules;
+
+    public int MaxRunspaces { get; }
 
     public IReadOnlyList<PSObject> Invoke(string script, IReadOnlyList<object?>? arguments = null)
     {
@@ -257,13 +261,23 @@ public sealed class PowerShellScriptExecutor : IDisposable
     {
         powerShell.AddScript(
             """
-            param($sharedScripts, $scriptText, $scriptArguments)
+            param($modulesToImport, $sharedScripts, $scriptText, $scriptArguments)
+            foreach ($module in $modulesToImport) {
+                $loadedModule = Get-Module | Where-Object {
+                    [string]::Equals($_.Name, $module, [System.StringComparison]::OrdinalIgnoreCase) -or
+                    [string]::Equals($_.Path, $module, [System.StringComparison]::OrdinalIgnoreCase)
+                } | Select-Object -First 1
+                if ($null -eq $loadedModule) {
+                    $null = Import-Module -Name $module -ErrorAction Stop
+                }
+            }
             foreach ($sharedScript in $sharedScripts) {
                 $null = . ([scriptblock]::Create($sharedScript))
             }
             & ([scriptblock]::Create($scriptText)) @scriptArguments
             """,
             useLocalScope: true)
+            .AddArgument(_modulesToImport)
             .AddArgument(_sharedScripts)
             .AddArgument(script)
             .AddArgument(arguments?.ToArray() ?? Array.Empty<object?>());

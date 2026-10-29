@@ -19,7 +19,7 @@ The `jsonl` target writes the complete step output to one UTF-8 JSON Lines file.
 Target = @{
     Type = 'jsonl'
     ConnectionId = 'output-files'
-    Path = 'customers'
+    Path = 'customers.jsonl'
     Operation = 'Write'
 }
 ```

@@ -33,9 +33,11 @@ public sealed class DatabaseHierarchyRecordReader : IHierarchyRecordReader
         ArgumentNullException.ThrowIfNull(level);
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(options);
-        if (level.Type is not ("sqlite" or "duckdb"))
+        if (!DatabaseConnectorSupport.IsDatabaseConnectorType(level.Type))
         {
-            throw new ArgumentException("A database reader requires a SQLite or DuckDB source.", nameof(level));
+            throw new ArgumentException(
+                "A database reader requires a SQLite, DuckDB, SQL Server, PostgreSQL, MySQL, or Oracle source.",
+                nameof(level));
         }
 
         DatabaseConnectorSupport.ValidateConnection(level.Type, connection, $"source '{level.StepId}'");
@@ -58,17 +60,14 @@ public sealed class DatabaseHierarchyRecordReader : IHierarchyRecordReader
         ArgumentNullException.ThrowIfNull(options);
         options.Validate(stepId);
         var connectorType = DatabaseConnectorSupport.GetConnectorType(connection);
-        if (connectorType == "sqlite")
+        ReadOnlySqlValidator.ValidateSelect(options.Query, $"Database source '{stepId}' Query");
+        if (options.CountQuery is not null)
         {
-            ReadOnlySqlValidator.ValidateSelect(options.Query, $"Database source '{stepId}' Query");
-            if (options.CountQuery is not null)
-            {
-                ReadOnlySqlValidator.ValidateSelect(
-                    options.CountQuery,
-                    $"Database source '{stepId}' CountQuery");
-            }
+            ReadOnlySqlValidator.ValidateSelect(
+                options.CountQuery,
+                $"Database source '{stepId}' CountQuery");
         }
-        var countQuery = options.GetCountQuery();
+        var countQuery = options.GetCountQuery(connectorType);
 
         using var connectionLease = await DatabaseConnectionGate.AcquireAsync(
             connection,
@@ -231,12 +230,9 @@ public sealed class DatabaseHierarchyRecordReader : IHierarchyRecordReader
             _connection,
             _level.Type,
             cancellationToken).ConfigureAwait(false);
-        if (_level.Type == "sqlite")
-        {
-            ReadOnlySqlValidator.ValidateSelect(
-                _options.Query,
-                $"Database source '{_level.StepId}' Query");
-        }
+        ReadOnlySqlValidator.ValidateSelect(
+            _options.Query,
+            $"Database source '{_level.StepId}' Query");
         _command = _connection.CreateCommand();
         _command.CommandText = _options.Query;
         _command.CommandTimeout = _options.CommandTimeoutSeconds;
@@ -282,6 +278,11 @@ public sealed class DatabaseSourceOptions
 
     public string GetCountQuery()
     {
+        return GetCountQuery("sqlite");
+    }
+
+    public string GetCountQuery(string connectorType)
+    {
         if (!string.IsNullOrWhiteSpace(CountQuery))
         {
             return CountQuery;
@@ -293,7 +294,21 @@ public sealed class DatabaseSourceOptions
             query = query[..^1].TrimEnd();
         }
 
-        return $"SELECT COUNT(*) FROM ({query}) AS __migration_count";
+        if (DatabaseConnectorSupport.IsSqlServer(connectorType) &&
+            System.Text.RegularExpressions.Regex.IsMatch(
+                query,
+                @"\bORDER\s+BY\b",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "SQL Server count queries cannot wrap a SELECT with ORDER BY. " +
+                "Set Options.CountQuery or ExpectedRecordCount for this source.");
+        }
+
+        var alias = DatabaseConnectorSupport.IsOracle(connectorType)
+            ? " __migration_count"
+            : " AS __migration_count";
+        return $"SELECT COUNT(*) FROM ({query}){alias}";
     }
 
     public void Validate(string stepId)

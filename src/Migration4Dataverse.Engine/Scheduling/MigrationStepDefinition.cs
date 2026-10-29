@@ -116,7 +116,7 @@ public sealed record MigrationBatchResult(
 
 public sealed record DependencySchedulerOptions
 {
-    public int MaxDegreeOfParallelism { get; init; } = 4;
+    public int MaxDegreeOfParallelism { get; init; } = 64;
 
     public int MaxQueuedBatches { get; init; } = 64;
 

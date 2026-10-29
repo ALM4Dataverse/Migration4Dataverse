@@ -16,7 +16,8 @@ public sealed class HierarchySourceLevel
         string? optionsJson = null,
         string? connectionId = null,
         string? identity = null,
-        DbConnection? databaseConnection = null)
+        DbConnection? databaseConnection = null,
+        object? connectorConnection = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(jobName);
         ArgumentException.ThrowIfNullOrWhiteSpace(type);
@@ -28,18 +29,30 @@ public sealed class HierarchySourceLevel
             : parentKeyProperty;
 
         Type = type.Trim().ToLowerInvariant();
-        if (Type is not ("jsonl" or "csv" or "parquet" or "custom" or "dataverse" or "sqlite" or "duckdb"))
+        if (Type is not ("jsonl" or "csv" or "parquet" or "excel" or "custom" or "dataverse" or
+            "sqlite" or "duckdb" or "sqlserver" or "postgresql" or "mysql" or "oracle" or
+            "azureblob" or "s3" or "adlsgen2" or "gcs" or "http" or "odata" or "mongodb" or
+            "salesforce" or "sharepoint" or "hubspot" or "zendesk" or "servicenow"))
         {
             throw new ArgumentException($"Unsupported source type '{type}'.", nameof(type));
         }
 
-        if (Type is "jsonl" or "csv" or "parquet" && string.IsNullOrWhiteSpace(path))
+        if (Type is "jsonl" or "csv" or "parquet" or "excel" && string.IsNullOrWhiteSpace(path))
         {
             throw new ArgumentException("File source types require a path.", nameof(path));
         }
-        if (Type is "sqlite" or "duckdb" && databaseConnection is null)
+        if (Type is "sqlite" or "duckdb" or "sqlserver" or "postgresql" or "mysql" or "oracle" &&
+            databaseConnection is null)
         {
             throw new ArgumentException("Database source types require a database connection.", nameof(databaseConnection));
+        }
+        if (Type is "azureblob" or "s3" or "adlsgen2" or "gcs" or "http" or "odata" or
+            "mongodb" or "salesforce" or "sharepoint" or "hubspot" or "zendesk" or
+            "servicenow" && connectorConnection is null)
+        {
+            throw new ArgumentException(
+                "Connector-backed source types require a connector connection.",
+                nameof(connectorConnection));
         }
         if (Type == "custom" && string.IsNullOrWhiteSpace(identity))
         {
@@ -53,9 +66,12 @@ public sealed class HierarchySourceLevel
                 nameof(rowsPerParent));
         }
         StepId = jobName;
-        Path = string.IsNullOrWhiteSpace(path) || Type == "dataverse"
+        Path = string.IsNullOrWhiteSpace(path) || Type is "dataverse" or "mongodb" or
+            "salesforce" or "sharepoint" or "hubspot" or "zendesk" or "servicenow"
             ? null
-            : System.IO.Path.GetFullPath(path);
+            : Type is "azureblob" or "s3" or "adlsgen2" or "gcs" or "http" or "odata"
+                ? path
+                : System.IO.Path.GetFullPath(path);
         KeyProperty = keyProperty;
         ParentKeyProperty = normalizedParentKeyProperty;
         RowsPerParent = rowsPerParent;
@@ -66,6 +82,7 @@ public sealed class HierarchySourceLevel
         ConnectionId = connectionId;
         Identity = identity;
         DatabaseConnection = databaseConnection;
+        ConnectorConnection = connectorConnection;
     }
 
     public string StepId { get; }
@@ -96,4 +113,6 @@ public sealed class HierarchySourceLevel
     public string? Identity { get; }
 
     public DbConnection? DatabaseConnection { get; }
+
+    public object? ConnectorConnection { get; }
 }

@@ -153,6 +153,64 @@ public sealed class DataverseSourceTests
     }
 
     [Fact]
+    public async Task PartitionedDataverseSourceMergesSortedPartitionsAndResumesEachCursor()
+    {
+        using var directory = new TemporaryDirectory();
+        var modulePath = directory.WriteDataverseModule();
+        using var executor = new PowerShellScriptExecutor(maxRunspaces: 2, modulesToImport: [modulePath]);
+        var definition = new PowerShellDataverseSourceDefinition(
+            "mock-connection",
+            CreateOptions("simple"),
+            "simple",
+            [
+                new DataverseSourcePartition("low", CreatePartitionOptions("low")),
+                new DataverseSourcePartition("high", CreatePartitionOptions("high"))
+            ]);
+        var readerFactory = new PowerShellHierarchyRecordReaderFactory(
+            executor,
+            new Dictionary<string, PowerShellSourceCallbackDefinition>(),
+            new Dictionary<string, PowerShellDataverseSourceDefinition>
+            {
+                ["Accounts"] = definition
+            });
+        var level = new HierarchySourceLevel(
+            "Accounts",
+            "dataverse",
+            path: null,
+            keyProperty: "accountid",
+            parentKeyProperty: null,
+            rowsPerParent: 0,
+            expectedRecordCount: 4);
+        var source = new HierarchyBatchSource(
+            level,
+            batchSize: 2,
+            readerFactory.CreateDelegate(),
+            readerFactory.CreateCheckpointAwareDelegate());
+
+        var batches = await ReadAllAsync(
+            source.CreateReader()(new MigrationStepCheckpoint("run", "Accounts", -1, null, null), CancellationToken.None));
+
+        Assert.Equal(2, batches.Count);
+        using var firstCursor = JsonDocument.Parse(batches[0].CursorAfterJson!);
+        Assert.Equal("001", firstCursor.RootElement.GetProperty("Partitions").GetProperty("low").GetString());
+        Assert.Equal("002", firstCursor.RootElement.GetProperty("Partitions").GetProperty("high").GetString());
+
+        var resumed = await ReadAllAsync(
+            source.CreateReader()(new MigrationStepCheckpoint(
+                "run",
+                "Accounts",
+                0,
+                batches[0].CursorAfterJson,
+                DateTimeOffset.UtcNow), CancellationToken.None));
+
+        using var resumedPayload = JsonDocument.Parse(Assert.Single(resumed).PayloadJson);
+        var resumedRows = resumedPayload.RootElement.GetProperty("Records").EnumerateArray().ToArray();
+        Assert.Equal(2, resumedRows.Length);
+        Assert.Equal("003", resumedRows[0].GetProperty("Source").GetProperty("accountid").GetString());
+        Assert.Equal("004", resumedRows[1].GetProperty("Source").GetProperty("accountid").GetString());
+    }
+
+    [Fact]
     public async Task DataverseSimpleChildSourceOrdersByParentKeyThenSourceKey()
     {
         using var directory = new TemporaryDirectory();
@@ -251,6 +309,16 @@ public sealed class DataverseSourceTests
         return options;
     }
 
+    private static Hashtable CreatePartitionOptions(string partitionId)
+    {
+        var options = CreateOptions("simple");
+        options["FilterValues"] = new Hashtable[]
+        {
+            new(StringComparer.OrdinalIgnoreCase) { ["partition"] = partitionId }
+        };
+        return options;
+    }
+
     private static async Task<List<MigrationWorkBatch>> ReadAllAsync(
         IAsyncEnumerable<MigrationWorkBatch> source)
     {
@@ -331,7 +399,22 @@ public sealed class DataverseSourceTests
                             if ($OrderBy.Count -ne 1 -or $OrderBy[0] -ne 'accountid') {
                                 throw 'Root source key ordering was not applied.'
                             }
-                            if ($FilterValues.Count -ne 1 -or $FilterValues[0]['name'] -ne 'Contoso') {
+                            if ($FilterValues.Count -ne 1) {
+                                throw 'Simple query filters were not passed.'
+                            }
+                            if ($FilterValues[0].ContainsKey('partition')) {
+                                if ($FilterValues[0]['partition'] -eq 'low') {
+                                    [pscustomobject]@{ accountid = '001'; name = 'One' }
+                                    [pscustomobject]@{ accountid = '003'; name = 'Three' }
+                                }
+                                elseif ($FilterValues[0]['partition'] -eq 'high') {
+                                    [pscustomobject]@{ accountid = '002'; name = 'Two' }
+                                    [pscustomobject]@{ accountid = '004'; name = 'Four' }
+                                }
+                                else { throw 'Unexpected query partition.' }
+                                return
+                            }
+                            if ($FilterValues[0]['name'] -ne 'Contoso') {
                                 throw 'Simple query filters were not passed.'
                             }
                         }

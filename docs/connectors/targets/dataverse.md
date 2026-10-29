@@ -1,6 +1,6 @@
 # Dataverse target
 
-The `dataverse` target writes mapped rows through `Rnwood.Dataverse.Data.PowerShell`. The upstream module performs the Dataverse operations; this guide covers the migration adapter's supported operations, extra options, and tuning behavior.
+The `dataverse` target writes mapped rows through `Rnwood.Dataverse.Data.PowerShell`. The upstream module performs the Dataverse operations; this guide covers the migration adapter's supported operations, extra options, and concurrency limits.
 
 > [!NOTE]
 > For the full set of write parameters and their semantics, see upstream [`Set-DataverseRecord`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Set-DataverseRecord.md), [`Remove-DataverseRecord`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Remove-DataverseRecord.md), and the [creating and updating concept](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/core-concepts/creating-updating.md).
@@ -10,11 +10,11 @@ The `dataverse` target writes mapped rows through `Rnwood.Dataverse.Data.PowerSh
 | Property | Required | Description |
 |---|---:|---|
 | `Type` | Yes | `dataverse`. |
-| `ConnectionId` | Yes | ID in `-Connections` for a connection supported by the upstream module. |
+| `ConnectionId` | Yes | ID in `-Connections` for a supported connection, or an array of connections to balance operations across identities. |
 | `Table` | Yes | Dataverse logical table name. |
 | `Operation` | No | `Upsert` (default), `Create`, `Update`, `Delete`, or `CreateOrUpdateIfNeeded`. |
-| `BatchSize` | No | Positive batch size or `auto` (default). Automatic tuning is capped by the invocation batch size and the connector limit of 1,000. |
-| `MaxConcurrency` | No | Positive per-target limit or `auto` (default). Targets using the same connection share an adaptive concurrency budget. |
+| `BatchSize` | No | Positive fixed batch size, default 10 independently of `Invoke-Migration -BatchSize`; maximum 1,000. An explicit value overrides the default. |
+| `MaxConcurrency` | No | Optional positive per-target concurrency cap. By default, the target uses its connection's recommended concurrency budget, bounded by the invocation limit. |
 | `Options` | No | Matching keys, lookup behavior, or supported write options forwarded to the upstream module. |
 
 ```powershell
@@ -23,8 +23,7 @@ Target = @{
     ConnectionId = 'crm'
     Table = 'account'
     Operation = 'Upsert'
-    BatchSize = 'auto'
-    MaxConcurrency = 'auto'
+    BatchSize = 10
     Options = @{
         MatchOn = ,@('new_salesforceid')
     }
@@ -32,6 +31,20 @@ Target = @{
 ```
 
 The adapter loads `Rnwood.Dataverse.Data.PowerShell` when a typed Dataverse target is used. The caller creates, authenticates, and owns the connection. The repository's Dataverse examples require module version 3.3.0 or later. See upstream [`Get-DataverseConnection`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Get-DataverseConnection.md), [connections](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/core-concepts/connections.md), and [authentication](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/getting-started/authentication.md).
+
+## Connections and request balancing
+
+Use one authenticated connection or an array under the named `-Connections` slot:
+
+```powershell
+$connections = @{
+    crm = @($crmAsUserA, $crmAsUserB)
+}
+```
+
+Pool members must target the same Dataverse organization and have the same `MaxRetryCount`. Sources and targets that use the same `ConnectionId` share one in-memory pool; all caller-owned connection objects remain caller-owned. The adapter identifies each member with `WhoAmI` and accounts connections for the same user together.
+
+The pool groups connections by their `WhoAmI` organization/user identity. Connections with the same identity share one budget. Each identity's limit comes from its connection's `RecommendedDegreesOfParallelism` (falling back to 4 when unavailable); the pool's total budget is the sum of unique identity budgets. Individual service calls are routed to an identity below its limit, preferring the lowest rolling five-minute request-unit use and then the fewest active requests. If all identity budgets are full, the caller waits for capacity. The pool expands nested `ExecuteMultiple` and `ExecuteTransaction` requests, charges recognized `*Multiple` messages by target count, and counts retries as distinct attempts. It does not impose a universal service-protection quota or adapt concurrency based on throughput. This balancing also applies to Dataverse source requests that share the slot.
 
 ## Operations and matching
 
@@ -65,10 +78,10 @@ A known record can also be referenced by `{ TableName, Id }`. The adapter enable
 > [!WARNING]
 > Bypassing plug-ins or other business logic can change validation and side effects in the target organization. Use it only when that change is intentional. See the upstream [`Set-DataverseRecord` reference](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Set-DataverseRecord.md) for the supported values.
 
-## Automatic tuning and retries
+## Batch size, concurrency, and retries
 
-With `BatchSize = 'auto'`, candidate batch sizes are tested serially across the pipeline and scored by successful Dataverse target throughput. With `MaxConcurrency = 'auto'`, targets on the same connection share one adaptive budget capped by `Invoke-Migration -MaxDegreeOfParallelism`. Observed retry or throttle signals can reduce that budget.
+Batch size is fixed for each run. Dataverse targets default to 10-row batches regardless of `Invoke-Migration -BatchSize`; set the target's `BatchSize` to choose another positive value up to 1,000. `MaxConcurrency` is an optional fixed per-target cap. When omitted, the target uses the connection's recommended concurrency budget. The pool enforces separate budgets for each identity, while `Invoke-Migration -MaxDegreeOfParallelism` (default 64) remains the overall worker ceiling. A target-level cap can lower concurrency but cannot raise either limit.
 
-Tuning profiles are persisted in the migration database and reused when compatible with the current targets and limits. Use [`Clear-MigrationTargetTuning`](../../cmdlets/clear-migration-target-tuning.md) to clear a target profile or all profiles.
+Retry and throttle telemetry remains visible in migration diagnostics, but it does not automatically change batch size or concurrency. Tuning profiles saved by older versions are ignored; [`Clear-MigrationTargetTuning`](../../cmdlets/clear-migration-target-tuning.md) remains available to remove those legacy values.
 
 Retries are enabled by default. `Invoke-Migration -DataverseNoRetryDiagnosticMode` disables the Dataverse connection, cmdlet, and scheduler retry layers for a diagnostic run. It can cause transient errors to fail immediately; see [`Invoke-Migration`](../../cmdlets/invoke-migration.md).

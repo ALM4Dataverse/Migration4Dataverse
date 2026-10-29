@@ -38,7 +38,7 @@ public sealed class InvokeMigrationCommand : PSCmdlet
 
     [Parameter]
     [ValidateRange(1, int.MaxValue)]
-    public int MaxDegreeOfParallelism { get; set; } = 4;
+    public int MaxDegreeOfParallelism { get; set; } = 64;
 
     [Parameter]
     [ValidateRange(1, int.MaxValue)]
@@ -69,7 +69,7 @@ public sealed class InvokeMigrationCommand : PSCmdlet
 
     [Parameter]
     [ValidateRange(1, 1000)]
-    public int BatchSize { get; set; } = 100;
+    public int BatchSize { get; set; } = 10;
 
     [Parameter]
     public SwitchParameter EnableDebugCapture { get; set; }
@@ -208,7 +208,6 @@ public sealed class InvokeMigrationCommand : PSCmdlet
             }
 
             var result = execution.GetAwaiter().GetResult();
-            stepSet.PersistTuningProfiles();
             foreach (var controller in stepSet.TargetControllers)
             {
                 WriteVerbose(controller.GetSummary());

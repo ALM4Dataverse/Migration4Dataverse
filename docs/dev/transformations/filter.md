@@ -1,6 +1,6 @@
 # Filter (internal pipeline)
 
-The `filter` node runs a PowerShell script for each input row. It requires exactly one input and has no node-specific options.
+The `filter` node runs a PowerShell script for each input row. It requires exactly one input. Apart from the required `Script`, it has no additional optional node settings.
 
 ```powershell
 $node = @{

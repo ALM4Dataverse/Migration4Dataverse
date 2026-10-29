@@ -2,6 +2,7 @@ using System.Collections;
 using System.Management.Automation;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Migration4Dataverse.Engine.Connectors;
 using Migration4Dataverse.Engine.Scheduling;
 using Migration4Dataverse.Engine.Storage;
 
@@ -11,40 +12,39 @@ internal sealed class MigrationStepSet : IDisposable
 {
     private readonly IReadOnlyList<SemaphoreSlim> _semaphores;
     private readonly IReadOnlyList<System.Data.Common.DbConnection> _ownedConnections;
+    private readonly IReadOnlyList<DataverseConnectionPool> _dataversePools;
 
     public MigrationStepSet(
         IReadOnlyList<MigrationStepDefinition> steps,
         IReadOnlyList<SemaphoreSlim> semaphores,
-        IReadOnlyList<PipelineAdaptiveDataverseConnectionController> targetControllers,
+        IReadOnlyList<PipelineDataverseConnectionController> targetControllers,
         PipelineThroughputMeter throughputMeter,
-        IReadOnlyList<System.Data.Common.DbConnection> ownedConnections)
+        IReadOnlyList<System.Data.Common.DbConnection> ownedConnections,
+        IReadOnlyList<DataverseConnectionPool> dataversePools)
     {
         Steps = steps;
         _semaphores = semaphores;
         TargetControllers = targetControllers;
         ThroughputMeter = throughputMeter;
         _ownedConnections = ownedConnections;
+        _dataversePools = dataversePools;
     }
 
     public IReadOnlyList<MigrationStepDefinition> Steps { get; }
 
-    public IReadOnlyList<PipelineAdaptiveDataverseConnectionController> TargetControllers { get; }
+    public IReadOnlyList<PipelineDataverseConnectionController> TargetControllers { get; }
 
     public PipelineThroughputMeter ThroughputMeter { get; }
-
-    public void PersistTuningProfiles()
-    {
-        foreach (var targetController in TargetControllers)
-        {
-            targetController.PersistCurrentConcurrency();
-        }
-    }
 
     public void Dispose()
     {
         foreach (var targetController in TargetControllers)
         {
             targetController.Dispose();
+        }
+        foreach (var pool in _dataversePools)
+        {
+            pool.Dispose();
         }
         foreach (var semaphore in _semaphores)
         {
@@ -301,25 +301,21 @@ internal static partial class PowerShellMigrationStepFactory
         if ($context.Type -eq 'target' -and $outputRecords.Count -gt 0) {
             $records = $outputRecords.ToArray()
             $targetExecutionLease = $null
-            $targetTuningLease = $null
-            $targetSucceeded = $false
-            if (-not $context.WhatIf -and $context.TargetType -in @('dataverse', 'custom', 'sqlite', 'duckdb')) {
+            $targetDataverseLease = $null
+            if (-not $context.WhatIf -and $context.TargetType -in @('dataverse', 'custom', 'sqlite', 'duckdb', 'sqlserver', 'postgresql', 'mysql', 'oracle', 'azureblob', 's3', 'adlsgen2', 'gcs', 'mongodb')) {
                 if ($null -ne $context.TargetController) {
                     $targetExecutionLease = $context.ExecutionLease
                     if ($null -eq $targetExecutionLease) {
                         throw "Target step '$($context.StepId)' reached execution without its Dataverse connection lease."
                     }
-                    $targetTuningLease = $targetExecutionLease
+                    $targetDataverseLease = $targetExecutionLease
                 }
                 elseif ($null -eq $context.ExecutionLease) {
                     throw "Target step '$($context.StepId)' reached execution without its concurrency lease."
                 }
             }
             try {
-                if ($context.WhatIf) {
-                    $targetSucceeded = $true
-                }
-                else {
+                if (-not $context.WhatIf) {
                     switch ($context.TargetType) {
                     'dataverse' {
                         $targetOptions = ConvertFrom-Json -InputObject $context.TargetOptionsJson `
@@ -333,8 +329,8 @@ internal static partial class PowerShellMigrationStepFactory
                         $targetParameters = @{
                             TableName = $context.TableName
                             Connection = $targetConnection
-                            BatchSize = if ($null -ne $targetTuningLease) {
-                                $targetTuningLease.BatchSize
+                            BatchSize = if ($null -ne $targetDataverseLease) {
+                                $targetDataverseLease.BatchSize
                             }
                             else {
                                 $context.BatchSize
@@ -417,8 +413,8 @@ internal static partial class PowerShellMigrationStepFactory
                             $deleteParameters = @{
                                 TableName = $context.TableName
                                 Connection = $targetConnection
-                                BatchSize = if ($null -ne $targetTuningLease) {
-                                    $targetTuningLease.BatchSize
+                                BatchSize = if ($null -ne $targetDataverseLease) {
+                                    $targetDataverseLease.BatchSize
                                 }
                                 else {
                                     $context.BatchSize
@@ -464,6 +460,64 @@ internal static partial class PowerShellMigrationStepFactory
                             $targetConnection, 'duckdb', $context.TableName, $context.StepId,
                             $batch.RunId, $batch.BatchId, $recordsJson, $context.TargetOptionsJson)
                     }
+                    'sqlserver' {
+                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        [Migration4Dataverse.Engine.Connectors.DatabaseBatchTargetWriter]::WriteBatch(
+                            $targetConnection, 'sqlserver', $context.TableName, $context.StepId,
+                            $batch.RunId, $batch.BatchId, $recordsJson, $context.TargetOptionsJson)
+                    }
+                    'postgresql' {
+                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        [Migration4Dataverse.Engine.Connectors.DatabaseBatchTargetWriter]::WriteBatch(
+                            $targetConnection, 'postgresql', $context.TableName, $context.StepId,
+                            $batch.RunId, $batch.BatchId, $recordsJson, $context.TargetOptionsJson)
+                    }
+                    'mysql' {
+                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        [Migration4Dataverse.Engine.Connectors.DatabaseBatchTargetWriter]::WriteBatch(
+                            $targetConnection, 'mysql', $context.TableName, $context.StepId,
+                            $batch.RunId, $batch.BatchId, $recordsJson, $context.TargetOptionsJson)
+                    }
+                    'oracle' {
+                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        [Migration4Dataverse.Engine.Connectors.DatabaseBatchTargetWriter]::WriteBatch(
+                            $targetConnection, 'oracle', $context.TableName, $context.StepId,
+                            $batch.RunId, $batch.BatchId, $recordsJson, $context.TargetOptionsJson)
+                    }
+                    'azureblob' {
+                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        [Migration4Dataverse.Engine.Connectors.ObjectStorageTargetWriter]::WriteBatch(
+                            $targetConnection, 'azureblob', $context.TargetPath, $context.StepId,
+                            $batch.RunId, $batch.BatchId, $batch.Sequence, $recordsJson,
+                            $context.TargetOptionsJson, $context.StagingRoot)
+                    }
+                    's3' {
+                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        [Migration4Dataverse.Engine.Connectors.ObjectStorageTargetWriter]::WriteBatch(
+                            $targetConnection, 's3', $context.TargetPath, $context.StepId,
+                            $batch.RunId, $batch.BatchId, $batch.Sequence, $recordsJson,
+                            $context.TargetOptionsJson, $context.StagingRoot)
+                    }
+                    'adlsgen2' {
+                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        [Migration4Dataverse.Engine.Connectors.ObjectStorageTargetWriter]::WriteBatch(
+                            $targetConnection, 'adlsgen2', $context.TargetPath, $context.StepId,
+                            $batch.RunId, $batch.BatchId, $batch.Sequence, $recordsJson,
+                            $context.TargetOptionsJson, $context.StagingRoot)
+                    }
+                    'gcs' {
+                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        [Migration4Dataverse.Engine.Connectors.ObjectStorageTargetWriter]::WriteBatch(
+                            $targetConnection, 'gcs', $context.TargetPath, $context.StepId,
+                            $batch.RunId, $batch.BatchId, $batch.Sequence, $recordsJson,
+                            $context.TargetOptionsJson, $context.StagingRoot)
+                    }
+                    'mongodb' {
+                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        [Migration4Dataverse.Engine.Connectors.MongoTargetWriter]::WriteBatch(
+                            $targetConnection, $context.TableName, $context.StepId,
+                            $batch.RunId, $batch.BatchId, $recordsJson, $context.TargetOptionsJson)
+                    }
                     'custom' {
                         $callback = [scriptblock]::Create($context.TargetCallbackText)
                         $stepContext = [pscustomobject]@{
@@ -485,23 +539,12 @@ internal static partial class PowerShellMigrationStepFactory
                     }
                 }
                 if (-not $context.WhatIf) {
-                    $targetSucceeded = $true
                     $context.PipelineThroughputMeter.Record([long]$records.Count)
                 }
             }
             finally {
                 if ($null -ne $targetExecutionLease) {
-                    if ($targetSucceeded) {
-                        $context.TargetController.Complete($targetExecutionLease, $records.Count, $true)
-                    }
-                    else {
-                        try {
-                            $context.TargetController.Complete($targetExecutionLease, $records.Count, $false)
-                        }
-                        catch {
-                            Write-Warning -WarningAction Continue "Failed to persist tuning profile for target '$($context.StepId)' while handling a failed target batch: $($_.Exception.Message)"
-                        }
-                    }
+                    $context.TargetController.Complete($targetExecutionLease)
                 }
             }
         }
@@ -904,6 +947,58 @@ internal static partial class PowerShellMigrationStepFactory
         string connectorType,
         string role)
     {
+        if (connectorType is "http" or "odata")
+        {
+            return configuredPath;
+        }
+
+        if (connectorType is "salesforce" or "sharepoint" or "hubspot" or "zendesk" or "servicenow")
+        {
+            if (!string.IsNullOrWhiteSpace(configuredPath))
+            {
+                throw new ArgumentException(
+                    $"{role} must omit Path for the {connectorType} connector.");
+            }
+            RestJsonConnectorSupport.GetHttpClient(connection, connectorType, role);
+            return string.Empty;
+        }
+
+        if (connectorType is "azureblob" or "s3" or "adlsgen2" or "gcs")
+        {
+            if (string.IsNullOrWhiteSpace(configuredPath) &&
+                role.StartsWith("Target", StringComparison.Ordinal))
+            {
+                throw new ArgumentException($"{role} must declare a Path.");
+            }
+            return configuredPath;
+        }
+
+        if (connectorType == "mongodb")
+        {
+            if (!string.IsNullOrWhiteSpace(configuredPath))
+            {
+                throw new ArgumentException(
+                    $"{role} must omit Path when its connection is a MongoDB connection.");
+            }
+            MongoConnectionSupport.ValidateConnection(connection!, role);
+            return string.Empty;
+        }
+
+        if (connectorType is "sqlserver" or "postgresql" or "mysql" or "oracle")
+        {
+            if (!string.IsNullOrWhiteSpace(configuredPath))
+            {
+                throw new ArgumentException(
+                    $"{role} must omit Path when its connection is a database connection.");
+            }
+            if (connection is not System.Data.Common.DbConnection)
+            {
+                throw new ArgumentException(
+                    $"The {connectorType} connector requires a DbConnection for {role}.");
+            }
+            return string.Empty;
+        }
+
         if (connectorType is "sqlite" or "duckdb")
         {
             if (connection is FileInfo databaseFile)
@@ -928,7 +1023,7 @@ internal static partial class PowerShellMigrationStepFactory
             return ResolveRelativePath(databaseDirectory, configuredPath, role);
         }
 
-        if (connectorType is "jsonl" or "csv" or "parquet")
+        if (connectorType is "jsonl" or "csv" or "parquet" or "excel")
         {
             if (connection is FileInfo file)
             {

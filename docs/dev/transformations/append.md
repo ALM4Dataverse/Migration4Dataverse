@@ -22,4 +22,4 @@ $node = @{
 }
 ```
 
-Inputs are consumed sequentially, one at a time, so Append does not buffer the complete input. Rows can be emitted before all later inputs have been read. It preserves input record values and order within each input. This node has no node-specific options; use [pipeline configuration](./README.md) for source and key semantics.
+Inputs are consumed sequentially, one at a time, so Append does not buffer the complete input. Rows can be emitted before all later inputs have been read. It preserves input record values and order within each input. This node has no additional optional settings; use [pipeline configuration](./README.md) for source and key semantics.
