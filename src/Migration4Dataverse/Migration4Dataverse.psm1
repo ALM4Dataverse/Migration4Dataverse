@@ -17,7 +17,7 @@ else {
 [void][System.Reflection.Assembly]::LoadFrom($engineAssemblyPath)
 Import-Module -Name $engineAssemblyPath -Scope Local
 
-function New-MigrationJobStore {
+function New-M4dMigrationJobStore {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -28,7 +28,7 @@ function New-MigrationJobStore {
     [Migration4Dataverse.Engine.Storage.MigrationStoreFactory]::Open($DatabasePath)
 }
 
-function Complete-MigrationBatch {
+function Complete-M4dMigrationBatch {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -69,7 +69,7 @@ function Complete-MigrationBatch {
         0)
 }
 
-function Set-MigrationRunStatus {
+function Set-M4dMigrationRunStatus {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -88,7 +88,7 @@ function Set-MigrationRunStatus {
     $Store.SetRunStatus($RunId, $statusValue, $null)
 }
 
-function Start-MigrationDashboard {
+function Start-M4dMigrationDashboard {
     [CmdletBinding()]
     param(
         [string]$DatabasePath,
@@ -121,7 +121,7 @@ function Start-MigrationDashboard {
     $dashboard
 }
 
-function Stop-MigrationDashboard {
+function Stop-M4dMigrationDashboard {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory, ValueFromPipeline)]
@@ -134,10 +134,10 @@ function Stop-MigrationDashboard {
 }
 
 Export-ModuleMember `
-        -Function New-MigrationJobStore, Complete-MigrationBatch, Set-MigrationRunStatus, `
-        Start-MigrationDashboard, Stop-MigrationDashboard `
-        -Cmdlet Invoke-Migration, Get-MigrationRun, Get-MigrationStep, Get-MigrationBatch, `
-        Get-MigrationError, Get-MigrationRetryHistory, Get-MigrationDebugRow, `
-        Get-MigrationDebugRowBinary, Get-MigrationConfigurationPreview, Get-MigrationProcessMetric, `
-        Get-MigrationDataverseConnectionThroughput, Invoke-MigrationRecovery, `
-        Clear-MigrationTargetTuning, Start-MigrationDatabaseServer, New-MigrationBinaryValue
+        -Function New-M4dMigrationJobStore, Complete-M4dMigrationBatch, Set-M4dMigrationRunStatus, `
+        Start-M4dMigrationDashboard, Stop-M4dMigrationDashboard `
+        -Cmdlet Invoke-M4dMigration, Get-M4dMigrationRun, Get-M4dMigrationStep, Get-M4dMigrationBatch, `
+        Get-M4dMigrationError, Get-M4dMigrationRetryHistory, Get-M4dMigrationDebugRow, `
+        Get-M4dMigrationDebugRowBinary, Get-M4dMigrationConfigurationPreview, Get-M4dMigrationProcessMetric, `
+        Get-M4dMigrationDataverseConnectionThroughput, Invoke-M4dMigrationRecovery, `
+        Clear-M4dMigrationTargetTuning, Start-M4dMigrationDatabaseServer, New-M4dMigrationBinaryValue

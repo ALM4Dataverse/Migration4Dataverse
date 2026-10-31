@@ -102,7 +102,7 @@ To validate a clean Gallery installation after publishing:
 ```powershell
 Install-Module Migration4Dataverse -RequiredVersion 0.1.0 -Scope CurrentUser -Force
 Import-Module Migration4Dataverse
-Get-Command Invoke-Migration
+Get-Command Invoke-M4dMigration
 ```
 
 PowerShell Gallery versions cannot be reused. If an upload is incorrect, unlist the version and publish a new patch release rather than attempting to overwrite it.

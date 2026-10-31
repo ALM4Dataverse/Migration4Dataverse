@@ -16,7 +16,7 @@ Migration records are mapped as PowerShell objects, but connectors expose a cons
 
 JSON transport can normalize CLR widths and representations: integer JSON values normally arrive as `Int64`, fractional values as `Double`, GUIDs as strings, and ISO-looking date/time strings may be parsed as `DateTime` by PowerShell's default `ConvertFrom-Json` behavior. Use explicit conversions in mappings when a target requires a specific CLR type or when preserving an input timestamp's original text/offset matters.
 
-`MigrationBinaryValue` keeps the bytes in run-scoped disk staging. Its transport descriptor, not its content, crosses persisted migration batches. A mapping can pass the value unchanged, replace it, or use its stream and transformation helpers. See [`New-MigrationBinaryValue`](../cmdlets/new-migration-binary-value.md) for Base64 encode/decode, stream-backed JSON serialization, MIME detection, and creating replacement values.
+`MigrationBinaryValue` keeps the bytes in run-scoped disk staging. Its transport descriptor, not its content, crosses persisted migration batches. A mapping can pass the value unchanged, replace it, or use its stream and transformation helpers. See [`New-M4dMigrationBinaryValue`](../cmdlets/new-migration-binary-value.md) for Base64 encode/decode, stream-backed JSON serialization, MIME detection, and creating replacement values.
 
 ## Sidecar files for structured outputs
 

@@ -1,4 +1,4 @@
-# Complete-MigrationBatch
+# Complete-M4dMigrationBatch
 
 Completes a leased batch through the lower-level store interface. In normal usage the scheduler performs batch completion itself.
 
@@ -6,7 +6,7 @@ Completes a leased batch through the lower-level store interface. In normal usag
 
 | Parameter | Required | Default | Description |
 |---|---:|---|---|
-| `-Store` | Yes | — | Store object returned by `New-MigrationJobStore`. |
+| `-Store` | Yes | — | Store object returned by `New-M4dMigrationJobStore`. |
 | `-BatchId` | Yes | — | ID of the batch being completed. |
 | `-WorkerId` | Yes | — | Worker that owns the batch lease. |
 | `-OutcomesJson` | Yes | — | JSON string containing the batch outcomes. |
@@ -18,7 +18,7 @@ Completes a leased batch through the lower-level store interface. In normal usag
 ## Example
 
 ```powershell
-Complete-MigrationBatch -Store $store -BatchId $batchId -WorkerId $workerId `
+Complete-M4dMigrationBatch -Store $store -BatchId $batchId -WorkerId $workerId `
     -OutcomesJson '{"Succeeded":10,"Failed":0}' `
     -ChildTable 'ContactImport' -ChildPayloadJson '{"Records":[]}'
 ```

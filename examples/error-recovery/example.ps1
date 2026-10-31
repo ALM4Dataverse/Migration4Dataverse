@@ -21,7 +21,7 @@ $connections = @{
     files = [System.IO.DirectoryInfo]$dataDirectory
     target = [System.IO.DirectoryInfo]$outputDirectory
 }
-$dashboard = Start-MigrationDashboard -DatabasePath $databasePath
+$dashboard = Start-M4dMigrationDashboard -DatabasePath $databasePath
 
 try {
     Write-Host 'The local dashboard is available at:'
@@ -57,7 +57,7 @@ try {
     )
     $sourceFailed = $false
     try {
-        $null = Invoke-Migration -DatabasePath $databasePath -RunName 'Source reader continuation' `
+        $null = Invoke-M4dMigration -DatabasePath $databasePath -RunName 'Source reader continuation' `
             -RunId $sourceRunId -Steps $sourceSteps -Connections $connections `
             -BatchSize 1 -MaxAttempts 5 -SourceReadMaxAttempts 1 -MaxDegreeOfParallelism 1 `
             -EnableDebugCapture
@@ -69,11 +69,11 @@ try {
     if (-not $sourceFailed) {
         throw 'The source-reader demonstration did not produce its expected failure.'
     }
-    Get-MigrationError -DatabasePath $databasePath -RunId $sourceRunId | Format-List Scope, StepId, Message
+    Get-M4dMigrationError -DatabasePath $databasePath -RunId $sourceRunId | Format-List Scope, StepId, Message
     $null = Read-Host 'Inspect the Source error in the dashboard, then press Enter to continue the source step'
-    $null = Invoke-MigrationRecovery -DatabasePath $databasePath -RunId $sourceRunId `
+    $null = Invoke-M4dMigrationRecovery -DatabasePath $databasePath -RunId $sourceRunId `
         -StepId 'Source' -ContinueAfterFailure
-    $null = Invoke-Migration -DatabasePath $databasePath -RunName 'Source reader continuation' `
+    $null = Invoke-M4dMigration -DatabasePath $databasePath -RunName 'Source reader continuation' `
         -RunId $sourceRunId -Steps $sourceSteps -Connections $connections `
         -BatchSize 1 -MaxAttempts 5 -SourceReadMaxAttempts 1 -MaxDegreeOfParallelism 1 `
         -EnableDebugCapture
@@ -120,7 +120,7 @@ try {
     )
     $transformFailed = $false
     try {
-        $null = Invoke-Migration -DatabasePath $databasePath -RunName 'Transform row edit and retry' `
+        $null = Invoke-M4dMigration -DatabasePath $databasePath -RunName 'Transform row edit and retry' `
             -RunId $transformRunId -Steps $transformSteps -Connections $connections `
             -BatchSize 1 -MaxAttempts 1 -MaxDegreeOfParallelism 1 -EnableDebugCapture
     }
@@ -131,19 +131,19 @@ try {
     if (-not $transformFailed) {
         throw 'The Transform demonstration did not produce its expected failure.'
     }
-    Get-MigrationError -DatabasePath $databasePath -RunId $transformRunId -StepId 'Transform' |
+    Get-M4dMigrationError -DatabasePath $databasePath -RunId $transformRunId -StepId 'Transform' |
         Format-List Scope, StepId, BatchId, RowErrors
     $null = Read-Host 'Inspect the Transform row error, then press Enter to edit and retry that row'
-    $transformError = Get-MigrationError -DatabasePath $databasePath -RunId $transformRunId `
+    $transformError = Get-M4dMigrationError -DatabasePath $databasePath -RunId $transformRunId `
         -StepId 'Transform' | Where-Object Scope -eq 'Batch' | Select-Object -First 1
     $transformRowError = $transformError.RowErrors | Where-Object CanRetry | Select-Object -First 1
     $transformPayload = ConvertFrom-Json -InputObject $transformRowError.PayloadJson -AsHashtable
     $transformPayload.Name = 'fixed-transform'
     $transformPayloadJson = ConvertTo-Json -InputObject $transformPayload -Depth 100 -Compress
-    $null = Invoke-MigrationRecovery -DatabasePath $databasePath -RunId $transformRunId `
+    $null = Invoke-M4dMigrationRecovery -DatabasePath $databasePath -RunId $transformRunId `
         -StepId $transformError.StepId -BatchId $transformError.BatchId `
         -RecordIndex $transformRowError.RecordIndex -PayloadJson $transformPayloadJson
-    $null = Invoke-Migration -DatabasePath $databasePath -RunName 'Transform row edit and retry' `
+    $null = Invoke-M4dMigration -DatabasePath $databasePath -RunName 'Transform row edit and retry' `
         -RunId $transformRunId -Steps $transformSteps -Connections $connections `
         -BatchSize 1 -MaxAttempts 1 -MaxDegreeOfParallelism 1 -EnableDebugCapture
     Write-Host "Transform row retry completed. RunId: $transformRunId"
@@ -189,7 +189,7 @@ try {
     )
     $filterFailed = $false
     try {
-        $null = Invoke-Migration -DatabasePath $databasePath -RunName 'Filter row edit and retry' `
+        $null = Invoke-M4dMigration -DatabasePath $databasePath -RunName 'Filter row edit and retry' `
             -RunId $filterRunId -Steps $filterSteps -Connections $connections `
             -BatchSize 1 -MaxAttempts 1 -MaxDegreeOfParallelism 1 -EnableDebugCapture
     }
@@ -200,19 +200,19 @@ try {
     if (-not $filterFailed) {
         throw 'The Filter demonstration did not produce its expected failure.'
     }
-    Get-MigrationError -DatabasePath $databasePath -RunId $filterRunId -StepId 'Filter' |
+    Get-M4dMigrationError -DatabasePath $databasePath -RunId $filterRunId -StepId 'Filter' |
         Format-List Scope, StepId, BatchId, RowErrors
     $null = Read-Host 'Inspect the Filter row error, then press Enter to edit and retry that row'
-    $filterError = Get-MigrationError -DatabasePath $databasePath -RunId $filterRunId `
+    $filterError = Get-M4dMigrationError -DatabasePath $databasePath -RunId $filterRunId `
         -StepId 'Filter' | Where-Object Scope -eq 'Batch' | Select-Object -First 1
     $filterRowError = $filterError.RowErrors | Where-Object CanRetry | Select-Object -First 1
     $filterPayload = ConvertFrom-Json -InputObject $filterRowError.PayloadJson -AsHashtable
     $filterPayload.Name = 'fixed-filter'
     $filterPayloadJson = ConvertTo-Json -InputObject $filterPayload -Depth 100 -Compress
-    $null = Invoke-MigrationRecovery -DatabasePath $databasePath -RunId $filterRunId `
+    $null = Invoke-M4dMigrationRecovery -DatabasePath $databasePath -RunId $filterRunId `
         -StepId $filterError.StepId -BatchId $filterError.BatchId `
         -RecordIndex $filterRowError.RecordIndex -PayloadJson $filterPayloadJson
-    $null = Invoke-Migration -DatabasePath $databasePath -RunName 'Filter row edit and retry' `
+    $null = Invoke-M4dMigration -DatabasePath $databasePath -RunName 'Filter row edit and retry' `
         -RunId $filterRunId -Steps $filterSteps -Connections $connections `
         -BatchSize 1 -MaxAttempts 1 -MaxDegreeOfParallelism 1 -EnableDebugCapture
     Write-Host "Filter row retry completed. RunId: $filterRunId"
@@ -257,7 +257,7 @@ try {
     )
     $targetFailed = $false
     try {
-        $null = Invoke-Migration -DatabasePath $databasePath -RunName 'Target batch replay' `
+        $null = Invoke-M4dMigration -DatabasePath $databasePath -RunName 'Target batch replay' `
             -RunId $targetRunId -Steps $targetSteps -Connections $connections `
             -BatchSize 1 -MaxAttempts 1 -MaxDegreeOfParallelism 1 -EnableDebugCapture
     }
@@ -268,20 +268,20 @@ try {
     if (-not $targetFailed) {
         throw 'The Target demonstration did not produce its expected failure.'
     }
-    $targetError = Get-MigrationError -DatabasePath $databasePath -RunId $targetRunId `
+    $targetError = Get-M4dMigrationError -DatabasePath $databasePath -RunId $targetRunId `
         -StepId 'Target' | Where-Object Scope -eq 'Batch' | Select-Object -First 1
     if ($null -eq $targetError) {
         throw 'The Target demonstration did not retain its failed batch.'
     }
     $targetError | Format-List Scope, StepId, BatchId, Message
     $null = Read-Host 'Inspect the Target error. You can queue replay in the dashboard now; press Enter to enable the target and resume via PowerShell'
-    $targetBatch = Get-MigrationBatch -DatabasePath $databasePath -RunId $targetRunId `
+    $targetBatch = Get-M4dMigrationBatch -DatabasePath $databasePath -RunId $targetRunId `
         -StepId 'Target' | Where-Object BatchId -eq $targetError.BatchId | Select-Object -First 1
     if ($null -eq $targetBatch) {
         throw "The failed Target batch '$($targetError.BatchId)' could not be inspected."
     }
     if ($targetBatch.State -eq 'CompletedWithErrors') {
-        $null = Invoke-MigrationRecovery -DatabasePath $databasePath -RunId $targetRunId -RetryFailedBatches
+        $null = Invoke-M4dMigrationRecovery -DatabasePath $databasePath -RunId $targetRunId -RetryFailedBatches
     }
     elseif ($targetBatch.State -eq 'Pending') {
         Write-Host 'Target batch replay was queued in the dashboard.'
@@ -290,7 +290,7 @@ try {
         throw "Unexpected Target batch state '$($targetBatch.State)' before replay."
     }
     [System.IO.File]::WriteAllText($targetGatePath, 'enabled', [System.Text.UTF8Encoding]::new($false))
-    $null = Invoke-Migration -DatabasePath $databasePath -RunName 'Target batch replay' `
+    $null = Invoke-M4dMigration -DatabasePath $databasePath -RunName 'Target batch replay' `
         -RunId $targetRunId -Steps $targetSteps -Connections $connections `
         -BatchSize 1 -MaxAttempts 1 -MaxDegreeOfParallelism 1 -EnableDebugCapture
     Write-Host "Target batch replay completed. RunId: $targetRunId"
@@ -341,7 +341,7 @@ try {
     )
     $callbackFailed = $false
     try {
-        $null = Invoke-Migration -DatabasePath $databasePath -RunName 'Callback row edit and retry' `
+        $null = Invoke-M4dMigration -DatabasePath $databasePath -RunName 'Callback row edit and retry' `
             -RunId $callbackRunId -Steps $callbackSteps -Connections $connections `
             -BatchSize 1 -MaxAttempts 1 -MaxDegreeOfParallelism 1 -EnableDebugCapture
     }
@@ -352,19 +352,19 @@ try {
     if (-not $callbackFailed) {
         throw 'The callback demonstration did not produce its expected failure.'
     }
-    Get-MigrationError -DatabasePath $databasePath -RunId $callbackRunId -StepId 'Callback' |
+    Get-M4dMigrationError -DatabasePath $databasePath -RunId $callbackRunId -StepId 'Callback' |
         Format-List Scope, StepId, BatchId, RowErrors
     $null = Read-Host 'Inspect the callback row error, then press Enter to edit and retry that row'
-    $callbackError = Get-MigrationError -DatabasePath $databasePath -RunId $callbackRunId `
+    $callbackError = Get-M4dMigrationError -DatabasePath $databasePath -RunId $callbackRunId `
         -StepId 'Callback' | Where-Object Scope -eq 'Batch' | Select-Object -First 1
     $callbackRowError = $callbackError.RowErrors | Where-Object CanRetry | Select-Object -First 1
     $callbackPayload = ConvertFrom-Json -InputObject $callbackRowError.PayloadJson -AsHashtable
     $callbackPayload.Name = 'fixed-callback'
     $callbackPayloadJson = ConvertTo-Json -InputObject $callbackPayload -Depth 100 -Compress
-    $null = Invoke-MigrationRecovery -DatabasePath $databasePath -RunId $callbackRunId `
+    $null = Invoke-M4dMigrationRecovery -DatabasePath $databasePath -RunId $callbackRunId `
         -StepId $callbackError.StepId -BatchId $callbackError.BatchId `
         -RecordIndex $callbackRowError.RecordIndex -PayloadJson $callbackPayloadJson
-    $null = Invoke-Migration -DatabasePath $databasePath -RunName 'Callback row edit and retry' `
+    $null = Invoke-M4dMigration -DatabasePath $databasePath -RunName 'Callback row edit and retry' `
         -RunId $callbackRunId -Steps $callbackSteps -Connections $connections `
         -BatchSize 1 -MaxAttempts 1 -MaxDegreeOfParallelism 1 -EnableDebugCapture
     Write-Host "Callback row retry completed. RunId: $callbackRunId"
@@ -374,5 +374,5 @@ try {
     $null = Read-Host 'Press Enter to stop the dashboard'
 }
 finally {
-    Stop-MigrationDashboard -Dashboard $dashboard
+    Stop-M4dMigrationDashboard -Dashboard $dashboard
 }

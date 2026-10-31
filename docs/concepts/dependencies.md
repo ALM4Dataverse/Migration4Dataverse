@@ -165,4 +165,4 @@ Each input should provide the row fields expected by downstream steps. For the c
 
 Callback steps can declare multiple `Inputs`. Their handler returns `MigrationDependencyOutput` values, and `RequiredBatchIds` lists the parent batches that must succeed before a child batch is released. This is an explicit batch prerequisite; the scheduler does not inspect or join records in callback payloads. See [callback nodes](../configuration.md#callback-nodes).
 
-`sort` and `merge` are not supported `Invoke-Migration` step types. The migration graph rejects them during configuration validation.
+`sort` and `merge` are not supported `Invoke-M4dMigration` step types. The migration graph rejects them during configuration validation.

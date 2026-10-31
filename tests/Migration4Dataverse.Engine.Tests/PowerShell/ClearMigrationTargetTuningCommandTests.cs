@@ -20,7 +20,7 @@ public sealed class ClearMigrationTargetTuningCommandTests
         Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
 
         powershell.Commands.Clear();
-        var whatIfResult = powershell.AddCommand("Clear-MigrationTargetTuning")
+        var whatIfResult = powershell.AddCommand("Clear-M4dMigrationTargetTuning")
             .AddParameter("DatabasePath", database.Path)
             .AddParameter("StepId", "AccountsTarget")
             .AddParameter("WhatIf", true)
@@ -30,7 +30,7 @@ public sealed class ClearMigrationTargetTuningCommandTests
         Assert.NotNull(store.GetDataverseTargetTuningProfile("AccountsTarget"));
 
         powershell.Commands.Clear();
-        var stepClearResult = powershell.AddCommand("Clear-MigrationTargetTuning")
+        var stepClearResult = powershell.AddCommand("Clear-M4dMigrationTargetTuning")
             .AddParameter("DatabasePath", database.Path)
             .AddParameter("StepId", "AccountsTarget")
             .AddParameter("Confirm", false)
@@ -40,7 +40,7 @@ public sealed class ClearMigrationTargetTuningCommandTests
         Assert.NotNull(store.GetDataverseTargetTuningProfile("ContactsTarget"));
 
         powershell.Commands.Clear();
-        var allClearResult = powershell.AddCommand("Clear-MigrationTargetTuning")
+        var allClearResult = powershell.AddCommand("Clear-M4dMigrationTargetTuning")
             .AddParameter("DatabasePath", database.Path)
             .AddParameter("All", true)
             .AddParameter("Confirm", false)

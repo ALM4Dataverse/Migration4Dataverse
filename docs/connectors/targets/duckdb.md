@@ -22,7 +22,7 @@ $steps = @(
     }
 )
 
-Invoke-Migration -DatabasePath './migration.sqlite3' `
+Invoke-M4dMigration -DatabasePath './migration.sqlite3' `
     -RunName 'DuckDB write' -Steps $steps `
     -Connections @{ 'duckdb-target' = $targetFile }
 ```

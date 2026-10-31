@@ -2,7 +2,7 @@ using System.Management.Automation;
 
 namespace Migration4Dataverse.Engine.PowerShell;
 
-[Cmdlet(VerbsCommon.Get, "MigrationDataverseConnectionThroughput")]
+[Cmdlet(VerbsCommon.Get, "M4dMigrationDataverseConnectionThroughput")]
 [OutputType(typeof(DataverseConnectionPoolDashboardSnapshot))]
 public sealed class GetMigrationDataverseConnectionThroughputCommand : MigrationStoreCmdletBase
 {

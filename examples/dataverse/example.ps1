@@ -937,13 +937,13 @@ $steps += @(
 
 $runName = 'Salesforce Kaggle sample dataset'
 
-$dashboard = Start-MigrationDashboard -DatabasePath $databasePath
+$dashboard = Start-M4dMigrationDashboard -DatabasePath $databasePath
 try {
     Write-Host 'Migration dashboard is available at:'
     Write-Host "  $($dashboard.Url)"
     # Dataverse target batch size and concurrency are fixed for the run; legacy tuning profiles are ignored.
-    # Clear legacy profiles from older versions with Clear-MigrationTargetTuning if needed.
-    Invoke-Migration `
+    # Clear legacy profiles from older versions with Clear-M4dMigrationTargetTuning if needed.
+    Invoke-M4dMigration `
         -DatabasePath $databasePath `
         -RunName $runName `
         -RunId $runId `
@@ -976,5 +976,5 @@ catch {
     throw
 }
 finally {
-    Stop-MigrationDashboard -Dashboard $dashboard
+    Stop-M4dMigrationDashboard -Dashboard $dashboard
 }

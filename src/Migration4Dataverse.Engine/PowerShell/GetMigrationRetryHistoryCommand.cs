@@ -3,7 +3,7 @@ using Migration4Dataverse.Engine.Storage;
 
 namespace Migration4Dataverse.Engine.PowerShell;
 
-[Cmdlet(VerbsCommon.Get, "MigrationRetryHistory")]
+[Cmdlet(VerbsCommon.Get, "M4dMigrationRetryHistory")]
 [OutputType(typeof(MigrationBatchRetryHistory))]
 public sealed class GetMigrationRetryHistoryCommand : MigrationStoreCmdletBase
 {

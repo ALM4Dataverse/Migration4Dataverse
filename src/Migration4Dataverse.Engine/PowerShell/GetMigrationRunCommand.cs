@@ -3,7 +3,7 @@ using Migration4Dataverse.Engine.Storage;
 
 namespace Migration4Dataverse.Engine.PowerShell;
 
-[Cmdlet(VerbsCommon.Get, "MigrationRun")]
+[Cmdlet(VerbsCommon.Get, "M4dMigrationRun")]
 [OutputType(typeof(MigrationRunSummary))]
 public sealed class GetMigrationRunCommand : PSCmdlet
 {

@@ -30,7 +30,7 @@ The callback receives:
 
 It must emit exactly one Boolean `$true` after success. Exceptions, no output, extra output, `$false`, or any non-Boolean value fail the batch. Send diagnostics to non-output streams.
 
-Mapped binary fields are `MigrationBinaryValue` instances. Open them with `OpenRead()` and stream to the provider SDK; do not call `ToBase64String()` unless the destination requires a string. A callback can create a replacement with `CreateWriter()` or use `New-MigrationBinaryValue` with the supplied `BinaryStagingRoot`.
+Mapped binary fields are `MigrationBinaryValue` instances. Open them with `OpenRead()` and stream to the provider SDK; do not call `ToBase64String()` unless the destination requires a string. A callback can create a replacement with `CreateWriter()` or use `New-M4dMigrationBinaryValue` with the supplied `BinaryStagingRoot`.
 
 | Logical mapped value | Type received by the callback |
 |---|---|

@@ -1,9 +1,9 @@
 # Internal data-flow transformations
 
-This reference primarily describes the engine's separate data-flow pipeline. Except for the database-backed transform sections in [transform.md](./transform.md#database-backed-migration-graph-transforms), it is not part of the supported `Invoke-Migration` step contract.
+This reference primarily describes the engine's separate data-flow pipeline. Except for the database-backed transform sections in [transform.md](./transform.md#database-backed-migration-graph-transforms), it is not part of the supported `Invoke-M4dMigration` step contract.
 
 > [!IMPORTANT]
-> The C# transformation types and this pipeline are internal implementation details, not a supported public C# API. For the PowerShell steps supported by `Invoke-Migration`, see [migration step configuration](../../configuration.md).
+> The C# transformation types and this pipeline are internal implementation details, not a supported public C# API. For the PowerShell steps supported by `Invoke-M4dMigration`, see [migration step configuration](../../configuration.md).
 
 PowerShell callers of this internal pipeline define it as a hashtable and put each Transform or Filter script block directly in that node's `Script` property. The engine extracts those blocks internally; the configuration does not need to be converted to JSON or paired with a separate script map.
 

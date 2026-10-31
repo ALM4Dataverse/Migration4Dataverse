@@ -3,7 +3,7 @@ using Migration4Dataverse.Engine.Storage;
 
 namespace Migration4Dataverse.Engine.PowerShell;
 
-[Cmdlet(VerbsLifecycle.Start, "MigrationDatabaseServer")]
+[Cmdlet(VerbsLifecycle.Start, "M4dMigrationDatabaseServer")]
 [OutputType(typeof(void))]
 public sealed class StartMigrationDatabaseServerCommand : PSCmdlet
 {

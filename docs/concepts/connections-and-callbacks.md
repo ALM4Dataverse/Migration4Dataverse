@@ -1,6 +1,6 @@
 # Connections and callbacks
 
-Runtime connection values are passed to `Invoke-Migration` separately from step definitions using `-Connections`. Source and Target steps refer to them by `ConnectionId`. For SQLite and DuckDB, use a `FileInfo` naming the database or a `DirectoryInfo` plus a relative step `Path`; the engine creates and disposes the database connection and loads the provider automatically. The caller owns the lifetime of other supplied runtime objects and must not place secrets or live runtime objects in step configuration.
+Runtime connection values are passed to `Invoke-M4dMigration` separately from step definitions using `-Connections`. Source and Target steps refer to them by `ConnectionId`. For SQLite and DuckDB, use a `FileInfo` naming the database or a `DirectoryInfo` plus a relative step `Path`; the engine creates and disposes the database connection and loads the provider automatically. The caller owns the lifetime of other supplied runtime objects and must not place secrets or live runtime objects in step configuration.
 
 For Dataverse, create and authenticate the connection with `Rnwood.Dataverse.Data.PowerShell`. Migration4Dataverse supplies that connection to the module's source and target cmdlets; it does not replace the module's authentication or connection management.
 

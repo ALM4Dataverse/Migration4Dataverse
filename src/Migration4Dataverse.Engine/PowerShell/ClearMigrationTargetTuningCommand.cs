@@ -5,7 +5,7 @@ namespace Migration4Dataverse.Engine.PowerShell;
 
 [Cmdlet(
     VerbsCommon.Clear,
-    "MigrationTargetTuning",
+    "M4dMigrationTargetTuning",
     DefaultParameterSetName = "Step",
     SupportsShouldProcess = true,
     ConfirmImpact = ConfirmImpact.Medium)]

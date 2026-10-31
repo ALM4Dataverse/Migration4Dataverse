@@ -1,6 +1,6 @@
 # Binary files and documents
 
-Binary content is passed through the migration graph as a `MigrationBinaryValue`. Its bytes are staged in a run-scoped directory; queued batches store relative references and metadata rather than Base64 payloads. Mappings may pass a value unchanged, replace it, or use the streaming helpers documented in [`New-MigrationBinaryValue`](../cmdlets/new-migration-binary-value.md).
+Binary content is passed through the migration graph as a `MigrationBinaryValue`. Its bytes are staged in a run-scoped directory; queued batches store relative references and metadata rather than Base64 payloads. Mappings may pass a value unchanged, replace it, or use the streaming helpers documented in [`New-M4dMigrationBinaryValue`](../cmdlets/new-migration-binary-value.md).
 
 For the shared type contract and manifestless round-trip behavior with CSV, JSON Lines, and Parquet, see [binary values and sidecar files](../concepts/binary-values-and-sidecars.md).
 

@@ -967,7 +967,7 @@ internal static partial class PowerShellMigrationStepFactory
         if (type is "sort" or "merge")
         {
             throw new NotSupportedException(
-                $"Migration step type '{type}' requires coordinated stream-wide execution and is not yet supported by Invoke-Migration.");
+                $"Migration step type '{type}' requires coordinated stream-wide execution and is not yet supported by Invoke-M4dMigration.");
         }
         if (type is not ("source" or "target" or "transform" or "filter" or "append" or "join" or "callback"))
         {

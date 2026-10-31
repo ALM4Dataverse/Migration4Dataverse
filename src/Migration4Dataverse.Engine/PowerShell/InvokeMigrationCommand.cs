@@ -9,7 +9,7 @@ using Migration4Dataverse.Engine.Storage;
 
 namespace Migration4Dataverse.Engine.PowerShell;
 
-[Cmdlet(VerbsLifecycle.Invoke, "Migration")]
+[Cmdlet(VerbsLifecycle.Invoke, "M4dMigration")]
 [OutputType(typeof(DependencySchedulerResult))]
 public sealed class InvokeMigrationCommand : PSCmdlet
 {

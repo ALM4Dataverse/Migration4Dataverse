@@ -1,4 +1,4 @@
-# Invoke-Migration
+# Invoke-M4dMigration
 
 Runs a PowerShell-defined migration graph. Use [step configuration](../configuration.md) for the graph shape and the [connector guides](../connectors/sources/README.md) for connector-specific options.
 
@@ -34,7 +34,7 @@ SQLite and DuckDB Sources and Targets use a `FileInfo` naming the database file 
 | `-DebugCaptureRetentionDays` | No | `30`; range `1..3650` | Retention for debug snapshots. Basic run, step, batch, outcome, and checkpoint metadata is not removed by this setting. |
 | `-WhatIf` | No | Off | Execute readers and transforms, capture planned target rows, and skip target writes and callback batch handlers. |
 
-The cmdlet reports live progress and returns a run-result object when the run finishes. See [`Get-MigrationRun`](./get-migration-run.md) and the [dashboard guide](./migration-dashboard.md) for persisted status and progress details.
+The cmdlet reports live progress and returns a run-result object when the run finishes. See [`Get-M4dMigrationRun`](./get-migration-run.md) and the [dashboard guide](./migration-dashboard.md) for persisted status and progress details.
 
 ## Error and recovery behavior
 
@@ -46,7 +46,7 @@ Accepted row errors remain recorded and cause a final `CompletedWithErrors` run 
 
 An unaccepted row error or any exhausted reader/handler failure stops the whole run, including independent branches. Required downstream steps do not start after a failed prerequisite. Work that completed before the failure remains committed, and the engine does not roll back external writes.
 
-The dashboard records run-level details and lets operators inspect or export failed-batch details. **Queue all failed batches for replay** only after fixing the cause and reconciling possible external writes. Alternatively, an operator can explicitly **continue downstream from one failed step** when its errors cannot be resolved. This does not retry the step: downstream receives only successful outputs already emitted by it, and continuing after a source-reader failure skips the unread remainder. Both actions persist a decision but do not start a scheduler; rerun `Invoke-Migration` with the same `RunId`, `RunName`, step definition, and compatible hash. If the fix changes the hashed step definition, start a new run instead. See [recovery and replay](../concepts/recovery-and-replay.md).
+The dashboard records run-level details and lets operators inspect or export failed-batch details. **Queue all failed batches for replay** only after fixing the cause and reconciling possible external writes. Alternatively, an operator can explicitly **continue downstream from one failed step** when its errors cannot be resolved. This does not retry the step: downstream receives only successful outputs already emitted by it, and continuing after a source-reader failure skips the unread remainder. Both actions persist a decision but do not start a scheduler; rerun `Invoke-M4dMigration` with the same `RunId`, `RunName`, step definition, and compatible hash. If the fix changes the hashed step definition, start a new run instead. See [recovery and replay](../concepts/recovery-and-replay.md).
 
 > [!WARNING]
 > A queued batch may repeat target or callback side effects. Design writes to be idempotent and reconcile partial effects before replay. Error and outcome exports may contain migration data; protect them like the migration database.
@@ -90,7 +90,7 @@ $steps = @(
     }
 )
 
-Invoke-Migration -DatabasePath './state/migration.sqlite3' `
+Invoke-M4dMigration -DatabasePath './state/migration.sqlite3' `
     -RunName 'Customer load' -Steps $steps `
     -Connections @{ input = $inputDirectory; crm = $dataverseConnection }
 ```
@@ -110,11 +110,11 @@ The scheduler persists source positions and batch payloads. After interruption, 
 
 ## Connections and parallel processes
 
-The first process to open a database starts its local owner implicitly. When multiple PowerShell processes need to share a database, run [`Start-MigrationDatabaseServer`](./migration-database-server.md) in a dedicated process first. The owner handles SQLite access; schedulers, workers, connections, and callbacks stay in their caller processes. Different run IDs can run concurrently through one owner, while a lease prevents duplicate schedulers for the same run.
+The first process to open a database starts its local owner implicitly. When multiple PowerShell processes need to share a database, run [`Start-M4dMigrationDatabaseServer`](./migration-database-server.md) in a dedicated process first. The owner handles SQLite access; schedulers, workers, connections, and callbacks stay in their caller processes. Different run IDs can run concurrently through one owner, while a lease prevents duplicate schedulers for the same run.
 
 ## Dataverse throughput settings
 
-Dataverse targets default to fixed batches of 10, independently of `-BatchSize`; an explicit `Target.BatchSize` overrides that default, up to 1,000. Connection pools enforce a separate concurrency budget per identity from each connection's recommendation. Target concurrency is also capped by `-MaxDegreeOfParallelism` (default 64); a numeric target `MaxConcurrency` can set a lower cap. Legacy tuning profiles from earlier versions are ignored; use [`Clear-MigrationTargetTuning`](./clear-migration-target-tuning.md) to remove them if desired.
+Dataverse targets default to fixed batches of 10, independently of `-BatchSize`; an explicit `Target.BatchSize` overrides that default, up to 1,000. Connection pools enforce a separate concurrency budget per identity from each connection's recommendation. Target concurrency is also capped by `-MaxDegreeOfParallelism` (default 64); a numeric target `MaxConcurrency` can set a lower cap. Legacy tuning profiles from earlier versions are ignored; use [`Clear-M4dMigrationTargetTuning`](./clear-migration-target-tuning.md) to remove them if desired.
 
 Retries are enabled by default. Use `-DataverseNoRetryDiagnosticMode` only when intentionally testing the response without the normal retry layers; transient errors can then fail the run immediately. See the [Dataverse target guide](../connectors/targets/dataverse.md) for adapter-specific behavior.
 

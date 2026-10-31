@@ -35,7 +35,7 @@ export function RunNotices({ controller }: { controller: DashboardController }) 
       );
       setRecoveryMessage(
         result.queuedBatches > 0
-          ? `${number.format(result.queuedBatches)} batches are queued. Rerun Invoke-Migration with this run ID and the unchanged step definition.`
+          ? `${number.format(result.queuedBatches)} batches are queued. Rerun Invoke-M4dMigration with this run ID and the unchanged step definition.`
           : "There are no failed batches to queue.",
       );
       await controller.refresh();
@@ -59,7 +59,7 @@ export function RunNotices({ controller }: { controller: DashboardController }) 
         { method: "POST" },
       );
       setRecoveryMessage(
-        `Continuation past "${stepId}" is recorded. Rerun Invoke-Migration with this run ID and the unchanged step definition.`,
+        `Continuation past "${stepId}" is recorded. Rerun Invoke-M4dMigration with this run ID and the unchanged step definition.`,
       );
       await controller.refresh();
     } catch (reason) {
@@ -116,7 +116,7 @@ export function RunNotices({ controller }: { controller: DashboardController }) 
               </details>
             </>
           ) : (
-            <span> No run-level failure details were persisted; check the Invoke-Migration output.</span>
+            <span> No run-level failure details were persisted; check the Invoke-M4dMigration output.</span>
           )}
           <p>
             The run stopped globally. Completed writes are not rolled back; inspect and reconcile them before replay.

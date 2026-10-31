@@ -15,28 +15,28 @@
         }
     )
     FunctionsToExport = @(
-        'New-MigrationJobStore'
-        'Complete-MigrationBatch'
-        'Set-MigrationRunStatus'
-        'Start-MigrationDashboard'
-        'Stop-MigrationDashboard'
+        'New-M4dMigrationJobStore'
+        'Complete-M4dMigrationBatch'
+        'Set-M4dMigrationRunStatus'
+        'Start-M4dMigrationDashboard'
+        'Stop-M4dMigrationDashboard'
     )
     CmdletsToExport = @(
-        'Invoke-Migration'
-        'Get-MigrationRun'
-        'Get-MigrationStep'
-        'Get-MigrationBatch'
-        'Get-MigrationError'
-        'Get-MigrationRetryHistory'
-        'Get-MigrationDebugRow'
-        'Get-MigrationDebugRowBinary'
-        'Get-MigrationConfigurationPreview'
-        'Get-MigrationProcessMetric'
-        'Get-MigrationDataverseConnectionThroughput'
-        'Invoke-MigrationRecovery'
-        'Clear-MigrationTargetTuning'
-        'Start-MigrationDatabaseServer'
-        'New-MigrationBinaryValue'
+        'Invoke-M4dMigration'
+        'Get-M4dMigrationRun'
+        'Get-M4dMigrationStep'
+        'Get-M4dMigrationBatch'
+        'Get-M4dMigrationError'
+        'Get-M4dMigrationRetryHistory'
+        'Get-M4dMigrationDebugRow'
+        'Get-M4dMigrationDebugRowBinary'
+        'Get-M4dMigrationConfigurationPreview'
+        'Get-M4dMigrationProcessMetric'
+        'Get-M4dMigrationDataverseConnectionThroughput'
+        'Invoke-M4dMigrationRecovery'
+        'Clear-M4dMigrationTargetTuning'
+        'Start-M4dMigrationDatabaseServer'
+        'New-M4dMigrationBinaryValue'
     )
     VariablesToExport = @()
     AliasesToExport = @()

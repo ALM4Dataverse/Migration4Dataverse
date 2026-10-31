@@ -3,7 +3,7 @@ using Migration4Dataverse.Engine.Connectors;
 
 namespace Migration4Dataverse.Engine.PowerShell;
 
-[Cmdlet(VerbsCommon.New, "MigrationBinaryValue", DefaultParameterSetName = Base64ParameterSet)]
+[Cmdlet(VerbsCommon.New, "M4dMigrationBinaryValue", DefaultParameterSetName = Base64ParameterSet)]
 [OutputType(typeof(MigrationBinaryValue))]
 public sealed class NewMigrationBinaryValueCommand : PSCmdlet
 {

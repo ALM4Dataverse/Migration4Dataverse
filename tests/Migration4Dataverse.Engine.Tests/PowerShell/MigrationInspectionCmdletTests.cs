@@ -62,7 +62,7 @@ public sealed class MigrationInspectionCmdletTests
         using var powershell = ImportEngineCmdlets();
         var run = InvokeSingle<MigrationRunSummary>(
             powershell,
-            "Get-MigrationRun",
+            "Get-M4dMigrationRun",
             ("DatabasePath", databasePath),
             ("RunId", runId));
         Assert.Equal("Failed", run.Status);
@@ -70,7 +70,7 @@ public sealed class MigrationInspectionCmdletTests
 
         var step = InvokeSingle<MigrationDashboardStep>(
             powershell,
-            "Get-MigrationStep",
+            "Get-M4dMigrationStep",
             ("DatabasePath", databasePath),
             ("RunId", runId),
             ("StepId", stepId));
@@ -78,7 +78,7 @@ public sealed class MigrationInspectionCmdletTests
 
         var batch = InvokeSingle<MigrationDashboardBatch>(
             powershell,
-            "Get-MigrationBatch",
+            "Get-M4dMigrationBatch",
             ("DatabasePath", databasePath),
             ("RunId", runId),
             ("StepId", stepId));
@@ -86,7 +86,7 @@ public sealed class MigrationInspectionCmdletTests
 
         var error = InvokeSingle<MigrationErrorDetail>(
             powershell,
-            "Get-MigrationError",
+            "Get-M4dMigrationError",
             ("DatabasePath", databasePath),
             ("RunId", runId));
         Assert.Equal("Batch", error.Scope);
@@ -95,14 +95,14 @@ public sealed class MigrationInspectionCmdletTests
 
         var retryHistory = InvokeAll<MigrationBatchRetryHistory>(
             powershell,
-            "Get-MigrationRetryHistory",
+            "Get-M4dMigrationRetryHistory",
             ("DatabasePath", databasePath),
             ("RunId", runId));
         Assert.Empty(retryHistory);
 
         var page = InvokeSingle<MigrationDebugSnapshotPage>(
             powershell,
-            "Get-MigrationDebugRow",
+            "Get-M4dMigrationDebugRow",
             ("DatabasePath", databasePath),
             ("RunId", runId),
             ("StepId", stepId),
@@ -110,7 +110,7 @@ public sealed class MigrationInspectionCmdletTests
         Assert.Equal(1, page.TotalCount);
         var trace = InvokeAll<MigrationDebugSnapshot>(
             powershell,
-            "Get-MigrationDebugRow",
+            "Get-M4dMigrationDebugRow",
             ("DatabasePath", databasePath),
             ("RunId", runId),
             ("Trace", true),
@@ -119,7 +119,7 @@ public sealed class MigrationInspectionCmdletTests
 
         var recovery = InvokeSingle<MigrationRecoveryResult>(
             powershell,
-            "Invoke-MigrationRecovery",
+            "Invoke-M4dMigrationRecovery",
             ("DatabasePath", databasePath),
             ("RunId", runId),
             ("StepId", stepId),
@@ -145,7 +145,7 @@ public sealed class MigrationInspectionCmdletTests
         using var powershell = ImportEngineCmdlets();
         var replay = InvokeSingle<MigrationRecoveryResult>(
             powershell,
-            "Invoke-MigrationRecovery",
+            "Invoke-M4dMigrationRecovery",
             ("DatabasePath", databasePath),
             ("RunId", "replay-run"),
             ("RetryFailedBatches", true));
@@ -153,7 +153,7 @@ public sealed class MigrationInspectionCmdletTests
         Assert.Equal("Pending", store.GetBatch("replay-batch")!.State.ToString());
         var history = InvokeAll<MigrationBatchRetryHistory>(
             powershell,
-            "Get-MigrationRetryHistory",
+            "Get-M4dMigrationRetryHistory",
             ("DatabasePath", databasePath),
             ("RunId", "replay-run"));
         Assert.Single(history);
@@ -179,7 +179,7 @@ public sealed class MigrationInspectionCmdletTests
 
         var continuation = InvokeSingle<MigrationRecoveryResult>(
             powershell,
-            "Invoke-MigrationRecovery",
+            "Invoke-M4dMigrationRecovery",
             ("DatabasePath", databasePath),
             ("RunId", sourceRunId),
             ("StepId", "Source"),
@@ -189,7 +189,7 @@ public sealed class MigrationInspectionCmdletTests
 
         var sourceError = InvokeSingle<MigrationErrorDetail>(
             powershell,
-            "Get-MigrationError",
+            "Get-M4dMigrationError",
             ("DatabasePath", databasePath),
             ("RunId", sourceRunId));
         Assert.Equal("Run", sourceError.Scope);
@@ -209,14 +209,14 @@ public sealed class MigrationInspectionCmdletTests
 
         var preview = InvokeSingle<System.Text.Json.JsonElement>(
             powershell,
-            "Get-MigrationConfigurationPreview",
+            "Get-M4dMigrationConfigurationPreview",
             ("Steps", new[] { step }),
             ("Connections", new Hashtable(StringComparer.Ordinal)));
         Assert.Equal("Source", preview.GetProperty("steps")[0].GetProperty("id").GetString());
 
         var metrics = InvokeSingle<MigrationProcessMetricSnapshot>(
             powershell,
-            "Get-MigrationProcessMetric");
+            "Get-M4dMigrationProcessMetric");
         Assert.True(metrics.LogicalProcessorCount > 0);
         Assert.True(metrics.WorkingSetBytes > 0);
     }
@@ -259,7 +259,7 @@ public sealed class MigrationInspectionCmdletTests
         using var powershell = ImportEngineCmdlets();
         var restored = InvokeSingle<MigrationBinaryValue>(
             powershell,
-            "Get-MigrationDebugRowBinary",
+            "Get-M4dMigrationDebugRowBinary",
             ("DatabasePath", databasePath),
             ("RunId", runId),
             ("StepId", stepId),
@@ -286,7 +286,7 @@ public sealed class MigrationInspectionCmdletTests
 
         var snapshots = InvokeAll<DataverseConnectionPoolDashboardSnapshot>(
             powershell,
-            "Get-MigrationDataverseConnectionThroughput",
+            "Get-M4dMigrationDataverseConnectionThroughput",
             ("DatabasePath", databasePath),
             ("RunId", runId));
 

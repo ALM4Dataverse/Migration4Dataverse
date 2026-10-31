@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace Migration4Dataverse.Engine.PowerShell;
 
-[Cmdlet(VerbsCommon.Get, "MigrationConfigurationPreview")]
+[Cmdlet(VerbsCommon.Get, "M4dMigrationConfigurationPreview")]
 [OutputType(typeof(JsonElement))]
 public sealed class GetMigrationConfigurationPreviewCommand : PSCmdlet
 {

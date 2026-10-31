@@ -9,7 +9,7 @@
 > [!WARNING]
 > This repository is an early proof of concept, not a production-ready migration product. Review the examples and test them against a non-production environment before using them with real data.
 
-Migration4Dataverse lets you describe a migration as PowerShell steps and run it with `Invoke-Migration`. Source and target connections are supplied separately from the step definitions. The engine handles batching, dependencies, local run history, and recovery.
+Migration4Dataverse lets you describe a migration as PowerShell steps and run it with `Invoke-M4dMigration`. Source and target connections are supplied separately from the step definitions. The engine handles batching, dependencies, local run history, and recovery.
 
 Supported connectors include local files (CSV, JSON Lines, Parquet, Excel, binary, and custom formats), Azure Blob, Amazon S3, Azure Data Lake Storage Gen2, Google Cloud Storage, SQLite, DuckDB, SQL Server, PostgreSQL, MySQL, Oracle, HTTP/OData, Salesforce Sales Cloud, SharePoint, HubSpot, Zendesk, ServiceNow, MongoDB, Dataverse, and custom PowerShell callbacks. A local dashboard can show run progress, outcomes, and optional captured-row lineage.
 
@@ -19,7 +19,7 @@ Dataverse migrations are often specific to an organization's data model: each jo
 
 Migration definitions, row mappings, and custom callbacks are ordinary PowerShell scripts. They can be read, reviewed, versioned, and changed without compiling an extension for each transformation. PowerShell remains the flexible orchestration surface; the runtime supplies bounded batching, dependency coordination, persisted run state, checkpoints, and recovery so those mechanics do not have to be reimplemented in every migration.
 
-The project is also intended to run locally without SSIS, a separate SQL Server, or an Azure-hosted execution service. Embedded SQLite and DuckDB can provide local staging and SQL-based processing. A local SQLite owner can coordinate store access for multiple PowerShell processes, while migration work stays in those callers; see [`Start-MigrationDatabaseServer`](./docs/cmdlets/migration-database-server.md).
+The project is also intended to run locally without SSIS, a separate SQL Server, or an Azure-hosted execution service. Embedded SQLite and DuckDB can provide local staging and SQL-based processing. A local SQLite owner can coordinate store access for multiple PowerShell processes, while migration work stays in those callers; see [`Start-M4dMigrationDatabaseServer`](./docs/cmdlets/migration-database-server.md).
 
 > [!NOTE]
 > This is a single-machine migration tool, not a distributed scale-out platform.
@@ -128,7 +128,7 @@ $connections = @{
     crm = $dataverseConnection
 }
 
-Invoke-Migration -DatabasePath './migration.sqlite3' `
+Invoke-M4dMigration -DatabasePath './migration.sqlite3' `
     -RunName 'Account import' -Steps $steps -Connections $connections
 ```
 

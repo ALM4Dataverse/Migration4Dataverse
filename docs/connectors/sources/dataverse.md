@@ -52,7 +52,7 @@ Source = @{
 }
 ```
 
-The mapped `new_contractfile` value is a `MigrationBinaryValue`, not an in-memory byte array or a Base64 string. It can pass through unchanged or be streamed through a mapping; see [`New-MigrationBinaryValue`](../../cmdlets/new-migration-binary-value.md). `FileColumns` is currently supported only for Simple queries.
+The mapped `new_contractfile` value is a `MigrationBinaryValue`, not an in-memory byte array or a Base64 string. It can pass through unchanged or be streamed through a mapping; see [`New-M4dMigrationBinaryValue`](../../cmdlets/new-migration-binary-value.md). `FileColumns` is currently supported only for Simple queries.
 
 For Simple queries against `annotation` and `activitymimeattachment`, a non-empty `documentbody` or `body` field is recognized as Base64 attachment content and staged as a `MigrationBinaryValue`. Include the content column in the selected fields. The upstream Dataverse record cmdlet returns these bodies as Base64 strings, so decoding avoids storing Base64 in queued migration batches but the upstream row itself is materialized by that cmdlet.
 
@@ -167,7 +167,7 @@ Source = @{
 }
 ```
 
-Each partition needs a unique, stable `Id`. Its `Options` are merged over the source's `Options`: omitted fields inherit the base value, and supplied fields replace it. All partitions must use the source's `QueryType`, and each query must independently return rows in ascending `Key` order. You are responsible for making the partitions complete and non-overlapping; the adapter detects duplicate keys but cannot detect gaps. For Simple and FetchXML sources, count preflight sums the per-partition counts. Partitioned sources require at least two partitions, and the number of partitions cannot exceed `Invoke-Migration -MaxDegreeOfParallelism`. The migration checkpoints a cursor for every partition, so preserve the partition IDs, filters, and query behavior when resuming a run.
+Each partition needs a unique, stable `Id`. Its `Options` are merged over the source's `Options`: omitted fields inherit the base value, and supplied fields replace it. All partitions must use the source's `QueryType`, and each query must independently return rows in ascending `Key` order. You are responsible for making the partitions complete and non-overlapping; the adapter detects duplicate keys but cannot detect gaps. For Simple and FetchXML sources, count preflight sums the per-partition counts. Partitioned sources require at least two partitions, and the number of partitions cannot exceed `Invoke-M4dMigration -MaxDegreeOfParallelism`. The migration checkpoints a cursor for every partition, so preserve the partition IDs, filters, and query behavior when resuming a run.
 
 ## Connection pools and request balancing
 
