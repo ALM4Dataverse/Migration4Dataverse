@@ -381,6 +381,73 @@ public sealed class SqliteJobStoreTests
     }
 
     [Fact]
+    public void FailedBatchesCanBeQueuedForReplayWithAuditedHistory()
+    {
+        using var database = new TemporaryDatabase();
+        const string runId = "retry-failed-batches-run";
+        var now = new DateTimeOffset(2026, 10, 20, 12, 0, 0, TimeSpan.Zero);
+        var store = new SqliteMigrationStore(database.Path);
+        store.CreateRun(runId, "retry-test", "hash-1", now);
+        store.EnqueueBatch(runId, "Accounts", 0, "failed-batch", null, """{"Records":[]}""", now);
+        var lease = store.TryLeaseNextBatch(runId, "worker", TimeSpan.FromMinutes(1), now);
+        Assert.NotNull(lease);
+        store.CompleteBatch(
+            lease.BatchId,
+            "worker",
+            """{"succeeded":0,"failed":[{"id":"account-1"}]}""",
+            hasErrors: true,
+            lastError: "Target rejected account.",
+            nowUtc: now.AddSeconds(1));
+        store.SetRunFailure(
+            runId,
+            new MigrationRunFailure(
+                "Batch processing",
+                "Accounts",
+                "Target rejected account.",
+                "InvalidOperationException",
+                "Target rejected account.\n   at Example.Target()",
+                now.AddSeconds(2)));
+        store.SetRunStatus(runId, MigrationRunStatus.Failed, now.AddSeconds(2));
+
+        Assert.Equal("Batch processing", store.GetDashboardRun(runId).Failure?.Phase);
+        store.SetRunStatus(runId, MigrationRunStatus.Running, now.AddSeconds(3));
+        Assert.Throws<InvalidOperationException>(() =>
+            store.QueueFailedBatchesForRetry(runId, now.AddSeconds(4)));
+        store.SetRunFailure(
+            runId,
+            new MigrationRunFailure(
+                "Batch processing",
+                "Accounts",
+                "Target rejected account.",
+                "InvalidOperationException",
+                "Target rejected account.\n   at Example.Target()",
+                now.AddSeconds(4)));
+        store.SetRunStatus(runId, MigrationRunStatus.Failed, now.AddSeconds(4));
+
+        var queued = store.QueueFailedBatchesForRetry(runId, now.AddSeconds(5));
+        Assert.Equal(1, queued);
+        var pending = store.GetBatch(lease.BatchId);
+        Assert.NotNull(pending);
+        Assert.Equal(MigrationBatchState.Pending, pending.State);
+        Assert.Equal(0, pending.Attempts);
+        Assert.Null(pending.OutcomesJson);
+        Assert.NotNull(pending.PayloadJson);
+
+        var retry = Assert.Single(store.GetDashboardBatchRetryHistory(runId));
+        Assert.Equal(lease.BatchId, retry.BatchId);
+        Assert.Equal("Accounts", retry.StepId);
+        Assert.Equal(1, retry.PreviousAttempts);
+        Assert.Equal("Target rejected account.", retry.PreviousLastError);
+        Assert.Contains("account-1", retry.PreviousOutcomesJson);
+
+        var run = store.GetDashboardRun(runId);
+        Assert.Equal("Batch processing", run.Failure?.Phase);
+        Assert.Equal("Accounts", run.Failure?.StepId);
+        store.SetRunStatus(runId, MigrationRunStatus.Running, now.AddSeconds(6));
+        Assert.Null(store.GetDashboardRun(runId).Failure);
+    }
+
+    [Fact]
     public void ExistingRunCannotBeResumedWithDifferentJobDefinition()
     {
         using var database = new TemporaryDatabase();
@@ -565,6 +632,9 @@ public sealed class SqliteJobStoreTests
         using var database = new TemporaryDatabase();
         var store = new SqliteMigrationStore(database.Path);
         store.CreateRun("target-id-run", "test-run", "hash-1");
+        store.SetRunStatus("target-id-run", MigrationRunStatus.CompletedWithErrors);
+        var reopenedStore = new SqliteMigrationStore(database.Path);
+        Assert.Equal("CompletedWithErrors", reopenedStore.GetDashboardRun("target-id-run").Status);
 
         using var verificationConnection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
@@ -617,6 +687,15 @@ public sealed class SqliteJobStoreTests
             Assert.True(migrationReader.Read());
             Assert.Equal(14, migrationReader.GetInt32(0));
             Assert.Equal("014-connection-scoped-tuning-profiles", migrationReader.GetString(1));
+            Assert.True(migrationReader.Read());
+            Assert.Equal(15, migrationReader.GetInt32(0));
+            Assert.Equal("015-run-failure-recovery", migrationReader.GetString(1));
+            Assert.True(migrationReader.Read());
+            Assert.Equal(16, migrationReader.GetInt32(0));
+            Assert.Equal("016-error-threshold-continuation", migrationReader.GetString(1));
+            Assert.True(migrationReader.Read());
+            Assert.Equal(17, migrationReader.GetInt32(0));
+            Assert.Equal("017-row-error-retry", migrationReader.GetString(1));
             Assert.False(migrationReader.Read());
         }
 
@@ -667,6 +746,16 @@ public sealed class SqliteJobStoreTests
         Assert.Equal("JoinRelationshipMatches", verificationCommand.ExecuteScalar()?.ToString());
         verificationCommand.CommandText = """
             SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name = 'BatchRowErrors';
+            """;
+        Assert.Equal("BatchRowErrors", verificationCommand.ExecuteScalar()?.ToString());
+        verificationCommand.CommandText = """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name = 'BatchRowRetryLinks';
+            """;
+        Assert.Equal("BatchRowRetryLinks", verificationCommand.ExecuteScalar()?.ToString());
+        verificationCommand.CommandText = """
+            SELECT name FROM sqlite_master
             WHERE type = 'table' AND name = 'BatchParentReferences';
             """;
         Assert.Equal("BatchParentReferences", verificationCommand.ExecuteScalar()?.ToString());
@@ -675,6 +764,11 @@ public sealed class SqliteJobStoreTests
             WHERE type = 'table' AND name = 'DataverseTargetTuningProfiles';
             """;
         Assert.Equal("DataverseTargetTuningProfiles", verificationCommand.ExecuteScalar()?.ToString());
+        verificationCommand.CommandText = """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table' AND name = 'BatchRetryHistory';
+            """;
+        Assert.Equal("BatchRetryHistory", verificationCommand.ExecuteScalar()?.ToString());
         verificationCommand.CommandText = """
             EXPLAIN QUERY PLAN
             DELETE FROM DebugSnapshots
@@ -705,6 +799,67 @@ public sealed class SqliteJobStoreTests
     }
 
     [Fact]
+    public void VersionFifteenDatabaseRebuildsRunStatusConstraintForAcceptedErrors()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        store.CreateRun("legacy-status-run", "legacy-status-test", "hash-1");
+
+        using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = database.Path
+        }.ToString()))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA foreign_keys = OFF;";
+            command.ExecuteNonQuery();
+            command.CommandText = """
+                BEGIN;
+                CREATE TABLE Runs_15 (
+                    RunId TEXT NOT NULL PRIMARY KEY,
+                    RunName TEXT NOT NULL,
+                    StepHash TEXT NOT NULL,
+                    Status TEXT NOT NULL CHECK (Status IN ('Running', 'Completed', 'Failed', 'Cancelled')),
+                    CreatedUtc TEXT NOT NULL,
+                    UpdatedUtc TEXT NOT NULL,
+                    SchedulerLeaseOwner TEXT NULL,
+                    SchedulerLeaseExpiresUtc TEXT NULL,
+                    PipelineJson TEXT NOT NULL DEFAULT '[]',
+                    DebugCaptureEnabled INTEGER NOT NULL DEFAULT 0,
+                    FinishedUtc TEXT NULL,
+                    DebugCaptureRetentionDays INTEGER NOT NULL DEFAULT 30,
+                    ConfigurationJson TEXT NOT NULL DEFAULT 'null',
+                    ConnectionInstancesJson TEXT NOT NULL DEFAULT '[]',
+                    FailureJson TEXT NULL
+                );
+                INSERT INTO Runs_15
+                SELECT RunId, RunName, StepHash, Status, CreatedUtc, UpdatedUtc,
+                       SchedulerLeaseOwner, SchedulerLeaseExpiresUtc, PipelineJson,
+                       DebugCaptureEnabled, FinishedUtc, DebugCaptureRetentionDays,
+                       ConfigurationJson, ConnectionInstancesJson, FailureJson
+                FROM Runs;
+                DROP TABLE Runs;
+                ALTER TABLE Runs_15 RENAME TO Runs;
+                ALTER TABLE Batches DROP COLUMN FailureAccepted;
+                DROP TABLE StepFailureContinuations;
+                DROP TABLE BatchRowRetryLinks;
+                DROP TABLE BatchRowErrors;
+                DELETE FROM SchemaMigrations WHERE Version = 17;
+                DELETE FROM SchemaMigrations WHERE Version = 16;
+                COMMIT;
+                """;
+            command.ExecuteNonQuery();
+            command.CommandText = "PRAGMA foreign_keys = ON;";
+            command.ExecuteNonQuery();
+        }
+
+        var upgradedStore = new SqliteMigrationStore(database.Path);
+        upgradedStore.SetRunStatus("legacy-status-run", MigrationRunStatus.CompletedWithErrors);
+        Assert.Equal("CompletedWithErrors", upgradedStore.GetDashboardRun("legacy-status-run").Status);
+    }
+
+    [Fact]
     public void VersionTenDatabaseGetsDebugSnapshotRetentionIndex()
     {
         using var database = new TemporaryDatabase();
@@ -720,6 +875,15 @@ public sealed class SqliteJobStoreTests
             using var command = connection.CreateCommand();
             command.CommandText = """
                 DROP TABLE DataverseTargetTuningProfiles;
+                DROP TABLE BatchRetryHistory;
+                DROP TABLE StepFailureContinuations;
+                DROP TABLE BatchRowRetryLinks;
+                DROP TABLE BatchRowErrors;
+                ALTER TABLE Batches DROP COLUMN FailureAccepted;
+                ALTER TABLE Runs DROP COLUMN FailureJson;
+                DELETE FROM SchemaMigrations WHERE Version = 17;
+                DELETE FROM SchemaMigrations WHERE Version = 16;
+                DELETE FROM SchemaMigrations WHERE Version = 15;
                 DELETE FROM SchemaMigrations WHERE Version = 14;
                 DELETE FROM SchemaMigrations WHERE Version = 13;
                 DELETE FROM SchemaMigrations WHERE Version = 12;

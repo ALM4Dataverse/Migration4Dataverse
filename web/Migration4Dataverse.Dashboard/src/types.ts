@@ -1,4 +1,4 @@
-export type RunStatus = "Running" | "Completed" | "Failed" | "Cancelled";
+export type RunStatus = "Running" | "Completed" | "CompletedWithErrors" | "Failed" | "Cancelled";
 
 export type JobStatus = "Running" | "Completed" | "Pending" | "Queued" | "Failed" | "Blocked" | "Configured";
 
@@ -31,6 +31,10 @@ export interface SchedulerLimits {
   maxDegreeOfParallelism: number;
   maxQueuedBatches: number;
   maxQueuedBatchesPerStep: number;
+  maxAttempts?: number;
+  maxErrorRatePercent?: number;
+  sourceReadMaxAttempts?: number;
+  sourceReadRetryDelaySeconds?: number;
 }
 
 export interface SchedulerSample {
@@ -81,6 +85,37 @@ export interface DashboardBatchError {
   lastError: string | null;
   outcomesJson: string | null;
   failedRows: number;
+  rowErrors: DashboardRowError[];
+}
+
+export interface DashboardRowError {
+  recordIndex: number;
+  error: string;
+  payloadJson: string;
+  isResolved: boolean;
+  retryCount: number;
+  retryState: string | null;
+  canRetry: boolean;
+}
+
+export interface DashboardRunFailure {
+  phase: string;
+  stepId: string | null;
+  message: string;
+  exceptionType: string;
+  details: string;
+  recordedUtc: string;
+  attempts: number;
+}
+
+export interface DashboardBatchRetryHistory {
+  retryId: number;
+  batchId: string;
+  stepId: string;
+  previousAttempts: number;
+  previousLastError: string | null;
+  previousOutcomesJson: string | null;
+  queuedUtc: string;
 }
 
 export interface TaskErrorDialogState {
@@ -126,6 +161,9 @@ export interface DashboardJob {
   activityPeriods: DashboardActivityPeriod[];
   firstBatchUtc: string | null;
   lastBatchUtc: string | null;
+  unacceptedErrorBatches?: number;
+  failureContinuationOverride?: boolean;
+  failureContinuationAllowed?: boolean;
 }
 
 export interface ConfigurationJob {
@@ -185,6 +223,7 @@ export interface RunSummary {
   batchesWithErrors: number;
   succeededRows: number;
   failedRows: number;
+  failure: DashboardRunFailure | null;
   jobs: DashboardJob[];
   configuration: MigrationConfiguration | null;
   connectionInstances: ConnectionInstanceSnapshot[];

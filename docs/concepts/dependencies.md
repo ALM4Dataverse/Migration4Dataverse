@@ -48,6 +48,9 @@ $steps = @(
 
 `NormalizeAccounts` and `AccountAudit` can process batches as `AccountsSource` produces them. They do not wait for one another.
 
+> [!WARNING]
+> A terminal failure in any step stops the entire run, including other branches. A downstream step whose prerequisite failed will not start, but work already completed on any branch is retained. External writes are not rolled back; inspect and reconcile them before replay.
+
 ## Completion-only dependencies
 
 Use `DependsOn` on a source or join when it must wait for another step to finish but must not consume that step's rows. For example, a Contacts source can wait until Accounts have been written:

@@ -785,6 +785,7 @@ public sealed class InvokeMigrationCommandTests
                 Id = "Root",
                 Type = "callback",
                 Inputs = Array.Empty<string>(),
+                ErrorRateThresholdPercent = 12.5,
                 SourceConnectionId = "source",
                 TargetConnectionId = "target",
                 ReadBatches = ScriptBlock.Create("""
@@ -870,6 +871,7 @@ public sealed class InvokeMigrationCommandTests
                     ["source"] = "source-connection",
                     ["target"] = "target-connection"
                 })
+                .AddParameter("MaxErrorRatePercent", 5)
                 .AddParameter("MaxDegreeOfParallelism", 2)
                 .AddParameter("MaxAttempts", 1);
             var output = powershell.Invoke();
@@ -888,6 +890,16 @@ public sealed class InvokeMigrationCommandTests
             Assert.Equal("generic-multi-parent-test", run.RunId);
             Assert.Equal("Root", run.Configuration!.Value.GetProperty("steps")[0]
                 .GetProperty("properties").GetProperty("Id").GetString());
+            Assert.Equal(
+                5,
+                run.Configuration.Value.GetProperty("schedulerLimits")
+                    .GetProperty("maxErrorRatePercent").GetDouble());
+            Assert.Equal(
+                12.5,
+                run.Configuration.Value.GetProperty("steps")
+                    .EnumerateArray()
+                    .Single(step => step.GetProperty("id").GetString() == "Root")
+                    .GetProperty("properties").GetProperty("ErrorRateThresholdPercent").GetDouble());
             Assert.Equal(2, run.ConnectionInstances!.Value.GetArrayLength());
 
             powershell.Commands.Clear();
@@ -1055,6 +1067,116 @@ public sealed class InvokeMigrationCommandTests
                         .Invoke());
                 Assert.Contains(invalid.ExpectedMessage, exception.Message);
             }
+        }
+        finally
+        {
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TransformErrorsCanBeEditedAndRetriedAsSingleRows()
+    {
+        var temporaryDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"migration4dataverse-row-retry-{Guid.NewGuid():N}");
+        var sourceDirectory = Path.Combine(temporaryDirectory, "source");
+        var targetDirectory = Path.Combine(temporaryDirectory, "target");
+        Directory.CreateDirectory(sourceDirectory);
+        Directory.CreateDirectory(targetDirectory);
+        var databasePath = Path.Combine(temporaryDirectory, "migration.sqlite3");
+        const string runId = "row-retry-test";
+
+        try
+        {
+            WriteJsonLines(
+                Path.Combine(sourceDirectory, "rows.jsonl"),
+                """
+                {"SourceId":"A001","DataverseId":"00000000-0000-0000-0000-000000000001","Name":"good"}
+                {"SourceId":"A002","DataverseId":"00000000-0000-0000-0000-000000000002","Name":"bad"}
+                """);
+            var steps = new[]
+            {
+                SourceStep("source", "rows.jsonl"),
+                Step(
+                    "transform",
+                    "transform",
+                    ["source"],
+                    ScriptBlock.Create("param($row) if ($row.Name -eq 'bad') { throw 'invalid row' }; $row")),
+                TargetStep("target-step", "transform", "rows")
+            };
+            var connections = new Hashtable
+            {
+                ["source"] = new DirectoryInfo(sourceDirectory),
+                ["target"] = new DirectoryInfo(targetDirectory)
+            };
+
+            using (var powershell = System.Management.Automation.PowerShell.Create())
+            {
+                powershell.AddCommand("Import-Module")
+                    .AddParameter("Name", typeof(InvokeMigrationCommand).Assembly.Location);
+                powershell.Invoke();
+                Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
+
+                powershell.Commands.Clear();
+                var exception = Assert.Throws<CmdletInvocationException>(() =>
+                    powershell.AddCommand("Invoke-Migration")
+                        .AddParameter("DatabasePath", databasePath)
+                        .AddParameter("RunName", "RowRetryTest")
+                        .AddParameter("RunId", runId)
+                        .AddParameter("BatchSize", 2)
+                        .AddParameter("Steps", steps)
+                        .AddParameter("Connections", connections)
+                        .AddParameter("MaxAttempts", 1)
+                        .Invoke());
+                Assert.Contains("error-rate threshold", exception.Message);
+            }
+
+            var store = new SqliteMigrationStore(databasePath);
+            var failedBatch = Assert.Single(store.GetDashboardBatchErrors(runId, "transform"));
+            var rowError = Assert.Single(failedBatch.RowErrors);
+            Assert.Equal(1, rowError.RecordIndex);
+            Assert.Contains("\"Name\":\"bad\"", rowError.PayloadJson, StringComparison.Ordinal);
+            Assert.True(rowError.CanRetry);
+
+            store.QueueFailedRowForRetry(
+                runId,
+                "transform",
+                failedBatch.BatchId,
+                rowError.RecordIndex,
+                """{"SourceId":"A002","DataverseId":"00000000-0000-0000-0000-000000000002","Name":"fixed"}""");
+
+            using var retryPowerShell = System.Management.Automation.PowerShell.Create();
+            retryPowerShell.AddCommand("Import-Module")
+                .AddParameter("Name", typeof(InvokeMigrationCommand).Assembly.Location);
+            retryPowerShell.Invoke();
+            Assert.False(
+                retryPowerShell.HadErrors,
+                string.Join(Environment.NewLine, retryPowerShell.Streams.Error));
+            retryPowerShell.Commands.Clear();
+            var output = retryPowerShell.AddCommand("Invoke-Migration")
+                .AddParameter("DatabasePath", databasePath)
+                .AddParameter("RunName", "RowRetryTest")
+                .AddParameter("RunId", runId)
+                .AddParameter("BatchSize", 2)
+                .AddParameter("Steps", steps)
+                .AddParameter("Connections", connections)
+                .AddParameter("MaxAttempts", 1)
+                .Invoke();
+
+            Assert.False(
+                retryPowerShell.HadErrors,
+                string.Join(Environment.NewLine, retryPowerShell.Streams.Error));
+            Assert.IsType<DependencySchedulerResult>(Assert.Single(output).BaseObject);
+            var targetRows = ReadJsonLines(Path.Combine(targetDirectory, "rows"));
+            Assert.Equal(2, targetRows.Count);
+            Assert.Equal(
+                new[] { "fixed", "good" },
+                targetRows
+                    .Select(row => row.RootElement.GetProperty("Name").GetString())
+                    .Order(StringComparer.Ordinal));
+            Assert.Equal(0, store.GetDashboardRun(runId).FailedRows);
+            Assert.Empty(store.GetDashboardBatchErrors(runId, "transform"));
         }
         finally
         {

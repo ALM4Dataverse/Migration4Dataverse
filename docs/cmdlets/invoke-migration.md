@@ -14,14 +14,17 @@ SQLite and DuckDB Sources and Targets use a `FileInfo` naming the database file 
 | `-DatabasePath` | Yes | Non-empty path | File-backed SQLite migration store. Its parent directory is created if needed. |
 | `-RunName` | Yes | Non-empty string | Human-readable run name. A reused run ID must keep the same name. |
 | `-RunId` | No | New GUID in `N` format | Stable run identity. Supply the same ID to resume a compatible run. |
-| `-StepHash` | No | Generated SHA-256 | Resume-compatibility identity. By default, normalized step definitions, module requirements and resolved versions, helper script contents, and shared scripts are included. Supply your own only when you manage compatibility. |
+| `-StepHash` | No | Generated SHA-256 | Resume-compatibility identity. By default, normalized step definitions (including per-step error thresholds), module requirements and resolved versions, helper script contents, and shared scripts are included; a nonzero global error threshold is also included. Supply your own only when you manage compatibility. |
 | `-Steps` | Yes | One or more PowerShell objects | Migration graph. Hashtables are recommended. |
 | `-Connections` | No | Empty hashtable | Map of connection IDs to live objects. The caller retains ownership of each object. |
 | `-MaxDegreeOfParallelism` | No | `64`; positive integer | Global worker limit. Dataverse targets are also bounded by per-identity connection recommendations and any target-level `MaxConcurrency` cap. Higher values use more workers and can increase resource use. |
 | `-MaxQueuedBatches` | No | `64`; positive | Maximum queued and in-flight work; applies backpressure to source readers. |
 | `-MaxQueuedBatchesPerStep` | No | `32`; positive | Per-step bound on queued dependency work and producer reservations. |
 | `-MaxAttempts` | No | `5`; positive | Maximum handler attempts before a batch fails. |
-| `-DataverseNoRetryDiagnosticMode` | No | Off | Disables Dataverse connection, cmdlet, and scheduler retries for diagnostic runs. |
+| `-MaxErrorRatePercent` | No | `0`; range `0..100` | Maximum cumulative failed-row percentage allowed per step. Zero keeps row errors fatal. A step's `ErrorRateThresholdPercent` overrides this value. |
+| `-SourceReadMaxAttempts` | No | `3`; positive | Maximum attempts to enumerate a source feeder. Each retry resumes from its latest durable source cursor. |
+| `-SourceReadRetryDelaySeconds` | No | `2`; range `0..3600` | Initial source-reader retry delay; subsequent delays back off exponentially to one minute. |
+| `-DataverseNoRetryDiagnosticMode` | No | Off | Disables Dataverse connection, cmdlet, source-reader, and batch-handler retries for diagnostic runs. |
 | `-ModulesToImport` | No | Empty string array | Module names or paths imported into pooled runspaces. Connector modules are loaded as required. |
 | `-RequiredModules` | No | Empty `ModuleSpecification` array | Module requirements, optionally pinned by version or GUID. Missing or incompatible requirements fail before scheduling. |
 | `-ScriptsToLoad` | No | Empty string array | Shared helper script paths. File contents participate in the generated resume hash. |
@@ -32,6 +35,21 @@ SQLite and DuckDB Sources and Targets use a `FileInfo` naming the database file 
 | `-WhatIf` | No | Off | Execute readers and transforms, capture planned target rows, and skip target writes and callback batch handlers. |
 
 The cmdlet reports live progress and returns a run-result object when the run finishes. See [`Get-MigrationRun`](./get-migration-run.md) and the [dashboard guide](./migration-dashboard.md) for persisted status and progress details.
+
+## Error and recovery behavior
+
+Source-reader exceptions are retried up to `-SourceReadMaxAttempts`, except for cancellation. Retries restart enumeration from the latest durably enqueued cursor; the source must be stable and replayable. After the limit, the run is marked failed and the run history records the failing phase, step when known, exception, details, and attempt count.
+
+Exceptions while a step handler processes a batch are retried up to `-MaxAttempts`. If they still fail, the batch is recorded as `CompletedWithErrors` and the run fails. A handler result explicitly marked as containing row errors is not retried. By default, any such result fails the run; configure `-MaxErrorRatePercent` or a step's `ErrorRateThresholdPercent` to accept a cumulative per-step failed-row percentage up to that limit. The limit is inclusive and defaults to `0`. Exhausted source-reader and infrastructure failures are not part of this percentage and remain fatal.
+
+Accepted row errors remain recorded and cause a final `CompletedWithErrors` run status. A step with accepted row errors can release only dependency payloads that its handler explicitly emitted; the engine does not infer or reconstruct successful outputs. Failed or omitted rows are not sent downstream.
+
+An unaccepted row error or any exhausted reader/handler failure stops the whole run, including independent branches. Required downstream steps do not start after a failed prerequisite. Work that completed before the failure remains committed, and the engine does not roll back external writes.
+
+The dashboard records run-level details and lets operators inspect or export failed-batch details. **Queue all failed batches for replay** only after fixing the cause and reconciling possible external writes. Alternatively, an operator can explicitly **continue downstream from one failed step** when its errors cannot be resolved. This does not retry the step: downstream receives only successful outputs already emitted by it, and continuing after a source-reader failure skips the unread remainder. Both actions persist a decision but do not start a scheduler; rerun `Invoke-Migration` with the same `RunId`, `RunName`, step definition, and compatible hash. If the fix changes the hashed step definition, start a new run instead. See [recovery and replay](../concepts/recovery-and-replay.md).
+
+> [!WARNING]
+> A queued batch may repeat target or callback side effects. Design writes to be idempotent and reconcile partial effects before replay. Error and outcome exports may contain migration data; protect them like the migration database.
 
 ## Example
 

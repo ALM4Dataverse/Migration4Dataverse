@@ -58,6 +58,7 @@ public sealed class DependencyScheduler
                 step.Inputs,
                 step.CompletionDependencies,
                 step.DispatchWeight,
+                step.ErrorRateThresholdPercent,
                 HasSource = step.ReadSourceBatches is not null,
                 ExpectedRecordCount = expectedRecordCounts[step.Id]
             }));
@@ -88,7 +89,11 @@ public sealed class DependencyScheduler
                 stepMap,
                 effectiveOptions,
                 cancellationToken).ConfigureAwait(false);
-            _store.SetRunStatus(runId, MigrationRunStatus.Completed);
+            _store.SetRunStatus(
+                runId,
+                result.CompletedWithErrors
+                    ? MigrationRunStatus.CompletedWithErrors
+                    : MigrationRunStatus.Completed);
             return result;
         }
         catch (Exception exception)
@@ -96,6 +101,24 @@ public sealed class DependencyScheduler
             runFailure = exception;
             try
             {
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    var phase = exception.Data["Migration4Dataverse.FailurePhase"] as string;
+                    var stepId = exception.Data["Migration4Dataverse.FailureStepId"] as string;
+                    var failure = new MigrationRunFailure(
+                            phase ?? "Run execution",
+                            stepId,
+                            exception.Message,
+                            exception.GetType().FullName ?? exception.GetType().Name,
+                            exception.ToString(),
+                            DateTimeOffset.UtcNow)
+                    {
+                        Attempts = exception.Data["Migration4Dataverse.FailureAttempts"] is int attempts
+                            ? attempts
+                            : 1
+                    };
+                    _store.SetRunFailure(runId, failure);
+                }
                 _store.SetRunStatus(
                     runId,
                     cancellationToken.IsCancellationRequested
@@ -132,6 +155,7 @@ public sealed class DependencyScheduler
                 throw;
             }
         }
+
     }
 
     private async Task<DependencySchedulerResult> ExecuteLeasedRunAsync(
@@ -142,11 +166,12 @@ public sealed class DependencyScheduler
         CancellationToken cancellationToken)
     {
         var initialProgress = _store.GetRunProgress(runId);
-        if (initialProgress.BatchesWithErrors > 0)
+        var unacceptedFailedSteps = _store.GetUnacceptedFailedStepIds(runId);
+        if (unacceptedFailedSteps.Count > 0)
         {
             throw new InvalidOperationException(
-                $"Run '{runId}' contains {initialProgress.BatchesWithErrors} batches with recorded row errors. " +
-                "Resolve or export those failures before resuming the run.");
+                $"Run '{runId}' contains failed batches in steps {string.Join(", ", unacceptedFailedSteps)}. " +
+                "Queue them for retry or explicitly continue downstream from those steps before resuming.");
         }
 
         var startedUtc = DateTimeOffset.UtcNow;
@@ -198,11 +223,13 @@ public sealed class DependencyScheduler
                 options.RunLeaseDuration,
                 token),
             runtime,
-            heartbeatCancellation.Token);
+            heartbeatCancellation.Token,
+            "Run lease renewal");
         var eventPumpTask = GuardAsync(
             token => PumpDependencyEventsAsync(runId, steps, stepCompletions, options, runtime, token),
             runtime,
-            runCancellation.Token);
+            runCancellation.Token,
+            "Dependency scheduling");
         var sourceTasks = rootSteps
             .Select(step => GuardAsync(
                 token => FeedSourceJobAsync(
@@ -213,7 +240,9 @@ public sealed class DependencyScheduler
                     runtime,
                     token),
                 runtime,
-                runCancellation.Token))
+                runCancellation.Token,
+                "Source reader",
+                step.Id))
             .ToArray();
         var completionMonitorTask = GuardAsync(
             token => CompleteDependencyDrivenStepsAsync(
@@ -223,7 +252,8 @@ public sealed class DependencyScheduler
                 options,
                 token),
             runtime,
-            runCancellation.Token);
+            runCancellation.Token,
+            "Step completion");
         var workerTasks = Enumerable.Range(0, options.MaxDegreeOfParallelism)
             .Select(workerIndex => GuardAsync(
                 token => RunWorkerAsync(
@@ -236,7 +266,8 @@ public sealed class DependencyScheduler
                     runtime,
                     token),
                 runtime,
-                runCancellation.Token))
+                runCancellation.Token,
+                "Batch processing"))
             .ToArray();
         var workTasks = Task.WhenAll(
             sourceTasks
@@ -262,12 +293,12 @@ public sealed class DependencyScheduler
         var finalProgress = _store.GetRunProgress(runId);
         if (finalProgress.NonTerminalBatchCount != 0 ||
             finalProgress.PendingDependencyEvents != 0 ||
-            finalProgress.BatchesWithErrors != 0)
+            _store.GetUnacceptedFailedStepIds(runId).Count != 0)
         {
             throw new InvalidOperationException(
                 $"Run '{runId}' stopped with {finalProgress.NonTerminalBatchCount} unfinished batches, " +
                 $"{finalProgress.PendingDependencyEvents} pending dependency events, and " +
-                $"{finalProgress.BatchesWithErrors} failed batches.");
+                $"{_store.GetUnacceptedFailedStepIds(runId).Count} steps with unaccepted batch errors.");
         }
 
         foreach (var step in steps.Values
@@ -275,7 +306,15 @@ public sealed class DependencyScheduler
                      .OrderBy(step => step.Id, StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await step.CompleteAsync!(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await step.CompleteAsync!(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                AddFailureContext(exception, "Target finalization", step.Id);
+                throw;
+            }
         }
 
         if (steps.Values.Any(step => string.Equals(step.Type, "join", StringComparison.Ordinal)))
@@ -300,7 +339,10 @@ public sealed class DependencyScheduler
             TargetRowsSucceeded = targets.Sum(step => step.SucceededRows),
             TargetRowsFailed = targets.Sum(step => step.FailedRows),
             TargetRowsExpected = targetRowsExpected,
-            FilteredRows = dashboard.Steps.Sum(step => step.FilteredRows)
+            FilteredRows = dashboard.Steps.Sum(step => step.FilteredRows),
+            CompletedWithErrors = finalProgress.BatchesWithErrors > 0 ||
+                                  steps.Keys.Any(stepId =>
+                                      _store.IsStepFailureContinuationAllowed(runId, stepId))
         };
     }
 
@@ -316,22 +358,34 @@ public sealed class DependencyScheduler
         {
             _store.StartStepActivity(runId, step.Id);
             _store.MarkSourceFeederStarted(runId, step.Id);
-            if (step.WaitForInputCompletion)
+            var continueAfterFailure = _store.IsStepFailureContinuationAllowed(runId, step.Id);
+            if (!continueAfterFailure && step.WaitForInputCompletion)
             {
                 foreach (var dependency in step.Inputs)
                 {
                     await stepCompletions[dependency].Task.WaitAsync(cancellationToken).ConfigureAwait(false);
                 }
             }
-            foreach (var dependency in step.CompletionDependencies)
+            if (!continueAfterFailure)
             {
-                await stepCompletions[dependency].Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                foreach (var dependency in step.CompletionDependencies)
+                {
+                    await stepCompletions[dependency].Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
             }
 
             _store.EnterStepActivity(runId, step.Id);
             try
             {
-                await FeedRootBatchesAsync(runId, step, options, runtime, cancellationToken).ConfigureAwait(false);
+                if (!continueAfterFailure)
+                {
+                    await FeedRootBatchesWithRetryAsync(
+                        runId,
+                        step,
+                        options,
+                        runtime,
+                        cancellationToken).ConfigureAwait(false);
+                }
             }
             finally
             {
@@ -354,6 +408,42 @@ public sealed class DependencyScheduler
         finally
         {
             runtime.SourceFeederCompleted();
+        }
+    }
+
+    private async Task FeedRootBatchesWithRetryAsync(
+        string runId,
+        MigrationStepDefinition step,
+        DependencySchedulerOptions options,
+        SchedulerRuntime runtime,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await FeedRootBatchesAsync(runId, step, options, runtime, cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception) when (attempt < options.SourceReadMaxAttempts)
+            {
+                var retryDelay = GetRetryDelay(options.SourceReadRetryDelay, attempt);
+                if (retryDelay > TimeSpan.Zero)
+                {
+                    await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            catch (Exception exception)
+            {
+                AddFailureContext(exception, "Source reader", step.Id);
+                exception.Data["Migration4Dataverse.FailureAttempts"] = attempt;
+                throw;
+            }
         }
     }
 
@@ -852,7 +942,7 @@ public sealed class DependencyScheduler
 
         try
         {
-            ValidateBatchResult(result);
+            ValidateBatchResult(batch, result);
         }
         catch (Exception exception)
         {
@@ -873,32 +963,74 @@ public sealed class DependencyScheduler
             var errorMessage = string.IsNullOrWhiteSpace(result.LastError)
                 ? result.OutcomesJson
                 : result.LastError;
-            if (result.Dependencies is { Count: > 0 })
+            IReadOnlyList<DependencyEvent> errorDependencyEvents;
+            try
             {
-                errorMessage =
-                    $"Step '{step.Id}' returned dependent work for batch '{batch.BatchId}' despite row errors. " +
-                    errorMessage;
+                errorDependencyEvents = CreateDependencyEvents(batch, step, result, steps);
+            }
+            catch (Exception exception)
+            {
+                await CompleteFailedBatchAsync(
+                    batch,
+                    workerId,
+                    CreateFailureOutcomes(batch, exception),
+                    $"Step '{step.Id}' returned invalid dependency output for batch '{batch.BatchId}'.",
+                    exception,
+                    runtime,
+                    options.CaptureDebugData);
+                return;
             }
 
-            var completed = await RetrySqliteLockAsync(
-                () => _store.TryCompleteBatch(
-                    batch.BatchId,
-                    workerId,
-                    result.OutcomesJson,
-                    hasErrors: true,
-                    lastError: errorMessage,
-                    filteredRows: result.FilteredRows),
-                CancellationToken.None).ConfigureAwait(false);
-            if (completed is null)
+            var errorImmediatelyReadyEvents = errorDependencyEvents
+                .Where(dependencyEvent =>
+                    dependencyEvent.RequiredBatchIds.Count == 0 &&
+                    steps[dependencyEvent.ChildStepId].CompletionDependencies.Count == 0)
+                .ToArray();
+            runtime.RegisterDependencyEvents(errorDependencyEvents, errorImmediatelyReadyEvents);
+            MigrationBatchCompletion? completion;
+            try
             {
+                var errorRateThreshold = step.ErrorRateThresholdPercent ?? options.MaxErrorRatePercent;
+                completion = await RetrySqliteLockAsync(
+                    () => _store.TryCompleteBatchWithErrorPolicy(
+                        batch.BatchId,
+                        workerId,
+                        result.OutcomesJson,
+                        errorDependencyEvents,
+                        errorMessage,
+                        errorRateThreshold,
+                        filteredRows: result.FilteredRows,
+                        rowErrors: result.RowErrors),
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                runtime.RemoveDependencyEvents(errorDependencyEvents, errorImmediatelyReadyEvents);
+                throw;
+            }
+
+            if (completion is null)
+            {
+                runtime.RemoveDependencyEvents(errorDependencyEvents, errorImmediatelyReadyEvents);
                 runtime.SignalWork();
                 return;
             }
 
             runtime.BatchCompleted(batch.StepId);
             runtime.SignalDependencyWork();
-            runtime.Fail(new InvalidOperationException(
-                $"Step '{step.Id}' completed batch '{batch.BatchId}' with row errors: {errorMessage}"));
+            if (!completion.ErrorRateWithinThreshold)
+            {
+                var rateDescription = completion.ErrorRatePercent.HasValue
+                    ? $"{completion.ErrorRatePercent.Value:F2}%"
+                    : "unknown";
+                var failure = new InvalidOperationException(
+                    $"Step '{step.Id}' exceeded its configured error-rate threshold. " +
+                    $"The completed error rate is {rateDescription}; the limit is " +
+                    $"{(step.ErrorRateThresholdPercent ?? options.MaxErrorRatePercent):F2}%. " +
+                    errorMessage);
+                AddFailureContext(failure, "Batch processing", step.Id);
+                runtime.Fail(failure);
+            }
             return;
         }
 
@@ -937,7 +1069,8 @@ public sealed class DependencyScheduler
                     result.HasErrors,
                     dependencyEvents,
                     result.LastError,
-                    filteredRows: result.FilteredRows),
+                    filteredRows: result.FilteredRows,
+                    rowErrors: result.RowErrors),
                 CancellationToken.None).ConfigureAwait(false);
             if (completed is null)
             {
@@ -990,7 +1123,9 @@ public sealed class DependencyScheduler
 
         runtime.BatchCompleted(batch.StepId);
         runtime.SignalDependencyWork();
-        runtime.Fail(new InvalidOperationException(failureMessage, exception));
+        var failure = new InvalidOperationException(failureMessage, exception);
+        AddFailureContext(failure, "Batch processing", batch.StepId);
+        runtime.Fail(failure);
     }
 
     private async Task CaptureDebugResultAsync(
@@ -1056,7 +1191,7 @@ public sealed class DependencyScheduler
         });
     }
 
-    private static void ValidateBatchResult(MigrationBatchResult result)
+    private static void ValidateBatchResult(StoredBatch batch, MigrationBatchResult result)
     {
         if (string.IsNullOrWhiteSpace(result.OutcomesJson))
         {
@@ -1064,6 +1199,41 @@ public sealed class DependencyScheduler
         }
 
         using var _ = JsonDocument.Parse(result.OutcomesJson);
+        if (result.RowErrors is null)
+        {
+            throw new InvalidOperationException("A batch result must not have null row-error metadata.");
+        }
+        if (result.RowErrors.Count == 0)
+        {
+            return;
+        }
+        if (!result.HasErrors)
+        {
+            throw new InvalidOperationException("A batch result with row errors must be marked as failed.");
+        }
+
+        using var payload = JsonDocument.Parse(batch.PayloadJson
+            ?? throw new InvalidOperationException($"Batch '{batch.BatchId}' has no payload."));
+        if (payload.RootElement.ValueKind != JsonValueKind.Object ||
+            !payload.RootElement.TryGetProperty("Records", out var records) ||
+            records.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidOperationException(
+                $"Batch '{batch.BatchId}' must contain a Records array to report row-level errors.");
+        }
+
+        var seenRecordIndices = new HashSet<int>();
+        foreach (var rowError in result.RowErrors)
+        {
+            if (rowError is null || rowError.RecordIndex < 0 ||
+                rowError.RecordIndex >= records.GetArrayLength() ||
+                string.IsNullOrWhiteSpace(rowError.Error) ||
+                !seenRecordIndices.Add(rowError.RecordIndex))
+            {
+                throw new InvalidOperationException(
+                    $"Batch '{batch.BatchId}' returned invalid or duplicate row-error metadata.");
+            }
+        }
     }
 
     private IReadOnlyList<DependencyEvent> CreateDependencyEvents(
@@ -1144,7 +1314,11 @@ public sealed class DependencyScheduler
                 var materializedEventFound = false;
                 foreach (var dependencyEvent in events)
                 {
-                    ValidateDependencyEvent(runId, dependencyEvent, steps);
+                    if (!ValidateDependencyEvent(runId, dependencyEvent, steps))
+                    {
+                        completionDependencyBlocked = true;
+                        continue;
+                    }
                     var childStep = steps[dependencyEvent.ChildStepId];
                     if (!childStep.CompletionDependencies.All(
                             dependency => stepCompletions[dependency].Task.IsCompletedSuccessfully))
@@ -1233,7 +1407,7 @@ public sealed class DependencyScheduler
         }
     }
 
-    private void ValidateDependencyEvent(
+    private bool ValidateDependencyEvent(
         string runId,
         StoredDependencyEvent dependencyEvent,
         IReadOnlyDictionary<string, MigrationStepDefinition> steps)
@@ -1252,11 +1426,17 @@ public sealed class DependencyScheduler
         var parentBatch = _store.GetBatch(dependencyEvent.ParentBatchId)
             ?? throw new InvalidOperationException(
                 $"Dependency event '{dependencyEvent.EventId}' references missing parent batch '{dependencyEvent.ParentBatchId}'.");
-        if (!string.Equals(parentBatch.RunId, runId, StringComparison.Ordinal) ||
-            parentBatch.State != MigrationBatchState.Succeeded)
+        if (!string.Equals(parentBatch.RunId, runId, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                $"Dependency event '{dependencyEvent.EventId}' has a parent batch that did not succeed in this run.");
+                $"Dependency event '{dependencyEvent.EventId}' has a parent batch from another run.");
+        }
+        if (parentBatch.State != MigrationBatchState.Succeeded &&
+            !(parentBatch.State == MigrationBatchState.CompletedWithErrors &&
+              (parentBatch.FailureAccepted ||
+               _store.IsStepFailureContinuationAllowed(runId, parentBatch.StepId))))
+        {
+            return false;
         }
         if (!childJob.Inputs.Contains(parentBatch.StepId, StringComparer.Ordinal))
         {
@@ -1267,6 +1447,12 @@ public sealed class DependencyScheduler
         foreach (var requiredBatchId in dependencyEvent.RequiredBatchIds)
         {
             var prerequisiteBatch = _store.GetBatch(requiredBatchId);
+            if (prerequisiteBatch?.State == MigrationBatchState.CompletedWithErrors &&
+                !prerequisiteBatch.FailureAccepted &&
+                !_store.IsStepFailureContinuationAllowed(runId, prerequisiteBatch.StepId))
+            {
+                return false;
+            }
             if (prerequisiteBatch is not null &&
                 (!string.Equals(prerequisiteBatch.RunId, runId, StringComparison.Ordinal) ||
                  !childJob.Inputs.Contains(prerequisiteBatch.StepId, StringComparer.Ordinal)))
@@ -1276,6 +1462,8 @@ public sealed class DependencyScheduler
                     $"declared parent of step '{childJob.Id}'.");
             }
         }
+
+        return true;
     }
 
     private async Task<MigrationBatchResult> ExecuteHandlerWithLeaseAsync(
@@ -1398,7 +1586,9 @@ public sealed class DependencyScheduler
     private static async Task GuardAsync(
         Func<CancellationToken, Task> action,
         SchedulerRuntime runtime,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string phase,
+        string? stepId = null)
     {
         try
         {
@@ -1409,7 +1599,17 @@ public sealed class DependencyScheduler
         }
         catch (Exception exception)
         {
+            AddFailureContext(exception, phase, stepId);
             runtime.Fail(exception);
+        }
+    }
+
+    private static void AddFailureContext(Exception exception, string phase, string? stepId)
+    {
+        exception.Data["Migration4Dataverse.FailurePhase"] = phase;
+        if (stepId is not null)
+        {
+            exception.Data["Migration4Dataverse.FailureStepId"] = stepId;
         }
     }
 
@@ -1443,6 +1643,13 @@ public sealed class DependencyScheduler
         foreach (var step in stepArray)
         {
             ArgumentNullException.ThrowIfNull(step);
+            if (step.ErrorRateThresholdPercent is { } errorRateThreshold &&
+                (!double.IsFinite(errorRateThreshold) || errorRateThreshold is < 0 or > 100))
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(steps),
+                    $"Error-rate threshold for step '{step.Id}' must be between 0 and 100 percent.");
+            }
             if (!double.IsFinite(step.DispatchWeight) || step.DispatchWeight <= 0)
             {
                 throw new ArgumentOutOfRangeException(
@@ -1543,6 +1750,13 @@ public sealed class DependencyScheduler
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxQueuedBatches);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxQueuedBatchesPerStep);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxAttempts);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.SourceReadMaxAttempts);
+        if (!double.IsFinite(options.MaxErrorRatePercent) || options.MaxErrorRatePercent is < 0 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options.MaxErrorRatePercent),
+                "The error-rate threshold must be between 0 and 100 percent.");
+        }
         if (options.DebugCaptureRetentionDays is < 1 or > 3650)
         {
             throw new ArgumentOutOfRangeException(
@@ -1564,6 +1778,10 @@ public sealed class DependencyScheduler
         if (options.RetryDelay < TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(options.RetryDelay));
+        }
+        if (options.SourceReadRetryDelay < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options.SourceReadRetryDelay));
         }
     }
 

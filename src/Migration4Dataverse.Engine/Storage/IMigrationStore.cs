@@ -14,6 +14,18 @@ public interface IMigrationStore
         string connectionInstancesJson = "[]");
     void UpdateConnectionInstanceSnapshots(string runId, string snapshotsJson);
     void SetRunStatus(string runId, MigrationRunStatus status, DateTimeOffset? nowUtc = null);
+    void SetRunFailure(string runId, MigrationRunFailure failure);
+    int QueueFailedBatchesForRetry(string runId, DateTimeOffset? nowUtc = null);
+    string QueueFailedRowForRetry(
+        string runId,
+        string stepId,
+        string batchId,
+        int recordIndex,
+        string payloadJson,
+        DateTimeOffset? nowUtc = null);
+    bool AllowStepFailureContinuation(string runId, string stepId, DateTimeOffset? nowUtc = null);
+    bool IsStepFailureContinuationAllowed(string runId, string stepId);
+    IReadOnlyList<string> GetUnacceptedFailedStepIds(string runId);
     void SaveTargetRecordIds(string runId, IReadOnlyList<TargetRecordIdMapping> mappings);
     IReadOnlyDictionary<TargetRecordIdLookup, Guid> GetTargetRecordIds(
         string runId,
@@ -84,6 +96,7 @@ public interface IMigrationStore
         DateTimeOffset? nowUtc = null);
     void ReleaseRunLease(string runId, string workerId, DateTimeOffset? nowUtc = null);
     MigrationRunProgress GetRunProgress(string runId);
+    MigrationStepRowCounts GetStepRowCounts(string runId, string stepId);
     IReadOnlyDictionary<string, long> GetNonTerminalBatchCountsByStep(string runId);
     IReadOnlyList<PendingBatchStepCandidate> GetPendingBatchStepCandidates(
         string runId,
@@ -138,7 +151,8 @@ public interface IMigrationStore
         IReadOnlyCollection<DependencyEvent>? dependencyEvents = null,
         string? lastError = null,
         DateTimeOffset? nowUtc = null,
-        long filteredRows = 0);
+        long filteredRows = 0,
+        IReadOnlyList<MigrationRowError>? rowErrors = null);
     MigrationStepCheckpoint? TryCompleteBatch(
         string batchId,
         string workerId,
@@ -147,7 +161,18 @@ public interface IMigrationStore
         IReadOnlyCollection<DependencyEvent>? dependencyEvents = null,
         string? lastError = null,
         DateTimeOffset? nowUtc = null,
-        long filteredRows = 0);
+        long filteredRows = 0,
+        IReadOnlyList<MigrationRowError>? rowErrors = null);
+    MigrationBatchCompletion? TryCompleteBatchWithErrorPolicy(
+        string batchId,
+        string workerId,
+        string outcomesJson,
+        IReadOnlyCollection<DependencyEvent>? dependencyEvents,
+        string? lastError,
+        double maxErrorRatePercent,
+        DateTimeOffset? nowUtc = null,
+        long filteredRows = 0,
+        IReadOnlyList<MigrationRowError>? rowErrors = null);
     StoredBatch? GetBatch(string batchId);
     MigrationStepCheckpoint GetStepCheckpoint(string runId, string tableName);
     MigrationStepCheckpoint GetStepSourceCheckpoint(string runId, string stepId);
@@ -171,6 +196,10 @@ public interface IMigrationStore
     IReadOnlyList<MigrationDashboardBatch> GetDashboardBatchErrors(
         string runId,
         string stepId,
+        int limit = 100,
+        int offset = 0);
+    IReadOnlyList<MigrationBatchRetryHistory> GetDashboardBatchRetryHistory(
+        string runId,
         int limit = 100,
         int offset = 0);
     IReadOnlyList<MigrationDebugSnapshot> GetDebugSnapshots(

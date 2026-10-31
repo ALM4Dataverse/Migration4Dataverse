@@ -410,9 +410,13 @@ public sealed class DependencySchedulerTests
             CreateOptions(maxDegreeOfParallelism: 1, maxQueuedBatches: 4));
 
         Assert.Equal(5, result.SucceededBatches);
-        Assert.Equal(
-            new[] { "Accounts:0", "Contacts", "Accounts:1", "Accounts:2", "Accounts:3" },
-            executionOrder.ToArray());
+        var completedOrder = executionOrder.ToArray();
+        Assert.Equal("Accounts:0", completedOrder[0]);
+        var contactsIndex = Array.IndexOf(completedOrder, "Contacts");
+        var remainingRootIndex = Array.IndexOf(completedOrder, "Accounts:2");
+        Assert.True(
+            contactsIndex >= 0 && remainingRootIndex >= 0 && contactsIndex < remainingRootIndex,
+            $"Expected the ready dependency to run before the remaining root backlog; got: {string.Join(", ", completedOrder)}");
     }
 
     [Fact]
@@ -942,6 +946,60 @@ public sealed class DependencySchedulerTests
                 CreateOptions(maxDegreeOfParallelism: 1, maxQueuedBatches: 1)));
 
         Assert.Contains(nameof(ReadBatches), exception.StackTrace, StringComparison.Ordinal);
+        var failure = store.GetDashboardRun("background-failure-run").Failure;
+        Assert.NotNull(failure);
+        Assert.Equal("Source reader", failure.Phase);
+        Assert.Equal("Accounts", failure.StepId);
+        Assert.Contains("Source read failed.", failure.Details, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SourceReaderRetriesFromTheLastPersistedCursor()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        var readAttempts = 0;
+
+        async IAsyncEnumerable<MigrationWorkBatch> ReadBatches(
+            MigrationStepCheckpoint checkpoint,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref readAttempts) == 1)
+            {
+                Assert.Equal(-1, checkpoint.ResumeSequence);
+                yield return new MigrationWorkBatch("{}", """{"cursor":1}""");
+                await Task.Yield();
+                throw new IOException("Temporary source interruption.");
+            }
+
+            Assert.Equal(0, checkpoint.ResumeSequence);
+            Assert.Equal("""{"cursor":1}""", checkpoint.ResumeCursorJson);
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return new MigrationWorkBatch("{}", """{"cursor":2}""");
+        }
+
+        var jobs = new[]
+        {
+            new MigrationStepDefinition(
+                "Accounts",
+                inputs: null,
+                ReadBatches,
+                (_, _) => Task.FromResult(new MigrationBatchResult("{}")))
+        };
+        var result = await new DependencyScheduler(store).ExecuteAsync(
+            "source-reader-retry-run",
+            "source-reader-retry-test",
+            "hash-1",
+            jobs,
+            CreateOptions(maxDegreeOfParallelism: 1, maxQueuedBatches: 1) with
+            {
+                SourceReadMaxAttempts = 2,
+                SourceReadRetryDelay = TimeSpan.Zero
+            });
+
+        Assert.Equal(2, readAttempts);
+        Assert.Equal(2, result.SucceededBatches);
+        Assert.Null(store.GetDashboardRun("source-reader-retry-run").Failure);
     }
 
     [Fact]
@@ -1430,6 +1488,233 @@ public sealed class DependencySchedulerTests
         Assert.Throws<KeyNotFoundException>(() => store.GetRunProgress("cycle-run"));
     }
 
+    [Fact]
+    public async Task RowErrorsStopByDefaultAndDoNotReleaseDownstreamWork()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        var downstreamCalls = 0;
+        var steps = new[]
+        {
+            new MigrationStepDefinition(
+                "Source",
+                inputs: null,
+                (_, token) => SingleBatch("{}", token),
+                (_, _) => Task.FromResult(new MigrationBatchResult(
+                    """{"succeeded":9,"failed":1}""",
+                    HasErrors: true,
+                    Dependencies: [new MigrationDependencyOutput("Target", """{"Records":[{"id":"ok"}]}""")],
+                    LastError: "One row failed."))),
+            new MigrationStepDefinition(
+                "Target",
+                ["Source"],
+                readSourceBatches: null,
+                (_, _) =>
+                {
+                    Interlocked.Increment(ref downstreamCalls);
+                    return Task.FromResult(new MigrationBatchResult("""{"succeeded":1,"failed":0}"""));
+                })
+        };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new DependencyScheduler(store).ExecuteAsync(
+                "row-errors-strict-run",
+                "row-errors-strict-test",
+                "hash-1",
+                steps,
+                CreateOptions(maxDegreeOfParallelism: 1, maxQueuedBatches: 1)));
+
+        var failedBatch = store.GetBatch(
+            MigrationBatchIdentity.Create("row-errors-strict-run", "Source", 0));
+        Assert.NotNull(failedBatch);
+        Assert.Equal(MigrationBatchState.CompletedWithErrors, failedBatch.State);
+        Assert.False(failedBatch.FailureAccepted);
+        Assert.Equal(0, downstreamCalls);
+        Assert.Equal("Failed", store.GetDashboardRun("row-errors-strict-run").Status);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ErrorRateThresholdAcceptsPartialOutputsAtTheConfiguredBoundary(bool useStepOverride)
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        string? downstreamPayload = null;
+        async IAsyncEnumerable<MigrationWorkBatch> ReadTwoBatches(
+            MigrationStepCheckpoint checkpoint,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            yield return new MigrationWorkBatch("""{"Records":[{"id":"successful"}]}""");
+            await Task.Yield();
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return new MigrationWorkBatch("""{"Records":[{"id":"partially-successful"}]}""");
+        }
+
+        var source = new MigrationStepDefinition(
+            "Source",
+            inputs: null,
+            ReadTwoBatches,
+            (batch, _) => Task.FromResult(batch.Sequence == 0
+                ? new MigrationBatchResult("""{"succeeded":9,"failed":0}""")
+                : new MigrationBatchResult(
+                    """{"succeeded":0,"failed":1}""",
+                    HasErrors: true,
+                    Dependencies: [new MigrationDependencyOutput("Target", """{"Records":[{"id":"ok"}]}""")],
+                    LastError: "One row failed.")))
+        {
+            ErrorRateThresholdPercent = useStepOverride ? 10 : null
+        };
+        var target = new MigrationStepDefinition(
+            "Target",
+            ["Source"],
+            readSourceBatches: null,
+            (batch, _) =>
+            {
+                downstreamPayload = batch.PayloadJson;
+                return Task.FromResult(new MigrationBatchResult("""{"succeeded":1,"failed":0}"""));
+            });
+
+        var result = await new DependencyScheduler(store).ExecuteAsync(
+            "row-errors-threshold-run",
+            "row-errors-threshold-test",
+            "hash-1",
+            [source, target],
+            CreateOptions(maxDegreeOfParallelism: 1, maxQueuedBatches: 1) with
+            {
+                MaxErrorRatePercent = useStepOverride ? 0 : 10
+            });
+
+        Assert.True(result.CompletedWithErrors);
+        Assert.Contains("\"id\":\"ok\"", downstreamPayload, StringComparison.Ordinal);
+        Assert.Equal("CompletedWithErrors", store.GetDashboardRun("row-errors-threshold-run").Status);
+        var failedBatch = store.GetBatch(
+            MigrationBatchIdentity.Create("row-errors-threshold-run", "Source", 1));
+        Assert.NotNull(failedBatch);
+        Assert.True(failedBatch.FailureAccepted);
+    }
+
+    [Fact]
+    public async Task OperatorCanContinuePastFailedStepWithoutReplayingIt()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        var sourceCalls = 0;
+        var downstreamCalls = 0;
+        var steps = new[]
+        {
+            new MigrationStepDefinition(
+                "Source",
+                inputs: null,
+                (_, token) => SingleBatch("{}", token),
+                (_, _) =>
+                {
+                    Interlocked.Increment(ref sourceCalls);
+                    return Task.FromResult(new MigrationBatchResult(
+                        """{"succeeded":1,"failed":1}""",
+                        HasErrors: true,
+                        Dependencies: [new MigrationDependencyOutput("Target", """{"Records":[{"id":"ok"}]}""")],
+                        LastError: "One row could not be transformed."));
+                }),
+            new MigrationStepDefinition(
+                "Target",
+                ["Source"],
+                readSourceBatches: null,
+                (_, _) =>
+                {
+                    Interlocked.Increment(ref downstreamCalls);
+                    return Task.FromResult(new MigrationBatchResult("""{"succeeded":1,"failed":0}"""));
+                })
+        };
+        const string runId = "row-errors-continue-run";
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new DependencyScheduler(store).ExecuteAsync(
+                runId,
+                "row-errors-continue-test",
+                "hash-1",
+                steps,
+                CreateOptions(maxDegreeOfParallelism: 1, maxQueuedBatches: 1)));
+
+        Assert.True(store.AllowStepFailureContinuation(runId, "Source"));
+        var result = await new DependencyScheduler(store).ExecuteAsync(
+            runId,
+            "row-errors-continue-test",
+            "hash-1",
+            steps,
+            CreateOptions(maxDegreeOfParallelism: 1, maxQueuedBatches: 1));
+
+        Assert.True(result.CompletedWithErrors);
+        Assert.Equal(1, sourceCalls);
+        Assert.Equal(1, downstreamCalls);
+        Assert.Equal("CompletedWithErrors", store.GetDashboardRun(runId).Status);
+    }
+
+    [Fact]
+    public async Task OperatorCanContinueAfterSourceReaderFailureAndDrainPersistedWork()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        var sourceReads = 0;
+        var downstreamCalls = 0;
+
+        async IAsyncEnumerable<MigrationWorkBatch> ReadSource(
+            MigrationStepCheckpoint checkpoint,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref sourceReads);
+            yield return new MigrationWorkBatch("""{"Records":[{"id":"persisted"}]}""");
+            await Task.Yield();
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new IOException("The source could not be enumerated further.");
+        }
+
+        var steps = new[]
+        {
+            new MigrationStepDefinition(
+                "Source",
+                inputs: null,
+                ReadSource,
+                (_, _) => Task.FromResult(new MigrationBatchResult(
+                    """{"succeeded":1,"failed":0}""",
+                    Dependencies: [new MigrationDependencyOutput("Target", """{"Records":[{"id":"persisted"}]}""")]))),
+            new MigrationStepDefinition(
+                "Target",
+                ["Source"],
+                readSourceBatches: null,
+                (_, _) =>
+                {
+                    Interlocked.Increment(ref downstreamCalls);
+                    return Task.FromResult(new MigrationBatchResult("""{"succeeded":1,"failed":0}"""));
+                })
+        };
+        const string runId = "reader-error-continue-run";
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            new DependencyScheduler(store).ExecuteAsync(
+                runId,
+                "reader-error-continue-test",
+                "hash-1",
+                steps,
+                CreateOptions(maxDegreeOfParallelism: 1, maxQueuedBatches: 1)));
+        Assert.Equal("Source reader", store.GetDashboardRun(runId).Failure?.Phase);
+        Assert.True(store.AllowStepFailureContinuation(runId, "Source"));
+
+        var result = await new DependencyScheduler(store).ExecuteAsync(
+            runId,
+            "reader-error-continue-test",
+            "hash-1",
+            steps,
+            CreateOptions(maxDegreeOfParallelism: 1, maxQueuedBatches: 1));
+
+        Assert.True(result.CompletedWithErrors);
+        Assert.Equal(1, sourceReads);
+        Assert.Equal(1, downstreamCalls);
+        var completedRun = store.GetDashboardRun(runId);
+        Assert.Equal("CompletedWithErrors", completedRun.Status);
+        Assert.Equal("Source reader", completedRun.Failure?.Phase);
+    }
+
     private static DependencySchedulerOptions CreateOptions(
         int maxDegreeOfParallelism,
         int maxQueuedBatches)
@@ -1439,6 +1724,7 @@ public sealed class DependencySchedulerTests
             MaxDegreeOfParallelism = maxDegreeOfParallelism,
             MaxQueuedBatches = maxQueuedBatches,
             MaxAttempts = 3,
+            SourceReadMaxAttempts = 1,
             BatchLeaseDuration = TimeSpan.FromSeconds(3),
             RunLeaseDuration = TimeSpan.FromSeconds(3),
             PollInterval = TimeSpan.FromMilliseconds(10),

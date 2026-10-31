@@ -7,11 +7,11 @@ This guide describes the current implementation, not a promise of complete Kings
 
 ## System boundaries
 
-The system boundaries are four binary PowerShell cmdlets, a read-only local monitoring UI/API, a separate transformation API, and a local SQLite owner service:
+The system boundaries are four binary PowerShell cmdlets, a local monitoring UI/API with constrained failed-batch recovery and continuation approval, a separate transformation API, and a local SQLite owner service:
 
 1. **The binary PowerShell cmdlet** [`Invoke-Migration`](../../src/Migration4Dataverse.Engine/PowerShell/InvokeMigrationCommand.cs) accepts a top-level `Steps` DAG. [`PowerShellMigrationStepFactory`](../../src/Migration4Dataverse.Engine/PowerShell/PowerShellMigrationStepFactory.Graph.cs) converts Source, Join, Transform, Filter, Append, Target, and callback nodes into [`MigrationStepDefinition`](../../src/Migration4Dataverse.Engine/Scheduling/MigrationStepDefinition.cs) objects for the shared [`DependencyScheduler`](../../src/Migration4Dataverse.Engine/Scheduling/DependencyScheduler.cs). Keyed source and join inputs declare their row-flow dependencies; `DependsOn` is reserved for additional whole-step completion barriers. A two-input Join stages and indexes inputs on disk, emits matches incrementally, then sends one nested row to a one-input Transform. Callback mode supports explicit multi-parent batch readiness through `MigrationDependencyOutput.RequiredBatchIds`.
 2. **The data-flow API** in `Migration4Dataverse.Engine.Transformations` remains a separate named transformation DAG. PowerShell callers define it with hashtables and inline Transform and Filter script blocks; the engine internally binds those scripts to their node IDs. Its stream-wide Sort and Merge operators are not yet wired into `Invoke-Migration`.
-3. **The dashboard** [`MigrationDashboardServer`](../../src/Migration4Dataverse.Engine/Dashboard/MigrationDashboardServer.cs) hosts the built React/React Flow SPA and a read-only API over the same SQLite file. It binds only to a loopback URL. Basic run/step/batch metadata is always retained; row payload snapshots are opt-in except for `Invoke-Migration -WhatIf`, which captures planned target inputs. While a run is active, it also reads in-memory per-member Dataverse pool counters for the live connection-throughput chart.
+3. **The dashboard** [`MigrationDashboardServer`](../../src/Migration4Dataverse.Engine/Dashboard/MigrationDashboardServer.cs) hosts the built React/React Flow SPA and API over the same SQLite file. It binds only to a loopback URL; its same-origin POST mutations queue failed batches for replay, queue an edited retry for an exactly attributed row, or approve continuing downstream from one failed step. Basic run/step/batch metadata is always retained; row payload snapshots are opt-in except for `Invoke-Migration -WhatIf`, which captures planned target inputs. While a run is active, it also reads in-memory per-member Dataverse pool counters for the live connection-throughput chart.
 4. **The database owner** is hosted by the first caller that opens a database, or explicitly with `Start-MigrationDatabaseServer`. It is the only Migration4Dataverse process that opens that SQLite file; other processes use same-user named-pipe IPC. Scheduler execution, workers, live connections, and callbacks remain in each caller process. A database can serve multiple active run IDs, with per-run leases preventing duplicate schedulers for the same run.
 5. **Run history** is queryable through [`Get-MigrationRun`](../../src/Migration4Dataverse.Engine/PowerShell/GetMigrationRunCommand.cs). The dashboard can also preview caller-supplied step and connection objects without starting a migration or opening a database.
 
@@ -271,6 +271,8 @@ flowchart LR
 
 [`DependencyScheduler.ExecuteAsync`](../../src/Migration4Dataverse.Engine/Scheduling/DependencyScheduler.cs) validates the graph and options, creates or verifies the run against its name and step hash, and acquires an exclusive lease for that run ID. Distinct run IDs can execute concurrently against one database through its owner process. The scheduler then starts root feeders, the worker pool, a dependency-event pump, and a per-run lease heartbeat concurrently.
 
+Root feeder exceptions retry from the latest durable enqueue cursor up to `SourceReadMaxAttempts` (default 3) with exponential delay starting at two seconds and capped at one minute; cancellation is not retried. Batch-handler exceptions retry up to `MaxAttempts` (default 5) with the scheduler retry delay. A handler's explicit `HasErrors` result is terminal rather than retryable. By default, any row errors fail the run; an invocation-wide or per-step percentage threshold can accept row errors. Exhausted reader, handler, and infrastructure failures remain fatal unless an operator explicitly approves continuing past the affected step. Committed batches and external side effects are not rolled back.
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -300,6 +302,7 @@ sequenceDiagram
         Scheduler->>Store: Enqueue payload and source-key index
         Root->>Keys: Signal parent source completion
         Keys-->>Root: Release waiting key requests or fail unmatched keys
+        Note over Scheduler,Root: Source exceptions retry from the latest durable cursor, except cancellation
     and Worker pool
         Workers->>Gate: Try acquire target execution permit
         Gate-->>Workers: Permit or unavailable
@@ -319,6 +322,14 @@ sequenceDiagram
         Store-->>Pump: Child batch when prerequisites succeeded
     end
 
+    alt Terminal failure or cancellation
+        Scheduler->>Store: Persist run failure context and terminal status
+        Scheduler-->>Caller: Surface run failure
+    else Successful drain
+        Scheduler->>Scheduler: Run completion hooks and atomically publish file targets
+        Scheduler->>Store: Mark run completed and release run lease
+    end
+
     Note over Store,Keys: Batch enqueue and source-key indexing are transactional.
     Note over Store,Pump: Dependency-event inserts and checkpoint advancement are transactional.
     Note over Store,Workers: Batch leasing acquires the WAL writer slot before selecting a batch; other read-modify-write operations serialize before reading, while WAL readers remain concurrent.
@@ -331,14 +342,15 @@ sequenceDiagram
     Join->>Completion: Resolve deferred keys when the parent finishes
     Note over Join,Store: JoinOrder = stable waits at each left row and preserves input order.
     Workers->>Store: Lease and execute materialized child batches
-    Scheduler->>Scheduler: Run completion hooks and atomically publish file targets
-    Scheduler->>Store: Mark run completed and release run lease
 ```
 
 ### Sources, workers, and backpressure
 
 - Before creating run metadata, the scheduler resolves supported source counts once. SQLite, DuckDB, PostgreSQL, MySQL, and Oracle wrap the main `Query` in a scalar count query unless an explicit `CountQuery` override is supplied; SQL Server requires an explicit `CountQuery` for this provider; MongoDB uses `CountDocumentsAsync`; Simple and FetchXML Dataverse sources use `Get-DataverseRecord -RecordCount`; custom sources can invoke a `CountCallback`; Parquet sources read row counts from file metadata; Excel sources read the selected sheet; Salesforce uses `SELECT COUNT()` unless custom `Soql` is set; HubSpot uses the search total when search is used; and Zendesk uses the search count when `Query` is set. Cds4Sql, CSV, JSONL, object-storage, HTTP/OData, SharePoint, and ServiceNow sources do not scan their contents to calculate a total; without an explicit `ExpectedRecordCount`, their totals become known as rows flow. Positive explicit or resolved counts are checked against the source rows when enumeration completes, including an expected total of zero.
 - Each root feeder preserves the last contiguous completed sequence and cursor, and separately resumes source enumeration after the latest durably enqueued batch. Pending and in-flight batches remain authoritative in SQLite and are processed from their stored payloads; the feeder does not regenerate them. Every new JSON batch is durably enqueued before a worker can write it.
+- A non-cancellation source-reader exception retries from the latest durable enqueue position, up to `SourceReadMaxAttempts` (default 3). The exponential delay starts at `SourceReadRetryDelaySeconds` (default 2) and caps at one minute. After exhaustion, the scheduler records a run-level failure even if no batch was created. Batch-handler exceptions retry up to `MaxAttempts` (default 5); a handler result with `HasErrors` is terminal without another scheduler retry.
+- `MaxErrorRatePercent` (default 0) and per-step `ErrorRateThresholdPercent` accept a cumulative failed-row rate calculated from succeeded plus failed rows for that step. The store evaluates the rate and persists batch completion, acceptance, and emitted dependency events in one transaction. Accepted row-error batches remain visible and cause final run status `CompletedWithErrors`; downstream can materialize only dependency output explicitly emitted by that handler. A per-step override can instead let the scheduler proceed past unaccepted failed batches or a source-reader failure. On resume, it does not replay the failed batch or restart an approved failed source feeder; it drains persisted work and routes only already-emitted outputs. Unread source rows remain skipped.
+- An unaccepted row error or a fatal reader/handler/infrastructure error stops the run, including independent graph branches. Dependency children whose prerequisites are not successful, accepted, or explicitly continued remain blocked. Previously committed batch state and external effects are not rolled back; callers must reconcile possible side effects before replay or continuation.
 - A root source with completion dependencies waits for every referenced step to drain before opening its source reader. Completion is derived recursively from upstream completion, in-flight batches, and pending incoming dependency events; parent failures fail the run.
 - A row-linked source has its own source feeder and stages its rows in a temporary SQLite database. Each keyed `Inputs` entry identifies a parent Source and maps the child `Child` property to that parent's `Source.Key` through `Keys.Parent`. The feeder releases null-containing rows first (without a batch prerequisite for null relationships), then linked rows as all matching parent batches become available. If the child source has explicitly declared completion barriers, the feeder waits for those steps before reading.
 
@@ -358,9 +370,9 @@ Automatic batch-size and DOP tuning have been removed. Saved tuning profiles fro
 
 ### Batch completion, retries, and cancellation
 
-A worker leases one batch, incrementing its attempt count, and renews that batch lease while its handler is running. A successful handler result is committed with `CompleteBatch`. A handler exception is retried up to `MaxAttempts` with exponential delay capped at one minute; before retrying, the batch is returned to `Pending`. Invalid handler results, exhausted retries, or a result with row errors are recorded as terminal failures and fail the run.
+A worker leases one batch, incrementing its attempt count, and renews that batch lease while its handler is running. A successful handler result is committed with `CompleteBatch`. A handler exception is retried up to `MaxAttempts` with exponential delay capped at one minute; before retrying, the batch is returned to `Pending`. Invalid handler results and exhausted retries are recorded as terminal failures. A result with row errors is recorded as `CompletedWithErrors`; it fails the run unless the configured per-step threshold accepts those errors.
 
-Successful completion atomically records outcomes, releases the batch lease, inserts dependency events, advances the table checkpoint, and removes the now-unneeded payload JSON. Outcomes may include optional step-specific specialist information; Dataverse targets record their fixed batch size, effective concurrency cap, and retry/throttle telemetry for the dashboard. A batch with row errors retains its payload and error outcomes, releases no dependency work, and blocks resuming that run until the failures are resolved or exported.
+Successful completion atomically records outcomes, releases the batch lease, inserts dependency events, advances the table checkpoint, and removes the now-unneeded payload JSON. Outcomes may include optional step-specific specialist information; Dataverse targets record their fixed batch size, effective concurrency cap, and retry/throttle telemetry for the dashboard. A batch with row errors retains its payload and error outcomes. Its exact row errors and original row JSON are stored in `BatchRowErrors` when the handler reports reliable input indices; its dependency outputs stay held until errors are accepted by policy or resolved through retries. The dashboard can create a single-record batch at the same Transform, Filter, or callback step with an edited payload, while preserving the original row's lineage. Successful resolution follows `BatchRowRetryLinks` back through the retry chain and marks the original failed batches successful when all their row errors are resolved. Unattributed errors remain batch-level and require batch replay or step continuation. Resumption is blocked until unaccepted failures have been reviewed and an eligible recovery action queued; the dashboard preserves batch replay outcomes in retry history.
 
 When cancellation interrupts handler execution, the scheduler abandons the batch back to `Pending` before stopping. If another worker has already reclaimed a batch, the former owner cannot complete or abandon it; its stale outcome is discarded and the current lease owner controls the durable transition. Losing a batch lease alone does not fail the run. Persisted work can be resumed by reusing the same run ID and unchanged step definition after the run lease is available.
 
@@ -368,7 +380,7 @@ When cancellation interrupts handler execution, the scheduler abandons the batch
 
 [`SqliteMigrationStore`](../../src/Migration4Dataverse.Engine/Storage/SqliteJobStore.cs) requires a file-backed database. It enables WAL journal mode and configures foreign keys, `synchronous = FULL`, and a 30-second busy timeout. Scheduler read-modify-write operations begin immediate transactions so concurrent workers reserve SQLite's single WAL writer slot before reading, avoiding deferred-transaction upgrade races while allowing readers to continue. A per-run lease prevents duplicate schedulers for the same run while allowing other run IDs to use the same database concurrently. The write gate records wait and hold durations through the `Migration4Dataverse.Engine.Storage` meter.
 
-Ordered migrations are tracked in `SchemaMigrations` by version, name, and applied time; each migration and its ledger row commit in one transaction. Migration 1 creates the initial store. Migration 2 renames job/table identifiers to run/step identifiers while preserving their row data. Migration 3 adds persisted step runtime metrics and per-batch row totals. Migration 4 adds the legacy target-record ID mapping table. Migration 5 adds the legacy Target context table. Migration 6 adds Join input and match staging plus explicit batch-parent references. Migration 7 adds nullable per-batch input-row counts and filtered-row counts; uncountable callback payloads stay `NULL`, not zero. New batches are counted when queued, and successful completion may remove the original payload without losing the count. Migration 8 records step activity intervals for working-versus-waiting timelines; it does not reconstruct intervals for runs created before this migration. Migration 9 adds `SourceKeyIndex`, a durable mapping from each keyed source row to its queued batch and record index, written transactionally with batch enqueue. Migration 10 adds `JoinInputKeyIndex` for indexed streaming-join key lookups. Migration 11 adds an index that lets debug-snapshot retention cleanup seek by run and capture time. Migrations 12–14 add the legacy `DataverseTargetTuningProfiles` table and its metadata. Current runs ignore those stored values; `Clear-MigrationTargetTuning` removes one or all legacy profiles.
+Ordered migrations are tracked in `SchemaMigrations` by version, name, and applied time; each migration and its ledger row commit in one transaction. Migration 1 creates the initial store. Migration 2 renames job/table identifiers to run/step identifiers while preserving their row data. Migration 3 adds persisted step runtime metrics and per-batch row totals. Migration 4 adds the legacy target-record ID mapping table. Migration 5 adds the legacy Target context table. Migration 6 adds Join input and match staging plus explicit batch-parent references. Migration 7 adds nullable per-batch input-row counts and filtered-row counts; uncountable callback payloads stay `NULL`, not zero. New batches are counted when queued, and successful completion may remove the original payload without losing the count. Migration 8 records step activity intervals for working-versus-waiting timelines; it does not reconstruct intervals for runs created before this migration. Migration 9 adds `SourceKeyIndex`, a durable mapping from each keyed source row to its queued batch and record index, written transactionally with batch enqueue. Migration 10 adds `JoinInputKeyIndex` for indexed streaming-join key lookups. Migration 11 adds an index that lets debug-snapshot retention cleanup seek by run and capture time. Migrations 12–14 add the legacy `DataverseTargetTuningProfiles` table and its metadata. Migration 15 adds persisted run-level failure details and `BatchRetryHistory` for retaining prior batch errors and outcomes when failed batches are queued for replay. Migration 16 adds the batch `FailureAccepted` flag and per-run `StepFailureContinuations` table, and rebuilds `Runs` to permit the `CompletedWithErrors` status. Migration 17 adds `BatchRowErrors` for exact row attribution and `BatchRowRetryLinks` for tracking edited, single-row retry chains. Current runs ignore legacy tuning values; `Clear-MigrationTargetTuning` removes one or all legacy profiles.
 
 Untracked legacy databases are rejected; create a fresh database when upgrading from a build that predates the migration ledger.
 
@@ -377,6 +389,11 @@ Dashboard input progress sums persisted `InputRows` by batch state and reports f
 ```mermaid
 erDiagram
     RUNS ||--o{ BATCHES : contains
+    RUNS ||--o{ BATCH_RETRY_HISTORY : records
+    BATCHES ||--o{ BATCH_RETRY_HISTORY : preserves
+    BATCHES ||--o{ BATCH_ROW_ERRORS : attributes
+    BATCHES ||--o{ BATCH_ROW_RETRY_LINKS : retries
+    BATCH_ROW_ERRORS ||--o{ BATCH_ROW_RETRY_LINKS : links
     RUNS ||--o{ STEP_CHECKPOINTS : tracks
     STEP_ACTIVITY ||--o{ STEP_ACTIVITY_PERIODS : records
     RUNS ||--o{ SOURCE_FEEDERS : tracks
@@ -403,6 +420,7 @@ erDiagram
         string Status
         string SchedulerLeaseOwner
         string SchedulerLeaseExpiresUtc
+        string FailureJson
         string PipelineJson
         boolean DebugCaptureEnabled
         integer DebugCaptureRetentionDays
@@ -443,6 +461,35 @@ erDiagram
         integer InputRows
         integer FilteredRows
         string LastError
+    }
+
+    BATCH_RETRY_HISTORY {
+        integer RetryId PK
+        string RunId FK
+        string BatchId FK
+        string StepId
+        integer PreviousAttempts
+        string PreviousLastError
+        string PreviousOutcomesJson
+        string QueuedUtc
+    }
+
+    BATCH_ROW_ERRORS {
+        string RunId PK
+        string BatchId PK
+        integer RecordIndex PK
+        string Error
+        string PayloadJson
+        string ResolvedUtc
+        string RetryBatchId
+        integer RetryCount
+    }
+
+    BATCH_ROW_RETRY_LINKS {
+        string RunId
+        string RetryBatchId PK
+        string ParentBatchId
+        integer ParentRecordIndex
     }
 
     STEP_ACTIVITY {
@@ -563,11 +610,11 @@ erDiagram
     }
 ```
 
-The prerequisite batch IDs are stored as JSON in the dependency event rather than as foreign-key rows. `ParentBatchId` is a relational reference to the batch that emitted the event. Migration 002 renamed stored run, step, batch, checkpoint, dependency-event, and debug-snapshot columns while retaining their values; migration 003 added persisted step runtime accounting and per-batch row totals; migration 004 added target-record ID mappings. See [SQLite persistence and recovery](#sqlite-persistence-and-recovery) for the complete migration history through migration 014, including `JoinInputKeyIndex` and the legacy tuning-profile tables.
+The prerequisite batch IDs are stored as JSON in the dependency event rather than as foreign-key rows. `ParentBatchId` is a relational reference to the batch that emitted the event. Migration 002 renamed stored run, step, batch, checkpoint, dependency-event, and debug-snapshot columns while retaining their values; migration 003 added persisted step runtime accounting and per-batch row totals; migration 004 added target-record ID mappings. See [SQLite persistence and recovery](#sqlite-persistence-and-recovery) for the complete migration history through migration 016, including `JoinInputKeyIndex`, legacy tuning-profile tables, run-level failures, retry history, and error continuation policy.
 
 | Store | Purpose |
 | --- | --- |
-| `Runs` | Run name/hash, run status, and scheduler lease owner/expiry. Reusing a run ID with a different run name or hash is rejected. |
+| `Runs` | Run name/hash, run status, scheduler lease owner/expiry, and serialized terminal failure context. Reusing a run ID with a different run name or hash is rejected. |
 | `Runs.PipelineJson` | Snapshot of step IDs, types, row-flow input IDs, completion dependencies, and source-backed status for monitoring; retained even when debug capture is disabled. |
 | `Runs.ConfigurationJson` | Safe projection of the original PowerShell steps and named connection properties. Script blocks are represented by markers rather than executed or persisted as source. |
 | `Runs.ConnectionInstancesJson` | Redacted connection property snapshots captured at run start and terminal completion; this retains diagnostics, not live connection objects. |
@@ -575,6 +622,7 @@ The prerequisite batch IDs are stored as JSON in the dependency event rather tha
 | `SourceFeeders` | Per-source step completion marker, set only after enumeration ends and that source's nonterminal batches drain. Dashboard steps remain active until this marker and all dependency work are complete. |
 | `Batches` | Durable payload and hash, sequence, status, attempt count, batch lease, outcomes, timestamps, and last error. Successful payloads are removed after commit; basic metadata/outcomes remain for dashboard history. |
 | `Batches.SucceededRows` / `Batches.FailedRows` | Row totals parsed once when outcomes are committed; dashboard refreshes aggregate these columns in SQLite instead of deserializing every batch outcome repeatedly. |
+| `BatchRetryHistory` | Prior attempt count, error text, outcomes, and queue time retained when a terminal failed batch is reset to pending for replay. |
 | `StepActivity` | Per-step accumulated working/waiting durations and current activity state. A source step starts when its feeder starts; a dependent step starts when its first parent event is emitted. Active time spans source enumeration or at least one in-flight batch; waiting time accumulates while a started step has no active operation, including waits for parent rows or completion barriers. |
 | `StepActivityPeriods` | Ordered working and waiting intervals used by dashboard timelines. Waiting includes scheduler inactivity and backpressure; it is not exclusively downstream blocking. |
 | `DependencyEvents` | Durable child payload, parent batch, required parent batch IDs, and pending/completed state. |
@@ -589,7 +637,7 @@ The prerequisite batch IDs are stored as JSON in the dependency event rather tha
 
 ### Monitoring, debug capture, and lineage
 
-The web app is built from `web/Migration4Dataverse.Dashboard` using Vite, React, Fluent UI 9 theme tokens, native controls, and `@xyflow/react`, then embedded in the engine assembly. `Start-MigrationDashboard` serves the SPA and read-only JSON endpoints from a loopback-only `HttpListener` host. It accepts a SQLite history database, in-memory step/connection objects for configuration preview, or both.
+The web app is built from `web/Migration4Dataverse.Dashboard` using Vite, React, Fluent UI 9 theme tokens, native controls, and `@xyflow/react`, then embedded in the engine assembly. `Start-MigrationDashboard` serves the SPA and JSON endpoints from a loopback-only `HttpListener` host. Its mutations are same-origin POSTs to queue failed batches for replay, queue an edited retry for an exactly attributed row, or persist an operator-approved continuation for one failed step; it accepts a SQLite history database, in-memory step/connection objects for configuration preview, or both.
 
 The UI polls every three seconds. Its graph occupies the workspace between the header and collapsible summary/row panels, while configuration properties open in a collapsible right drawer. Every step remains a separate graph node; source and target connection details are derived from the sanitized configuration snapshot. Row inspection separates captured stages into searchable tabs, presents system metadata before payload properties, and can switch the payload between individual columns and JSON. Selecting a Dataverse source or target row with a captured primary ID provides a link to the environment's default model-driven app. Selecting a row moves the selected-row/highlight count to the graph heading and shows compact, multi-row previews at traced steps, replacing normal node details; the searchable row inspector retains the full trace.
 
@@ -619,10 +667,12 @@ stateDiagram-v2
     InFlight --> Succeeded: Complete without row errors
     InFlight --> CompletedWithErrors: Row errors or terminal handler failure
     Succeeded --> [*]
+    CompletedWithErrors --> Pending: Queue for whole-batch replay
+    CompletedWithErrors --> Succeeded: All attributed row errors resolved by retry
     CompletedWithErrors --> [*]
 ```
 
-An expired batch lease allows another worker to reclaim the batch. The external operation may already have happened before a crash, so leases provide recoverability, not exactly-once side effects. Handlers that write to Dataverse must be replay-safe, for example by using upserts or a deliberate reconciliation strategy.
+An expired batch lease allows another worker to reclaim the batch. The external operation may already have happened before a crash, so leases provide recoverability, not exactly-once side effects. Handlers that write to Dataverse must be replay-safe, for example by using upserts or a deliberate reconciliation strategy. `FailureAccepted` distinguishes row-error batches under the configured rate from unaccepted errors. On a failed or cancelled run with no active scheduler lease, the dashboard can atomically move every terminal failed batch back to `Pending`; it first copies each prior attempt count, error, and outcome to `BatchRetryHistory`. When exact row attribution exists, it can instead queue an edited one-row batch at the same step. `BatchRowRetryLinks` records the retry chain; successful completion resolves the corresponding error through its ancestors, allowing held dependency events to become eligible when all errors are resolved. Alternatively, the dashboard persists an operator-approved continuation for a selected step. These actions do not start a scheduler.
 
 Dependency events follow a separate state transition:
 
@@ -637,23 +687,23 @@ stateDiagram-v2
     Completed --> Completed: Replayed idempotently
 ```
 
-The event pump materializes a child only when its publishing parent and all required parent batches have succeeded in the same run. In one SQLite transaction, the store inserts the child batch and marks the event complete. Reprocessing an already-completed event returns its existing child batch. The child `StoredBatch.ParentBatchIds` exposes the publishing and required parent batches to its callback, derived from the durable dependency event. This lets a callback declare lineage references to rows in multiple direct parents without combining or changing their payloads.
+The event pump materializes a child only when its publishing parent and all required parent batches have succeeded, have accepted row errors, have had their attributed errors resolved by row retry, or belong to an explicitly continued step in the same run. In one SQLite transaction, the store inserts the child batch and marks the event complete. Reprocessing an already-completed event returns its existing child batch. The child `StoredBatch.ParentBatchIds` exposes the publishing and required parent batches to its callback, derived from the durable dependency event. This lets a callback declare lineage references to rows in multiple direct parents without combining or changing their payloads.
 
 ### Recovery model and guarantees
 
 1. The caller reuses the run ID, run name, step hash, and logically identical source/handler definitions.
-2. The scheduler verifies the stored run identity, acquires the run lease, reads current progress, and refuses to resume a run with batches already recorded as having row errors.
+2. The scheduler verifies the stored run identity, acquires the run lease, and reads current progress. Unaccepted failures must be reviewed and either queued for whole-batch replay, retried as exactly attributed rows, or explicitly accepted for continuation past their step; the dashboard refuses these mutations while the run is active and only accepts same-origin requests.
 3. A root source receives both the last contiguous completed checkpoint and the latest durable enqueue position (`ResumeSequence` and `ResumeCursorJson`). It continues after the latest enqueued batch; pending and in-flight batches are replayed from SQLite rather than reconstructed from potentially changed parent readiness. The store still checks payload hashes and cursors when an identity is explicitly enqueued again.
 4. Pending batches are leased normally. Expired in-flight batches can be reclaimed; pending dependency events are paged and materialized as their prerequisites become successful.
 5. A handler may run again if the process failed after the external write succeeded but before SQLite committed completion. Dataverse operations therefore need to be safe to replay.
 
-Default scheduler settings are defined in `DependencySchedulerOptions`: 64 workers, 64 queued batches, 32 queued batches per step, five attempts, a 30-minute batch lease, a one-minute run lease, a 250-millisecond poll interval, and a two-second initial retry delay. The retry delay grows exponentially up to one minute. These are defaults, not service-protection guarantees; higher worker counts can increase resource use.
+Default scheduler settings are defined in `DependencySchedulerOptions`: 64 workers, 64 queued batches, 32 queued batches per step, five batch-handler attempts, three source-reader attempts, a two-second source-reader retry delay, a 30-minute batch lease, a one-minute run lease, a 250-millisecond poll interval, and a two-second initial batch retry delay. Both retry delays grow exponentially up to one minute. These are defaults, not service-protection guarantees; higher worker counts can increase resource use.
 
 ## Step graph and callback execution
 
 [`PowerShellMigrationStepFactory`](../../src/Migration4Dataverse.Engine/PowerShell/PowerShellMigrationStepFactory.Graph.cs) parses node IDs, types, row-flow inputs, source completion/row-linked dependencies, connector definitions, and inline scripts, validates the DAG, and creates source readers and handlers. The generated step hash covers step definitions and module references, and versions the row-linked source contract to prevent unsafe resume of runs without a source-key index. WhatIf previews add a distinct hash suffix, execute sources and transforms while capturing their rows, and skip typed target writes and callback handlers. Their PowerShell result sets `DependencySchedulerResult.IsWhatIf`; target rows are processed for preview but are not counted as successful writes. Root and row-linked Source nodes read connector streams; a Transform, Filter, or Append node consumes batches routed by its declared input IDs.
 
-[`DependencyScheduler`](../../src/Migration4Dataverse.Engine/Scheduling/DependencyScheduler.cs) resolves configured source count providers before persisting expected totals, then durably queues root batches and tracks completion of every step. Typed handlers dispatch Target steps to Dataverse, replay-safe JSONL/CSV/Parquet batch staging, object-storage uploads, transactional SQL database writers, MongoDB writers, or custom connector callbacks. After all work drains and batch state is verified, step completion hooks finalize file targets before the run status becomes `Completed`; a file finalization exception is persisted as a failed run. Successful step batches release bounded work for each declared consumer; SQLite commits dependency events transactionally with producer completion. Source completion barriers wait for the complete referenced step, while row-linked source edges stream nested rows from parent source batches. Callback nodes can add explicit `RequiredBatchIds` for multi-parent batch readiness. That readiness mechanism does not join record payloads, and typed stream-wide Merge and Sort nodes are not yet integrated into this execution path.
+[`DependencyScheduler`](../../src/Migration4Dataverse.Engine/Scheduling/DependencyScheduler.cs) resolves configured source count providers before persisting expected totals, then durably queues root batches and tracks completion of every step. Typed handlers dispatch Target steps to Dataverse, replay-safe JSONL/CSV/Parquet batch staging, object-storage uploads, transactional SQL database writers, MongoDB writers, or custom connector callbacks. After all work drains and batch state is verified, step completion hooks finalize file targets before the run status becomes `Completed` or `CompletedWithErrors`; a file finalization exception is persisted as a failed run. Successful or accepted-error step batches release bounded work for each declared consumer; SQLite commits dependency events transactionally with producer completion and the row-error acceptance result. Source completion barriers wait for the complete referenced step, while row-linked source edges stream nested rows from parent source batches. Callback nodes can add explicit `RequiredBatchIds` for multi-parent batch readiness. That readiness mechanism does not join record payloads, and typed stream-wide Merge and Sort nodes are not yet integrated into this execution path.
 
 `MaxDegreeOfParallelism` controls scheduler workers and caps each Dataverse target connection budget. Dataverse target batch size defaults to 10 independently of `Invoke-Migration -BatchSize`, accepts an explicit target-level override, and is limited to 1,000. A Dataverse target may set a fixed `MaxConcurrency` cap; otherwise it uses the connection recommendation. Multi-identity pools enforce per-identity active-request budgets and balance calls among eligible identities. Automatic batch-size and DOP tuning have been removed. Legacy saved tuning profiles are ignored by current runs, although `Clear-MigrationTargetTuning` can remove them. `Set-DataverseRecord` uses internal parallelism one. Custom targets use their configured callback concurrency limit. The invoker retains ownership of supplied connections. Normal retries remain on; the opt-in `-DataverseNoRetryDiagnosticMode` disables connection, cmdlet, and scheduler retries for a diagnostic run.
 

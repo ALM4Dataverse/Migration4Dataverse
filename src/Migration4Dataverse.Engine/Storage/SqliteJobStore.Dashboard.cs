@@ -78,13 +78,14 @@ internal sealed partial class SqliteMigrationStore
         string pipelineJson;
         string configurationJson;
         string connectionInstancesJson;
+        string? failureJson;
         DateTimeOffset? schedulerLeaseExpiresUtc;
         using (var run = connection.CreateCommand())
         {
             run.CommandText = """
                 SELECT RunName, Status, CreatedUtc, UpdatedUtc, DebugCaptureEnabled,
                        DebugCaptureRetentionDays, PipelineJson, ConfigurationJson,
-                       ConnectionInstancesJson, SchedulerLeaseExpiresUtc
+                       ConnectionInstancesJson, SchedulerLeaseExpiresUtc, FailureJson
                 FROM Runs
                 WHERE RunId = $runId;
                 """;
@@ -105,6 +106,7 @@ internal sealed partial class SqliteMigrationStore
             configurationJson = reader.GetString(7);
             connectionInstancesJson = reader.GetString(8);
             schedulerLeaseExpiresUtc = reader.IsDBNull(9) ? null : ParseUtc(reader.GetString(9));
+            failureJson = reader.IsDBNull(10) ? null : reader.GetString(10);
         }
 
         var steps = ReadPipeline(pipelineJson);
@@ -117,6 +119,7 @@ internal sealed partial class SqliteMigrationStore
                        SUM(CASE WHEN State = 'InFlight' THEN 1 ELSE 0 END),
                        SUM(CASE WHEN State = 'Succeeded' THEN 1 ELSE 0 END),
                        SUM(CASE WHEN State = 'CompletedWithErrors' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN State = 'CompletedWithErrors' AND FailureAccepted = 0 THEN 1 ELSE 0 END),
                        MIN(CreatedUtc),
                        MAX(UpdatedUtc),
                        SUM(SucceededRows),
@@ -147,15 +150,34 @@ internal sealed partial class SqliteMigrationStore
                 step.InFlightBatches = reader.GetInt64(2);
                 step.SucceededBatches = reader.GetInt64(3);
                 step.BatchesWithErrors = reader.GetInt64(4);
-                step.FirstBatchUtc = reader.IsDBNull(5) ? null : ParseUtc(reader.GetString(5));
-                step.LastBatchUtc = reader.IsDBNull(6) ? null : ParseUtc(reader.GetString(6));
-                step.SucceededRows = reader.GetInt64(7);
-                step.FailedRows = reader.GetInt64(8);
-                step.InputRowsProcessed = reader.GetInt64(9);
-                step.InputRowsPending = reader.GetInt64(10);
-                step.InputRowsInFlight = reader.GetInt64(11);
-                step.FilteredRows = reader.GetInt64(12);
-                step.BatchesWithUnknownInputRows = reader.GetInt64(13);
+                step.UnacceptedErrorBatches = reader.GetInt64(5);
+                step.FirstBatchUtc = reader.IsDBNull(6) ? null : ParseUtc(reader.GetString(6));
+                step.LastBatchUtc = reader.IsDBNull(7) ? null : ParseUtc(reader.GetString(7));
+                step.SucceededRows = reader.GetInt64(8);
+                step.FailedRows = reader.GetInt64(9);
+                step.InputRowsProcessed = reader.GetInt64(10);
+                step.InputRowsPending = reader.GetInt64(11);
+                step.InputRowsInFlight = reader.GetInt64(12);
+                step.FilteredRows = reader.GetInt64(13);
+                step.BatchesWithUnknownInputRows = reader.GetInt64(14);
+            }
+        }
+
+        using (var continuations = connection.CreateCommand())
+        {
+            continuations.CommandText = """
+                SELECT StepId
+                FROM StepFailureContinuations
+                WHERE RunId = $runId;
+                """;
+            continuations.Parameters.AddWithValue("$runId", runId);
+            using var reader = continuations.ExecuteReader();
+            while (reader.Read())
+            {
+                if (stepIndex.TryGetValue(reader.GetString(0), out var step))
+                {
+                    step.FailureContinuationOverride = true;
+                }
             }
         }
 
@@ -290,7 +312,8 @@ internal sealed partial class SqliteMigrationStore
             }
         }
 
-        var allComplete = string.Equals(status, MigrationRunStatus.Completed.ToString(), StringComparison.Ordinal);
+        var allComplete = status is nameof(MigrationRunStatus.Completed) or
+            nameof(MigrationRunStatus.CompletedWithErrors);
         var metricTime = DateTimeOffset.UtcNow;
         var runIsActive = status == MigrationRunStatus.Running.ToString() &&
                           (schedulerLeaseExpiresUtc is null || schedulerLeaseExpiresUtc > metricTime);
@@ -317,7 +340,7 @@ internal sealed partial class SqliteMigrationStore
                 return false;
             }
 
-            if (step.BatchesWithErrors > 0 ||
+            if ((step.UnacceptedErrorBatches > 0 && !step.FailureContinuationOverride) ||
                 step.PendingBatches > 0 ||
                 step.InFlightBatches > 0 ||
                 step.PendingDependencyEvents > 0)
@@ -371,7 +394,12 @@ internal sealed partial class SqliteMigrationStore
                 runIsActive)).ToArray(),
             ParseOptionalJson(configurationJson),
             ParseOptionalJson(connectionInstancesJson),
-            schedulerLeaseExpiresUtc);
+            schedulerLeaseExpiresUtc)
+        {
+            Failure = failureJson is null
+                ? null
+                : JsonSerializer.Deserialize<MigrationRunFailure>(failureJson)
+        };
     }
 
     private static IReadOnlyList<MigrationDashboardRateSample> BuildRowsPerSecondSamples(
@@ -456,28 +484,75 @@ internal sealed partial class SqliteMigrationStore
         command.Parameters.AddWithValue("$runId", runId);
         command.Parameters.AddWithValue("$stepId", stepId);
         command.Parameters.AddWithValue("$limit", limit);
-        using var reader = command.ExecuteReader();
         var batches = new List<MigrationDashboardBatch>();
-        while (reader.Read())
+        using (var reader = command.ExecuteReader())
         {
-            var outcomes = reader.IsDBNull(7) ? null : reader.GetString(7);
-            var rowCounts = outcomes is null ? default : ReadRowCounts(outcomes);
-            batches.Add(new MigrationDashboardBatch(
-                reader.GetString(0),
-                reader.GetString(1),
-                reader.GetString(2),
-                reader.GetInt64(3),
-                reader.GetString(4),
-                reader.GetInt32(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                outcomes,
-                ParseUtc(reader.GetString(8)),
-                ParseUtc(reader.GetString(9)),
-                rowCounts.Succeeded,
-                rowCounts.Failed));
+            while (reader.Read())
+            {
+                var outcomes = reader.IsDBNull(7) ? null : reader.GetString(7);
+                var rowCounts = outcomes is null ? default : ReadRowCounts(outcomes);
+                batches.Add(new MigrationDashboardBatch(
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.GetInt64(3),
+                    reader.GetString(4),
+                    reader.GetInt32(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    outcomes,
+                    ParseUtc(reader.GetString(8)),
+                    ParseUtc(reader.GetString(9)),
+                    rowCounts.Succeeded,
+                    rowCounts.Failed));
+            }
         }
 
         return batches;
+    }
+
+    private static IReadOnlyList<MigrationDashboardRowError> ReadDashboardRowErrors(
+        SqliteConnection connection,
+        string runId,
+        string batchId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT rowError.RecordIndex, rowError.Error, rowError.PayloadJson,
+                   rowError.ResolvedUtc, rowError.RetryCount, retry.State,
+                   CASE
+                       WHEN rowError.ResolvedUtc IS NOT NULL THEN 0
+                       WHEN retry.State IN ('Pending', 'InFlight', 'Succeeded') THEN 0
+                       WHEN EXISTS (
+                           SELECT 1
+                           FROM BatchRowErrors AS retryError
+                           WHERE retryError.RunId = rowError.RunId
+                             AND retryError.BatchId = rowError.RetryBatchId
+                             AND retryError.ResolvedUtc IS NULL
+                       ) THEN 0
+                       ELSE 1
+                   END
+            FROM BatchRowErrors AS rowError
+            LEFT JOIN Batches AS retry ON retry.BatchId = rowError.RetryBatchId
+            WHERE rowError.RunId = $runId AND rowError.BatchId = $batchId
+            ORDER BY rowError.RecordIndex;
+            """;
+        command.Parameters.AddWithValue("$runId", runId);
+        command.Parameters.AddWithValue("$batchId", batchId);
+        using var reader = command.ExecuteReader();
+        var rowErrors = new List<MigrationDashboardRowError>();
+        while (reader.Read())
+        {
+            rowErrors.Add(new MigrationDashboardRowError(
+                reader.GetInt32(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                !reader.IsDBNull(3),
+                reader.GetInt32(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.GetInt32(6) != 0));
+        }
+
+        return rowErrors;
     }
 
     public IReadOnlyList<MigrationDashboardBatch> GetDashboardBatchErrors(
@@ -504,28 +579,73 @@ internal sealed partial class SqliteMigrationStore
         command.Parameters.AddWithValue("$stepId", stepId);
         command.Parameters.AddWithValue("$limit", limit);
         command.Parameters.AddWithValue("$offset", offset);
-        using var reader = command.ExecuteReader();
         var batches = new List<MigrationDashboardBatch>();
-        while (reader.Read())
+        using (var reader = command.ExecuteReader())
         {
-            var outcomes = reader.IsDBNull(7) ? null : reader.GetString(7);
-            var rowCounts = outcomes is null ? default : ReadRowCounts(outcomes);
-            batches.Add(new MigrationDashboardBatch(
-                reader.GetString(0),
-                reader.GetString(1),
-                reader.GetString(2),
-                reader.GetInt64(3),
-                reader.GetString(4),
-                reader.GetInt32(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                outcomes,
-                ParseUtc(reader.GetString(8)),
-                ParseUtc(reader.GetString(9)),
-                rowCounts.Succeeded,
-                rowCounts.Failed));
+            while (reader.Read())
+            {
+                var outcomes = reader.IsDBNull(7) ? null : reader.GetString(7);
+                var rowCounts = outcomes is null ? default : ReadRowCounts(outcomes);
+                batches.Add(new MigrationDashboardBatch(
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.GetInt64(3),
+                    reader.GetString(4),
+                    reader.GetInt32(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    outcomes,
+                    ParseUtc(reader.GetString(8)),
+                    ParseUtc(reader.GetString(9)),
+                    rowCounts.Succeeded,
+                    rowCounts.Failed));
+            }
         }
 
-        return batches;
+        return batches
+            .Select(batch => batch with
+            {
+                RowErrors = ReadDashboardRowErrors(connection, batch.RunId, batch.BatchId)
+            })
+            .ToArray();
+    }
+
+    public IReadOnlyList<MigrationBatchRetryHistory> GetDashboardBatchRetryHistory(
+        string runId,
+        int limit = 100,
+        int offset = 0)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT RetryId, BatchId, StepId, PreviousAttempts, PreviousLastError,
+                   PreviousOutcomesJson, QueuedUtc
+            FROM BatchRetryHistory
+            WHERE RunId = $runId
+            ORDER BY QueuedUtc DESC, RetryId DESC
+            LIMIT $limit OFFSET $offset;
+            """;
+        command.Parameters.AddWithValue("$runId", runId);
+        command.Parameters.AddWithValue("$limit", limit);
+        command.Parameters.AddWithValue("$offset", offset);
+        using var reader = command.ExecuteReader();
+        var retries = new List<MigrationBatchRetryHistory>();
+        while (reader.Read())
+        {
+            retries.Add(new MigrationBatchRetryHistory(
+                reader.GetInt64(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetInt32(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                ParseUtc(reader.GetString(6))));
+        }
+
+        return retries;
     }
 
     public IReadOnlyList<MigrationDebugSnapshot> GetDebugSnapshots(
@@ -1304,6 +1424,8 @@ internal sealed partial class SqliteMigrationStore
         public long PendingDependencyEvents { get; set; }
         public long SucceededBatches { get; set; }
         public long BatchesWithErrors { get; set; }
+        public long UnacceptedErrorBatches { get; set; }
+        public bool FailureContinuationOverride { get; set; }
         public long SucceededRows { get; set; }
         public long FailedRows { get; set; }
         public long InputRowsProcessed { get; set; }
@@ -1378,6 +1500,10 @@ internal sealed partial class SqliteMigrationStore
                         : null,
                 InputFinalized = inputFinalized,
                 BatchesWithUnknownInputRows = BatchesWithUnknownInputRows,
+                UnacceptedErrorBatches = UnacceptedErrorBatches,
+                FailureContinuationOverride = FailureContinuationOverride,
+                FailureContinuationAllowed = FailureContinuationOverride ||
+                                             (BatchesWithErrors > 0 && UnacceptedErrorBatches == 0),
                 SpecialistInfo = SpecialistInfo,
                 RowsPerSecondSamples = RowsPerSecondSamples,
                 ActivityPeriods = ActivityPeriods.ToArray()

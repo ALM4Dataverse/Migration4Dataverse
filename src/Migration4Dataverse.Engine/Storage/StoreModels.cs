@@ -16,6 +16,7 @@ public enum MigrationRunStatus
 {
     Running,
     Completed,
+    CompletedWithErrors,
     Failed,
     Cancelled
 }
@@ -37,6 +38,8 @@ public sealed record StoredBatch(
     DateTimeOffset UpdatedUtc)
 {
     public IReadOnlyList<string> ParentBatchIds { get; init; } = Array.Empty<string>();
+
+    public bool FailureAccepted { get; init; }
 }
 
 public sealed record PendingBatchStepCandidate(
@@ -130,10 +133,48 @@ public sealed record MigrationRunProgress(
     public long NonTerminalBatchCount => PendingBatches + InFlightBatches;
 }
 
+public sealed record MigrationStepRowCounts(long SucceededRows, long FailedRows);
+
+public sealed record MigrationRowError(int RecordIndex, string Error);
+
+public sealed record MigrationBatchCompletion(
+    MigrationStepCheckpoint Checkpoint,
+    bool ErrorRateWithinThreshold,
+    double? ErrorRatePercent);
+
+public sealed record MigrationRunFailure(
+    string Phase,
+    string? StepId,
+    string Message,
+    string ExceptionType,
+    string Details,
+    DateTimeOffset RecordedUtc)
+{
+    public int Attempts { get; init; } = 1;
+}
+
+public sealed record MigrationBatchRetryHistory(
+    long RetryId,
+    string BatchId,
+    string StepId,
+    int PreviousAttempts,
+    string? PreviousLastError,
+    string? PreviousOutcomesJson,
+    DateTimeOffset QueuedUtc);
+
 public sealed record MigrationSchedulerLimits(
     int MaxDegreeOfParallelism,
     int MaxQueuedBatches,
-    int MaxQueuedBatchesPerStep);
+    int MaxQueuedBatchesPerStep)
+{
+    public int MaxAttempts { get; init; } = 5;
+
+    public int SourceReadMaxAttempts { get; init; } = 3;
+
+    public int SourceReadRetryDelaySeconds { get; init; } = 2;
+
+    public double MaxErrorRatePercent { get; init; }
+}
 
 public sealed record DataverseTargetTuningProfile(
     string StepId,
@@ -160,7 +201,10 @@ public sealed record MigrationRunSummary(
     IReadOnlyList<MigrationDashboardStep> Steps,
     JsonElement? Configuration = null,
     JsonElement? ConnectionInstances = null,
-    DateTimeOffset? SchedulerLeaseExpiresUtc = null);
+    DateTimeOffset? SchedulerLeaseExpiresUtc = null)
+{
+    public MigrationRunFailure? Failure { get; init; }
+}
 
 public sealed record MigrationDashboardStep(
     string Id,
@@ -197,6 +241,12 @@ public sealed record MigrationDashboardStep(
 
     public long BatchesWithUnknownInputRows { get; init; }
 
+    public long UnacceptedErrorBatches { get; init; }
+
+    public bool FailureContinuationOverride { get; init; }
+
+    public bool FailureContinuationAllowed { get; init; }
+
     public JsonElement? SpecialistInfo { get; init; }
 
     public IReadOnlyList<MigrationDashboardRateSample> RowsPerSecondSamples { get; init; } =
@@ -228,7 +278,20 @@ public sealed record MigrationDashboardBatch(
     DateTimeOffset CreatedUtc,
     DateTimeOffset UpdatedUtc,
     long SucceededRows,
-    long FailedRows);
+    long FailedRows)
+{
+    public IReadOnlyList<MigrationDashboardRowError> RowErrors { get; init; } =
+        Array.Empty<MigrationDashboardRowError>();
+}
+
+public sealed record MigrationDashboardRowError(
+    int RecordIndex,
+    string Error,
+    string PayloadJson,
+    bool IsResolved,
+    int RetryCount,
+    string? RetryState,
+    bool CanRetry);
 
 public sealed record MigrationDebugSnapshot(
     string RunId,

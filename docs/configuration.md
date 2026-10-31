@@ -72,6 +72,14 @@ Each node has a unique `Id`, a `Type`, and an `Inputs` array. `Inputs` names the
 
 Every referenced step ID must exist. A node may have multiple consumers. `sort` and `merge` are not supported `Invoke-Migration` step types and are rejected during configuration validation.
 
+## Shared step properties
+
+| Property | Required | Description |
+|---|---:|---|
+| `ErrorRateThresholdPercent` | No | Inclusive maximum cumulative failed-row percentage for this step, from `0` to `100`. It overrides `Invoke-Migration -MaxErrorRatePercent`; both default to `0`, which preserves stop-on-row-error behavior. |
+
+The error rate is calculated from failed rows divided by succeeded plus failed rows across completed batches in that step. A threshold accepts row-level errors only; exhausted source-reader, handler, and infrastructure exceptions remain fatal. Downstream receives only dependency payloads explicitly emitted by the step; a handler that reports partial success must emit only the successful rows it intends downstream to process. Accepted errors remain visible and the run finishes as `CompletedWithErrors`.
+
 ## Source dependencies
 
 `Inputs` declares row flow. Use a keyed source input when a source row refers to one or more parent **source** rows. Use a `join` node to combine a child stream with a source or Dataverse target stream. Use `DependsOn` only when a source or join must wait for another step to finish without receiving its rows.
@@ -142,6 +150,8 @@ Every target has a `Target` hashtable. See the [target connector index](./connec
 Callbacks expose the batch protocol for integrations that need a custom source reader or batch handler. A root callback defines `ReadBatches`; a dependent callback defines one or more `Inputs` and only `ExecuteBatch`.
 
 `ReadBatches` receives a `MigrationStepCheckpoint`, the resolved source connection, and a cursor. It returns at most one `MigrationWorkBatch` per call; no output ends the reader. `MigrationWorkBatch.PayloadJson` carries the batch records as JSON; non-final batches must advance `CursorAfterJson`, and the final batch sets `IsLast`. `ExecuteBatch` receives a leased `StoredBatch` and emits exactly one `MigrationBatchResult`.
+
+To make a callback failure eligible for row-only retry, return `MigrationBatchResult.RowErrors` with one `MigrationRowError` per failed input record. Each `RecordIndex` is zero-based in the input batch's `Records` array; set `HasErrors` to `$true`, include matching failed-row outcomes, and do not emit outputs for failed rows. The dashboard then allows the operator to edit that input row's JSON and retry only it. If the callback cannot identify the exact input row, leave `RowErrors` empty and use the batch-level recovery options instead.
 
 Set optional `SourceConnectionId` and `TargetConnectionId` on a callback step to resolve entries from `-Connections`. `ReadBatches` receives the source connection, while `ExecuteBatch` receives both connections; an unset connection is `$null`.
 

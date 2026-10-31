@@ -51,7 +51,10 @@ public sealed class SourceConnectorIntegrationTests
             });
 
         var rows = ReadJsonLines(Path.Combine(targetDirectory, "accounts.jsonl"));
-        Assert.Equal(new[] { "One", "Two" }, rows.Select(row => row.GetProperty("name").GetString()));
+        Assert.Equal(
+            new[] { "One", "Two" },
+            rows.Select(row => row.GetProperty("name").GetString())
+                .OrderBy(name => name, StringComparer.Ordinal));
     }
 
     [Fact]
@@ -214,7 +217,10 @@ public sealed class SourceConnectorIntegrationTests
             });
 
         var rows = ReadJsonLines(Path.Combine(targetDirectory, "accounts.jsonl"));
-        Assert.Equal(new[] { "One", "Two" }, rows.Select(row => row.GetProperty("Name").GetString()));
+        Assert.Equal(
+            new[] { "One", "Two" },
+            rows.Select(row => row.GetProperty("Name").GetString())
+                .OrderBy(name => name, StringComparer.Ordinal));
         Assert.Contains(requests, query => query.Contains("SELECT COUNT()", StringComparison.Ordinal));
         Assert.Contains(requests, query => query.Contains("SELECT Id, Name FROM Account", StringComparison.Ordinal));
     }

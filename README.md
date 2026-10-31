@@ -46,6 +46,15 @@ pwsh ./examples/dataverse/example.ps1
 > [!NOTE]
 > The examples import the PowerShell module from this checkout. Build the solution in Release configuration before running them.
 
+To exercise error inspection and recovery locally without an external service:
+
+```powershell
+pwsh ./examples/error-recovery/Setup-Example.ps1
+pwsh ./examples/error-recovery/example.ps1
+```
+
+The recovery example pauses after each expected failure so you can inspect it in the dashboard before applying the demonstrated cmdlet action.
+
 The setup script downloads the sample dataset, creates a JSONL sidecar reference and a generated text attachment, and prepares the Dataverse connection and File column. The migration maps the attachment to that account and streams it to Dataverse.
 
 ## Define a migration
@@ -124,6 +133,7 @@ The Dataverse examples use the full [Sample Sales CRM Data](https://www.kaggle.c
 |---|---|---|---|
 | Dataverse | [example.ps1](./examples/dataverse/example.ps1) | [Setup-Example.ps1](./examples/dataverse/Setup-Example.ps1) | Imports a multi-table dataset with keyed joins; resolves a JSONL sidecar into a file-backed value, detects its MIME type, and uploads a streamed replacement to a Dataverse File column. |
 | Dataverse (sequential) | [example-sequential.ps1](./examples/dataverse/example-sequential.ps1) | [Setup-Example.ps1](./examples/dataverse/Setup-Example.ps1) | Uses completion dependencies and alternate keys, then passes the same sidecar-backed value unchanged to a Dataverse File column. |
+| Local files (offline) | [example.ps1](./examples/error-recovery/example.ps1) | [Setup-Example.ps1](./examples/error-recovery/Setup-Example.ps1) | Inspects and recovers from source-reader, Transform, Filter, Target, and callback errors with the dashboard and PowerShell cmdlets. |
 
 Run setup and migration from the repository root:
 

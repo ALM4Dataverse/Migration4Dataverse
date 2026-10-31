@@ -53,6 +53,18 @@ public sealed class InvokeMigrationCommand : PSCmdlet
     public int MaxAttempts { get; set; } = 5;
 
     [Parameter]
+    [ValidateRange(0, 100)]
+    public double MaxErrorRatePercent { get; set; }
+
+    [Parameter]
+    [ValidateRange(1, int.MaxValue)]
+    public int SourceReadMaxAttempts { get; set; } = 3;
+
+    [Parameter]
+    [ValidateRange(0, 3600)]
+    public int SourceReadRetryDelaySeconds { get; set; } = 2;
+
+    [Parameter]
     public SwitchParameter DataverseNoRetryDiagnosticMode { get; set; }
 
     [Parameter]
@@ -112,13 +124,16 @@ public sealed class InvokeMigrationCommand : PSCmdlet
             MaxQueuedBatches = MaxQueuedBatches,
             MaxQueuedBatchesPerStep = MaxQueuedBatchesPerStep,
             MaxAttempts = DataverseNoRetryDiagnosticMode.IsPresent ? 1 : MaxAttempts,
+            MaxErrorRatePercent = MaxErrorRatePercent,
+            SourceReadMaxAttempts = DataverseNoRetryDiagnosticMode.IsPresent ? 1 : SourceReadMaxAttempts,
+            SourceReadRetryDelay = TimeSpan.FromSeconds(SourceReadRetryDelaySeconds),
             CaptureDebugData = EnableDebugCapture.IsPresent || WhatIf.IsPresent,
             DebugCaptureRetentionDays = DebugCaptureRetentionDays
         };
         if (DataverseNoRetryDiagnosticMode.IsPresent)
         {
             WriteWarning(
-                "Dataverse no-retry diagnostic mode is enabled. Dataverse and scheduler retries are disabled, " +
+                "Dataverse no-retry diagnostic mode is enabled. Dataverse, source-reader, and batch retries are disabled, " +
                 "so transient failures can fail the migration.");
         }
         if (WhatIf.IsPresent)
@@ -148,6 +163,15 @@ public sealed class InvokeMigrationCommand : PSCmdlet
                 sharedScripts)
             : StepHash;
         var effectiveStepHash = WhatIf.IsPresent ? $"{stepHash}:whatif-preview-v1" : stepHash;
+        if (MaxErrorRatePercent > 0)
+        {
+            effectiveStepHash =
+                $"{stepHash}:error-rate-v1:{MaxErrorRatePercent.ToString("R", System.Globalization.CultureInfo.InvariantCulture)}";
+            if (WhatIf.IsPresent)
+            {
+                effectiveStepHash += ":whatif-preview-v1";
+            }
+        }
         var databaseDirectory = Path.GetDirectoryName(Path.GetFullPath(DatabasePath));
         if (string.IsNullOrWhiteSpace(databaseDirectory))
         {
@@ -174,7 +198,13 @@ public sealed class InvokeMigrationCommand : PSCmdlet
             new MigrationSchedulerLimits(
                 MaxDegreeOfParallelism,
                 MaxQueuedBatches,
-                MaxQueuedBatchesPerStep),
+                MaxQueuedBatchesPerStep)
+            {
+                MaxAttempts = schedulerOptions.MaxAttempts,
+                MaxErrorRatePercent = schedulerOptions.MaxErrorRatePercent,
+                SourceReadMaxAttempts = schedulerOptions.SourceReadMaxAttempts,
+                SourceReadRetryDelaySeconds = SourceReadRetryDelaySeconds
+            },
             WhatIf.IsPresent,
             modulesToImport,
             requiredModules,

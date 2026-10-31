@@ -487,6 +487,7 @@ internal static partial class PowerShellMigrationStepFactory
                     SourceKeyCoordinator = sourceKeyCoordinator,
                     SourceKeyProperty = sourceKeyParents.Contains(input.Id) ? input.SourceKey : null,
                     StepCompletionCoordinator = stepCompletionCoordinator,
+                    ErrorRateThresholdPercent = input.ErrorRateThresholdPercent,
                     TryAcquireExecutionLease = tryAcquireExecutionLease,
                     ExecuteBatchWithExecutionLeaseAsync = handlerWithLease,
                     CompleteAsync = CreateTargetFinalizer(
@@ -1068,6 +1069,16 @@ internal static partial class PowerShellMigrationStepFactory
         if (batchSize < 1)
         {
             throw new ArgumentOutOfRangeException(nameof(defaultBatchSize), $"BatchSize for step '{id}' must be positive.");
+        }
+        var errorRateThresholdPercent = GetDouble(
+            GetPropertiesAsMap(step),
+            "ErrorRateThresholdPercent",
+            defaultValue: null);
+        if (errorRateThresholdPercent is < 0 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(
+                "ErrorRateThresholdPercent",
+                $"ErrorRateThresholdPercent for step '{id}' must be between 0 and 100.");
         }
 
         var sourceType = string.Empty;
@@ -1824,7 +1835,10 @@ internal static partial class PowerShellMigrationStepFactory
             callbackScriptText,
             readBatchesScriptText,
             callbackSourceConnection,
-            callbackTargetConnection);
+            callbackTargetConnection)
+        {
+            ErrorRateThresholdPercent = errorRateThresholdPercent
+        };
     }
 
     private static GraphInputDefinition[] ParseInputDefinitions(object? value, string stepId)
@@ -2876,7 +2890,10 @@ internal static partial class PowerShellMigrationStepFactory
         string? CallbackScriptText,
         string? ReadBatchesScriptText,
         object? CallbackSourceConnection,
-        object? CallbackTargetConnection);
+        object? CallbackTargetConnection)
+    {
+        public double? ErrorRateThresholdPercent { get; init; }
+    }
 
     private sealed record GraphFileFormatInput(
         string Type,

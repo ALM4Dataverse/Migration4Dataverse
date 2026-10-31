@@ -27,6 +27,7 @@ Start with the [repository README](../README.md) to build the module and run an 
 - [Cmdlets and functions](./cmdlets/README.md) — command index.
 - [Invoke-Migration](./cmdlets/invoke-migration.md) — run, resume, preview, and debug capture.
 - [Migration dashboard](./cmdlets/migration-dashboard.md) — local monitoring and row inspection.
+- [Run inspection and recovery](./cmdlets/migration-inspection-and-recovery.md) — inspect persisted status, errors, and rows or queue recovery from PowerShell.
 - [Batching and backpressure](./concepts/batching.md) — queue limits and concurrency behavior.
 - [PowerShell reference](./reference.md) — supported migration contract, organized by topic.
 

@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
+using Migration4Dataverse.Engine.Scheduling;
 
 namespace Migration4Dataverse.Engine.Storage;
 
@@ -138,6 +139,630 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
         transaction.Commit();
     }
 
+    public void SetRunFailure(string runId, MigrationRunFailure failure)
+    {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ArgumentNullException.ThrowIfNull(failure);
+        ArgumentException.ThrowIfNullOrWhiteSpace(failure.Phase);
+        ArgumentException.ThrowIfNullOrWhiteSpace(failure.Message);
+        ArgumentException.ThrowIfNullOrWhiteSpace(failure.ExceptionType);
+        ArgumentNullException.ThrowIfNull(failure.Details);
+
+        var failureJson = JsonSerializer.Serialize(failure);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE Runs
+            SET FailureJson = $failureJson,
+                UpdatedUtc = $recordedUtc
+            WHERE RunId = $runId;
+            """;
+        AddParameter(command, "$failureJson", failureJson);
+        AddParameter(command, "$recordedUtc", FormatUtc(failure.RecordedUtc));
+        AddParameter(command, "$runId", runId);
+        if (command.ExecuteNonQuery() != 1)
+        {
+            throw new KeyNotFoundException($"Run '{runId}' was not found.");
+        }
+    }
+
+    public int QueueFailedBatchesForRetry(string runId, DateTimeOffset? nowUtc = null)
+    {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        var now = nowUtc ?? DateTimeOffset.UtcNow;
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction(deferred: false);
+
+        string status;
+        string? leaseOwner;
+        DateTimeOffset? leaseExpiresUtc;
+        using (var run = connection.CreateCommand())
+        {
+            run.Transaction = transaction;
+            run.CommandText = """
+                SELECT Status, SchedulerLeaseOwner, SchedulerLeaseExpiresUtc
+                FROM Runs
+                WHERE RunId = $runId;
+                """;
+            AddParameter(run, "$runId", runId);
+            using var reader = run.ExecuteReader();
+            if (!reader.Read())
+            {
+                throw new KeyNotFoundException($"Run '{runId}' was not found.");
+            }
+
+            status = reader.GetString(0);
+            leaseOwner = reader.IsDBNull(1) ? null : reader.GetString(1);
+            leaseExpiresUtc = reader.IsDBNull(2) ? null : ParseUtc(reader.GetString(2));
+        }
+
+        if (status is not ("Failed" or "Cancelled"))
+        {
+            throw new InvalidOperationException(
+                $"Failed batches can only be queued for retry when run '{runId}' is Failed or Cancelled.");
+        }
+        if (leaseOwner is not null && leaseExpiresUtc > now)
+        {
+            throw new InvalidOperationException(
+                $"Run '{runId}' still has an active scheduler lease and cannot be changed.");
+        }
+
+        var nowText = FormatUtc(now);
+        using (var history = connection.CreateCommand())
+        {
+            history.Transaction = transaction;
+            history.CommandText = """
+                INSERT INTO BatchRetryHistory (
+                    RunId, BatchId, StepId, PreviousAttempts, PreviousLastError,
+                    PreviousOutcomesJson, QueuedUtc)
+                SELECT RunId, BatchId, StepId, Attempts, LastError, OutcomesJson, $now
+                FROM Batches
+                WHERE RunId = $runId AND State = 'CompletedWithErrors';
+                """;
+            AddParameter(history, "$runId", runId);
+            AddParameter(history, "$now", nowText);
+            history.ExecuteNonQuery();
+        }
+
+        using (var rowErrors = connection.CreateCommand())
+        {
+            rowErrors.Transaction = transaction;
+            rowErrors.CommandText = """
+                DELETE FROM BatchRowErrors
+                WHERE RunId = $runId
+                  AND BatchId IN (
+                      SELECT BatchId
+                      FROM Batches
+                      WHERE RunId = $runId AND State = 'CompletedWithErrors'
+                  );
+                """;
+            AddParameter(rowErrors, "$runId", runId);
+            rowErrors.ExecuteNonQuery();
+        }
+
+        using (var dependencyEvents = connection.CreateCommand())
+        {
+            dependencyEvents.Transaction = transaction;
+            dependencyEvents.CommandText = """
+                DELETE FROM DependencyEvents
+                WHERE RunId = $runId
+                  AND State = 'Pending'
+                  AND ParentBatchId IN (
+                      SELECT BatchId
+                      FROM Batches
+                      WHERE RunId = $runId AND State = 'CompletedWithErrors'
+                  );
+                """;
+            AddParameter(dependencyEvents, "$runId", runId);
+            dependencyEvents.ExecuteNonQuery();
+        }
+
+        using var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText = """
+            UPDATE Batches
+            SET State = 'Pending',
+                Attempts = 0,
+                OutcomesJson = NULL,
+                SucceededRows = 0,
+                FailedRows = 0,
+                FailureAccepted = 0,
+                LastError = NULL,
+                UpdatedUtc = $now
+            WHERE RunId = $runId AND State = 'CompletedWithErrors';
+            """;
+        AddParameter(update, "$runId", runId);
+        AddParameter(update, "$now", nowText);
+        var queued = update.ExecuteNonQuery();
+        if (queued == 0)
+        {
+            transaction.Rollback();
+            return 0;
+        }
+
+        TouchRun(connection, transaction, runId, nowText);
+        transaction.Commit();
+        return queued;
+    }
+
+    public string QueueFailedRowForRetry(
+        string runId,
+        string stepId,
+        string batchId,
+        int recordIndex,
+        string payloadJson,
+        DateTimeOffset? nowUtc = null)
+    {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
+        ArgumentOutOfRangeException.ThrowIfNegative(recordIndex);
+        ArgumentNullException.ThrowIfNull(payloadJson);
+        ValidateJson(payloadJson, nameof(payloadJson));
+        using var editedPayload = JsonDocument.Parse(payloadJson);
+        if (editedPayload.RootElement.ValueKind != JsonValueKind.Object)
+        {
+            throw new ArgumentException("The edited row payload must be a JSON object.", nameof(payloadJson));
+        }
+
+        var now = nowUtc ?? DateTimeOffset.UtcNow;
+        var nowText = FormatUtc(now);
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction(deferred: false);
+
+        string status;
+        string? leaseOwner;
+        DateTimeOffset? leaseExpiresUtc;
+        string pipelineJson;
+        using (var run = connection.CreateCommand())
+        {
+            run.Transaction = transaction;
+            run.CommandText = """
+                SELECT Status, SchedulerLeaseOwner, SchedulerLeaseExpiresUtc, PipelineJson
+                FROM Runs
+                WHERE RunId = $runId;
+                """;
+            AddParameter(run, "$runId", runId);
+            using var reader = run.ExecuteReader();
+            if (!reader.Read())
+            {
+                throw new KeyNotFoundException($"Run '{runId}' was not found.");
+            }
+
+            status = reader.GetString(0);
+            leaseOwner = reader.IsDBNull(1) ? null : reader.GetString(1);
+            leaseExpiresUtc = reader.IsDBNull(2) ? null : ParseUtc(reader.GetString(2));
+            pipelineJson = reader.GetString(3);
+        }
+
+        if (status is not ("Failed" or "Cancelled"))
+        {
+            throw new InvalidOperationException(
+                $"Failed rows can only be queued for retry when run '{runId}' is Failed or Cancelled.");
+        }
+        if (leaseOwner is not null && leaseExpiresUtc > now)
+        {
+            throw new InvalidOperationException(
+                $"Run '{runId}' still has an active scheduler lease and cannot be changed.");
+        }
+
+        var step = ReadPipeline(pipelineJson).SingleOrDefault(candidate =>
+            string.Equals(candidate.Id, stepId, StringComparison.Ordinal));
+        if (step is null)
+        {
+            throw new KeyNotFoundException($"Step '{stepId}' was not found in run '{runId}'.");
+        }
+        if (step.Type is not ("transform" or "filter" or "callback"))
+        {
+            throw new InvalidOperationException(
+                $"Step '{stepId}' does not support row-only retry. This action is available only when " +
+                "the step can report an exact input row; use batch replay for unattributed failures.");
+        }
+
+        string originalPayloadJson;
+        string batchState;
+        using (var originalBatch = connection.CreateCommand())
+        {
+            originalBatch.Transaction = transaction;
+            originalBatch.CommandText = """
+                SELECT PayloadJson, State
+                FROM Batches
+                WHERE RunId = $runId AND BatchId = $batchId AND StepId = $stepId;
+                """;
+            AddParameter(originalBatch, "$runId", runId);
+            AddParameter(originalBatch, "$batchId", batchId);
+            AddParameter(originalBatch, "$stepId", stepId);
+            using var reader = originalBatch.ExecuteReader();
+            if (!reader.Read())
+            {
+                throw new KeyNotFoundException(
+                    $"Failed batch '{batchId}' was not found for step '{stepId}' in run '{runId}'.");
+            }
+
+            originalPayloadJson = reader.IsDBNull(0)
+                ? throw new InvalidOperationException($"Failed batch '{batchId}' has no retained payload.")
+                : reader.GetString(0);
+            batchState = reader.GetString(1);
+        }
+
+        if (batchState != MigrationBatchState.CompletedWithErrors.ToString())
+        {
+            throw new InvalidOperationException($"Batch '{batchId}' is not currently failed.");
+        }
+
+        string? previousRetryBatchId;
+        using (var error = connection.CreateCommand())
+        {
+            error.Transaction = transaction;
+            error.CommandText = """
+                SELECT RetryBatchId
+                FROM BatchRowErrors
+                WHERE RunId = $runId AND BatchId = $batchId
+                  AND RecordIndex = $recordIndex AND ResolvedUtc IS NULL;
+                """;
+            AddParameter(error, "$runId", runId);
+            AddParameter(error, "$batchId", batchId);
+            AddParameter(error, "$recordIndex", recordIndex);
+            using var reader = error.ExecuteReader();
+            if (!reader.Read())
+            {
+                throw new KeyNotFoundException(
+                    $"Unresolved row error {recordIndex} was not found in batch '{batchId}'.");
+            }
+
+            previousRetryBatchId = reader.IsDBNull(0) ? null : reader.GetString(0);
+        }
+
+        if (previousRetryBatchId is not null)
+        {
+            string retryState;
+            using (var retry = connection.CreateCommand())
+            {
+                retry.Transaction = transaction;
+                retry.CommandText = "SELECT State FROM Batches WHERE BatchId = $batchBatchId;";
+                AddParameter(retry, "$batchBatchId", previousRetryBatchId);
+                retryState = retry.ExecuteScalar()?.ToString()
+                    ?? throw new InvalidDataException(
+                        $"Row retry batch '{previousRetryBatchId}' is missing.");
+            }
+            if (retryState is "Pending" or "InFlight")
+            {
+                throw new InvalidOperationException(
+                    $"Row error {recordIndex} in batch '{batchId}' already has a retry in progress.");
+            }
+
+            using var childError = connection.CreateCommand();
+            childError.Transaction = transaction;
+            childError.CommandText = """
+                SELECT 1
+                FROM BatchRowErrors
+                WHERE RunId = $runId AND BatchId = $retryBatchId
+                  AND ResolvedUtc IS NULL
+                LIMIT 1;
+                """;
+            AddParameter(childError, "$runId", runId);
+            AddParameter(childError, "$retryBatchId", previousRetryBatchId);
+            if (childError.ExecuteScalar() is not null)
+            {
+                throw new InvalidOperationException(
+                    $"Retry batch '{previousRetryBatchId}' has an attributable row error. " +
+                    "Retry that row instead of retrying its parent.");
+            }
+        }
+
+        string lineageReferencesJson = "[]";
+        using (var originalPayload = JsonDocument.Parse(originalPayloadJson))
+        {
+            var root = originalPayload.RootElement;
+            if (root.ValueKind != JsonValueKind.Object ||
+                !root.TryGetProperty("Records", out var records) ||
+                records.ValueKind != JsonValueKind.Array ||
+                recordIndex >= records.GetArrayLength() ||
+                records[recordIndex].ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException(
+                    $"Failed batch '{batchId}' does not contain input row {recordIndex}.");
+            }
+
+            if (root.TryGetProperty("__LineageReferences", out var references))
+            {
+                if (references.ValueKind != JsonValueKind.Array ||
+                    references.GetArrayLength() != records.GetArrayLength())
+                {
+                    throw new InvalidDataException(
+                        $"Failed batch '{batchId}' has invalid row-lineage metadata.");
+                }
+                lineageReferencesJson = references[recordIndex].GetRawText();
+            }
+        }
+
+        var retryPayloadJson = $$"""{"Records":[{{payloadJson}}],"__LineageReferences":[{{lineageReferencesJson}}]}""";
+        ValidateJson(retryPayloadJson, nameof(payloadJson));
+        var sequence = GetNextSequence(connection, transaction, runId, stepId);
+        var retryBatchId = MigrationBatchIdentity.Create(runId, stepId, sequence);
+        using (var checkpoint = connection.CreateCommand())
+        {
+            checkpoint.Transaction = transaction;
+            checkpoint.CommandText = """
+                INSERT INTO StepCheckpoints (RunId, StepId, LastCompletedSequence, CursorJson, UpdatedUtc)
+                VALUES ($runId, $stepId, -1, NULL, $now)
+                ON CONFLICT (RunId, StepId) DO NOTHING;
+                """;
+            AddParameter(checkpoint, "$runId", runId);
+            AddParameter(checkpoint, "$stepId", stepId);
+            AddParameter(checkpoint, "$now", nowText);
+            checkpoint.ExecuteNonQuery();
+        }
+
+        using (var insert = connection.CreateCommand())
+        {
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO Batches (
+                    BatchId, RunId, StepId, Sequence, CursorAfterJson, PayloadHash, PayloadJson,
+                    State, Attempts, CreatedUtc, UpdatedUtc, InputRows, FilteredRows)
+                VALUES (
+                    $batchId, $runId, $stepId, $sequence, NULL, $payloadHash, $payloadJson,
+                    'Pending', 0, $now, $now, 1, 0);
+                """;
+            AddParameter(insert, "$batchId", retryBatchId);
+            AddParameter(insert, "$runId", runId);
+            AddParameter(insert, "$stepId", stepId);
+            AddParameter(insert, "$sequence", sequence);
+            AddParameter(insert, "$payloadHash", Hash(retryPayloadJson));
+            AddParameter(insert, "$payloadJson", retryPayloadJson);
+            AddParameter(insert, "$now", nowText);
+            insert.ExecuteNonQuery();
+        }
+
+        using (var parents = connection.CreateCommand())
+        {
+            parents.Transaction = transaction;
+            parents.CommandText = """
+                INSERT INTO BatchParentReferences (RunId, BatchId, ParentBatchId)
+                SELECT RunId, $retryBatchId, ParentBatchId
+                FROM BatchParentReferences
+                WHERE RunId = $runId AND BatchId = $parentBatchId;
+                """;
+            AddParameter(parents, "$runId", runId);
+            AddParameter(parents, "$retryBatchId", retryBatchId);
+            AddParameter(parents, "$parentBatchId", batchId);
+            parents.ExecuteNonQuery();
+        }
+
+        using (var link = connection.CreateCommand())
+        {
+            link.Transaction = transaction;
+            link.CommandText = """
+                INSERT INTO BatchRowRetryLinks (
+                    RunId, RetryBatchId, ParentBatchId, ParentRecordIndex)
+                VALUES ($runId, $retryBatchId, $parentBatchId, $recordIndex);
+                """;
+            AddParameter(link, "$runId", runId);
+            AddParameter(link, "$retryBatchId", retryBatchId);
+            AddParameter(link, "$parentBatchId", batchId);
+            AddParameter(link, "$recordIndex", recordIndex);
+            link.ExecuteNonQuery();
+        }
+
+        using (var updateError = connection.CreateCommand())
+        {
+            updateError.Transaction = transaction;
+            updateError.CommandText = """
+                UPDATE BatchRowErrors
+                SET RetryBatchId = $retryBatchId,
+                    RetryCount = RetryCount + 1
+                WHERE RunId = $runId AND BatchId = $batchId
+                  AND RecordIndex = $recordIndex AND ResolvedUtc IS NULL;
+                """;
+            AddParameter(updateError, "$retryBatchId", retryBatchId);
+            AddParameter(updateError, "$runId", runId);
+            AddParameter(updateError, "$batchId", batchId);
+            AddParameter(updateError, "$recordIndex", recordIndex);
+            if (updateError.ExecuteNonQuery() != 1)
+            {
+                throw new InvalidOperationException(
+                    $"Row error {recordIndex} in batch '{batchId}' changed while retry was being queued.");
+            }
+        }
+
+        TouchRun(connection, transaction, runId, nowText);
+        transaction.Commit();
+        return retryBatchId;
+    }
+
+    public bool AllowStepFailureContinuation(
+        string runId,
+        string stepId,
+        DateTimeOffset? nowUtc = null)
+    {
+        using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
+        var now = nowUtc ?? DateTimeOffset.UtcNow;
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction(deferred: false);
+
+        string status;
+        string? leaseOwner;
+        DateTimeOffset? leaseExpiresUtc;
+        string? failureJson;
+        using (var run = connection.CreateCommand())
+        {
+            run.Transaction = transaction;
+            run.CommandText = """
+                SELECT Status, SchedulerLeaseOwner, SchedulerLeaseExpiresUtc, FailureJson
+                FROM Runs
+                WHERE RunId = $runId;
+                """;
+            AddParameter(run, "$runId", runId);
+            using var reader = run.ExecuteReader();
+            if (!reader.Read())
+            {
+                throw new KeyNotFoundException($"Run '{runId}' was not found.");
+            }
+
+            status = reader.GetString(0);
+            leaseOwner = reader.IsDBNull(1) ? null : reader.GetString(1);
+            leaseExpiresUtc = reader.IsDBNull(2) ? null : ParseUtc(reader.GetString(2));
+            failureJson = reader.IsDBNull(3) ? null : reader.GetString(3);
+        }
+
+        if (status is not ("Failed" or "Cancelled"))
+        {
+            throw new InvalidOperationException(
+                $"Step failure continuation can only be configured for a Failed or Cancelled run; run '{runId}' is '{status}'.");
+        }
+        if (leaseOwner is not null && leaseExpiresUtc > now)
+        {
+            throw new InvalidOperationException(
+                $"Run '{runId}' still has an active scheduler lease and cannot be changed.");
+        }
+
+        var hasFailedBatch = false;
+        using (var batches = connection.CreateCommand())
+        {
+            batches.Transaction = transaction;
+            batches.CommandText = """
+                SELECT 1
+                FROM Batches
+                WHERE RunId = $runId AND StepId = $stepId AND State = 'CompletedWithErrors'
+                LIMIT 1;
+                """;
+            AddParameter(batches, "$runId", runId);
+            AddParameter(batches, "$stepId", stepId);
+            hasFailedBatch = batches.ExecuteScalar() is not null;
+        }
+
+        var failure = failureJson is null
+            ? null
+            : JsonSerializer.Deserialize<MigrationRunFailure>(failureJson);
+        var isFailedReader = failure is not null &&
+                             string.Equals(failure.StepId, stepId, StringComparison.Ordinal) &&
+                             string.Equals(failure.Phase, "Source reader", StringComparison.Ordinal);
+        if (!hasFailedBatch && !isFailedReader)
+        {
+            throw new InvalidOperationException(
+                $"Step '{stepId}' has no recorded batch or source-reader failure to continue past.");
+        }
+
+        using var insert = connection.CreateCommand();
+        insert.Transaction = transaction;
+        insert.CommandText = """
+            INSERT INTO StepFailureContinuations (RunId, StepId, CreatedUtc)
+            VALUES ($runId, $stepId, $createdUtc)
+            ON CONFLICT (RunId, StepId) DO NOTHING;
+            """;
+        AddParameter(insert, "$runId", runId);
+        AddParameter(insert, "$stepId", stepId);
+        AddParameter(insert, "$createdUtc", FormatUtc(now));
+        var added = insert.ExecuteNonQuery() == 1;
+        if (added)
+        {
+            TouchRun(connection, transaction, runId, FormatUtc(now));
+        }
+        transaction.Commit();
+        return added;
+    }
+
+    public bool IsStepFailureContinuationAllowed(string runId, string stepId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT 1
+            FROM StepFailureContinuations
+            WHERE RunId = $runId AND StepId = $stepId;
+            """;
+        AddParameter(command, "$runId", runId);
+        AddParameter(command, "$stepId", stepId);
+        return command.ExecuteScalar() is not null;
+    }
+
+    public IReadOnlyList<string> GetUnacceptedFailedStepIds(string runId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            WITH RECURSIVE retry_descendants (
+                RunId, OriginBatchId, OriginRecordIndex, RetryBatchId
+            ) AS (
+                SELECT RunId, ParentBatchId, ParentRecordIndex, RetryBatchId
+                FROM BatchRowRetryLinks
+                UNION ALL
+                SELECT descendants.RunId,
+                       descendants.OriginBatchId,
+                       descendants.OriginRecordIndex,
+                       links.RetryBatchId
+                FROM retry_descendants AS descendants
+                JOIN BatchRowRetryLinks AS links
+                  ON links.RunId = descendants.RunId
+                 AND links.ParentBatchId = descendants.RetryBatchId
+            )
+            SELECT DISTINCT batches.StepId
+            FROM Batches AS batches
+            WHERE batches.RunId = $runId
+              AND batches.State = 'CompletedWithErrors'
+              AND batches.FailureAccepted = 0
+              AND NOT (
+                  batches.FailedRows = (
+                      SELECT COUNT(*)
+                      FROM BatchRowErrors AS rowErrors
+                      WHERE rowErrors.RunId = batches.RunId
+                        AND rowErrors.BatchId = batches.BatchId
+                        AND rowErrors.ResolvedUtc IS NULL
+                  )
+                  AND EXISTS (
+                      SELECT 1
+                      FROM BatchRowErrors AS rowErrors
+                      WHERE rowErrors.RunId = batches.RunId
+                        AND rowErrors.BatchId = batches.BatchId
+                        AND rowErrors.ResolvedUtc IS NULL
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM BatchRowErrors AS rowErrors
+                      WHERE rowErrors.RunId = batches.RunId
+                        AND rowErrors.BatchId = batches.BatchId
+                        AND rowErrors.ResolvedUtc IS NULL
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM retry_descendants AS descendants
+                            JOIN Batches AS retries
+                              ON retries.RunId = descendants.RunId
+                             AND retries.BatchId = descendants.RetryBatchId
+                            WHERE descendants.RunId = rowErrors.RunId
+                              AND descendants.OriginBatchId = rowErrors.BatchId
+                              AND descendants.OriginRecordIndex = rowErrors.RecordIndex
+                              AND retries.State IN ('Pending', 'InFlight')
+                        )
+                  )
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM StepFailureContinuations AS continuations
+                  WHERE continuations.RunId = batches.RunId
+                    AND continuations.StepId = batches.StepId
+              )
+            ORDER BY batches.StepId;
+            """;
+        AddParameter(command, "$runId", runId);
+        using var reader = command.ExecuteReader();
+        var stepIds = new List<string>();
+        while (reader.Read())
+        {
+            stepIds.Add(reader.GetString(0));
+        }
+
+        return stepIds;
+    }
+
     public void UpdateConnectionInstanceSnapshots(string runId, string snapshotsJson)
     {
         using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
@@ -172,7 +797,15 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
             UPDATE Runs
             SET Status = $status,
                 UpdatedUtc = $now,
-                FinishedUtc = CASE WHEN $status = 'Running' THEN NULL ELSE $now END
+                FinishedUtc = CASE WHEN $status = 'Running' THEN NULL ELSE $now END,
+                FailureJson = CASE
+                    WHEN $status = 'Running' AND NOT EXISTS (
+                        SELECT 1
+                        FROM StepFailureContinuations
+                        WHERE RunId = Runs.RunId
+                    ) THEN NULL
+                    ELSE FailureJson
+                END
             WHERE RunId = $runId;
             """;
         AddParameter(command, "$status", status.ToString());
@@ -1230,6 +1863,30 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
             reader.GetInt64(5));
     }
 
+    public MigrationStepRowCounts GetStepRowCounts(string runId, string stepId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT COALESCE(SUM(SucceededRows), 0), COALESCE(SUM(FailedRows), 0)
+            FROM Batches
+            WHERE RunId = $runId
+              AND StepId = $stepId
+              AND State IN ('Succeeded', 'CompletedWithErrors');
+            """;
+        AddParameter(command, "$runId", runId);
+        AddParameter(command, "$stepId", stepId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            throw new InvalidOperationException($"Row counts for step '{runId}/{stepId}' could not be read.");
+        }
+
+        return new MigrationStepRowCounts(reader.GetInt64(0), reader.GetInt64(1));
+    }
+
     public IReadOnlyDictionary<string, long> GetNonTerminalBatchCountsByStep(string runId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
@@ -1269,6 +1926,11 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
                        WHERE dependency.RunId = batch.RunId
                          AND dependency.EventId = batch.BatchId
                          AND dependency.State = 'Completed'
+                   ) OR EXISTS (
+                       SELECT 1
+                       FROM BatchRowRetryLinks AS retryLink
+                       WHERE retryLink.RunId = batch.RunId
+                         AND retryLink.RetryBatchId = batch.BatchId
                    ) THEN 0 ELSE 1 END) AS Priority,
                    COUNT(*) AS PendingBatchCount
             FROM Batches AS batch
@@ -1589,12 +2251,18 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
                         WHERE dependency.RunId = Batches.RunId
                           AND dependency.EventId = Batches.BatchId
                           AND dependency.State = 'Completed'
+                    ) OR EXISTS (
+                        SELECT 1
+                        FROM BatchRowRetryLinks AS retryLink
+                        WHERE retryLink.RunId = Batches.RunId
+                          AND retryLink.RetryBatchId = Batches.BatchId
                     ) THEN 0 ELSE 1 END,
                     CreatedUtc, StepId, Sequence
                 LIMIT 1
             )
             RETURNING BatchId, RunId, StepId, Sequence, CursorAfterJson, PayloadJson, State,
-                      Attempts, LeaseOwner, LeaseExpiresUtc, OutcomesJson, LastError, CreatedUtc, UpdatedUtc;
+                      Attempts, LeaseOwner, LeaseExpiresUtc, OutcomesJson, LastError, CreatedUtc, UpdatedUtc,
+                      FailureAccepted;
             """;
         AddParameter(command, "$workerId", workerId);
         AddParameter(command, "$leaseExpiresUtc", FormatUtc(now.Add(leaseDuration)));
@@ -1727,7 +2395,8 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
         IReadOnlyCollection<DependencyEvent>? dependencyEvents = null,
         string? lastError = null,
         DateTimeOffset? nowUtc = null,
-        long filteredRows = 0)
+        long filteredRows = 0,
+        IReadOnlyList<MigrationRowError>? rowErrors = null)
     {
         return TryCompleteBatch(
                    batchId,
@@ -1737,7 +2406,8 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
                    dependencyEvents,
                    lastError,
                    nowUtc,
-                   filteredRows)
+                   filteredRows,
+                   rowErrors)
                ?? throw new InvalidOperationException($"Worker '{workerId}' does not hold batch lease '{batchId}'.");
     }
 
@@ -1749,7 +2419,67 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
         IReadOnlyCollection<DependencyEvent>? dependencyEvents = null,
         string? lastError = null,
         DateTimeOffset? nowUtc = null,
-        long filteredRows = 0)
+        long filteredRows = 0,
+        IReadOnlyList<MigrationRowError>? rowErrors = null)
+    {
+        return TryCompleteBatchCore(
+            batchId,
+            workerId,
+            outcomesJson,
+            hasErrors,
+            dependencyEvents,
+            lastError,
+            nowUtc,
+            filteredRows,
+            rowErrors,
+            allowErrorDependencyEvents: false,
+            maxErrorRatePercent: null)?.Checkpoint;
+    }
+
+    public MigrationBatchCompletion? TryCompleteBatchWithErrorPolicy(
+        string batchId,
+        string workerId,
+        string outcomesJson,
+        IReadOnlyCollection<DependencyEvent>? dependencyEvents,
+        string? lastError,
+        double maxErrorRatePercent,
+        DateTimeOffset? nowUtc = null,
+        long filteredRows = 0,
+        IReadOnlyList<MigrationRowError>? rowErrors = null)
+    {
+        if (!double.IsFinite(maxErrorRatePercent) || maxErrorRatePercent is < 0 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxErrorRatePercent),
+                "The error-rate threshold must be between 0 and 100 percent.");
+        }
+
+        return TryCompleteBatchCore(
+            batchId,
+            workerId,
+            outcomesJson,
+            hasErrors: true,
+            dependencyEvents,
+            lastError,
+            nowUtc,
+            filteredRows,
+            rowErrors,
+            allowErrorDependencyEvents: true,
+            maxErrorRatePercent);
+    }
+
+    private MigrationBatchCompletion? TryCompleteBatchCore(
+        string batchId,
+        string workerId,
+        string outcomesJson,
+        bool hasErrors,
+        IReadOnlyCollection<DependencyEvent>? dependencyEvents,
+        string? lastError,
+        DateTimeOffset? nowUtc,
+        long filteredRows,
+        IReadOnlyList<MigrationRowError>? rowErrors,
+        bool allowErrorDependencyEvents,
+        double? maxErrorRatePercent)
     {
         using var writeLock = SqliteDatabaseWriteGate.Enter(DatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
@@ -1757,9 +2487,14 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
         ArgumentNullException.ThrowIfNull(outcomesJson);
         ValidateJson(outcomesJson, nameof(outcomesJson));
         ArgumentOutOfRangeException.ThrowIfNegative(filteredRows);
+        rowErrors ??= Array.Empty<MigrationRowError>();
+        if (rowErrors.Count > 0 && !hasErrors)
+        {
+            throw new ArgumentException("A batch with row errors must be marked as failed.", nameof(rowErrors));
+        }
 
         var events = dependencyEvents ?? Array.Empty<DependencyEvent>();
-        if (hasErrors && events.Count > 0)
+        if (hasErrors && events.Count > 0 && !allowErrorDependencyEvents)
         {
             throw new ArgumentException(
                 "A batch with row errors cannot release dependent work.",
@@ -1782,6 +2517,44 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
             ? MigrationBatchState.CompletedWithErrors
             : MigrationBatchState.Succeeded;
         var rowCounts = ReadRowCounts(outcomesJson);
+        var rowErrorRecords = GetRowErrorRecords(batch, rowErrors);
+        if (rowErrorRecords.Count > rowCounts.Failed)
+        {
+            throw new ArgumentException(
+                "The number of row-error details cannot exceed the failed-row outcome count.",
+                nameof(rowErrors));
+        }
+        var errorRateWithinThreshold = !hasErrors;
+        double? errorRatePercent = null;
+        if (hasErrors && maxErrorRatePercent.HasValue)
+        {
+            using var totals = connection.CreateCommand();
+            totals.Transaction = transaction;
+            totals.CommandText = """
+                SELECT COALESCE(SUM(SucceededRows), 0), COALESCE(SUM(FailedRows), 0)
+                FROM Batches
+                WHERE RunId = $runId
+                  AND StepId = $stepId
+                  AND State IN ('Succeeded', 'CompletedWithErrors');
+                """;
+            AddParameter(totals, "$runId", batch.RunId);
+            AddParameter(totals, "$stepId", batch.StepId);
+            using var totalsReader = totals.ExecuteReader();
+            if (!totalsReader.Read())
+            {
+                throw new InvalidOperationException(
+                    $"The current row totals for step '{batch.StepId}' could not be read.");
+            }
+
+            var totalSucceededRows = checked(totalsReader.GetInt64(0) + rowCounts.Succeeded);
+            var totalFailedRows = checked(totalsReader.GetInt64(1) + rowCounts.Failed);
+            var processedRows = checked(totalSucceededRows + totalFailedRows);
+            if (rowCounts.Failed > 0 && processedRows > 0)
+            {
+                errorRatePercent = totalFailedRows * 100d / processedRows;
+                errorRateWithinThreshold = errorRatePercent <= maxErrorRatePercent.Value;
+            }
+        }
 
         using (var update = connection.CreateCommand())
         {
@@ -1793,6 +2566,7 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
                     OutcomesJson = $outcomesJson,
                     SucceededRows = $succeededRows,
                     FailedRows = $failedRows,
+                    FailureAccepted = $failureAccepted,
                     FilteredRows = FilteredRows + $filteredRows,
                     LeaseOwner = NULL,
                     LeaseExpiresUtc = NULL,
@@ -1806,6 +2580,7 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
             AddParameter(update, "$outcomesJson", outcomesJson);
             AddParameter(update, "$succeededRows", rowCounts.Succeeded);
             AddParameter(update, "$failedRows", rowCounts.Failed);
+            AddParameter(update, "$failureAccepted", hasErrors && errorRateWithinThreshold ? 1 : 0);
             AddParameter(update, "$filteredRows", filteredRows);
             AddParameter(update, "$lastError", lastError);
             AddParameter(update, "$now", now);
@@ -1815,6 +2590,14 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
             {
                 return null;
             }
+        }
+        if (rowErrorRecords.Count > 0)
+        {
+            InsertRowErrors(connection, transaction, batch, rowErrorRecords);
+        }
+        if (!hasErrors)
+        {
+            ResolveRetriedRowErrors(connection, transaction, batch.BatchId, now);
         }
         ExitStepActivity(connection, transaction, batch.RunId, batch.StepId, ParseUtc(now));
         TouchRun(connection, transaction, batch.RunId, now);
@@ -1826,7 +2609,148 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
 
         var checkpoint = AdvanceCheckpoint(connection, transaction, batch.RunId, batch.StepId, now);
         transaction.Commit();
-        return checkpoint;
+        return new MigrationBatchCompletion(checkpoint, errorRateWithinThreshold, errorRatePercent);
+    }
+
+    private static IReadOnlyList<(MigrationRowError Error, string PayloadJson)> GetRowErrorRecords(
+        StoredBatch batch,
+        IReadOnlyList<MigrationRowError> rowErrors)
+    {
+        if (rowErrors.Count == 0)
+        {
+            return Array.Empty<(MigrationRowError, string)>();
+        }
+
+        using var payload = JsonDocument.Parse(batch.PayloadJson
+            ?? throw new InvalidOperationException($"Batch '{batch.BatchId}' has no retained payload."));
+        var root = payload.RootElement;
+        if (root.ValueKind != JsonValueKind.Object ||
+            !root.TryGetProperty("Records", out var records) ||
+            records.ValueKind != JsonValueKind.Array)
+        {
+            throw new ArgumentException(
+                $"Batch '{batch.BatchId}' must contain a Records array to persist row errors.",
+                nameof(rowErrors));
+        }
+
+        var seenRecordIndices = new HashSet<int>();
+        var rowErrorRecords = new List<(MigrationRowError Error, string PayloadJson)>(rowErrors.Count);
+        foreach (var rowError in rowErrors)
+        {
+            if (rowError is null || rowError.RecordIndex < 0 ||
+                rowError.RecordIndex >= records.GetArrayLength() ||
+                string.IsNullOrWhiteSpace(rowError.Error) ||
+                !seenRecordIndices.Add(rowError.RecordIndex))
+            {
+                throw new ArgumentException(
+                    $"Batch '{batch.BatchId}' contains invalid or duplicate row-error metadata.",
+                    nameof(rowErrors));
+            }
+
+            var record = records[rowError.RecordIndex];
+            if (record.ValueKind != JsonValueKind.Object)
+            {
+                throw new ArgumentException(
+                    $"Row error {rowError.RecordIndex} in batch '{batch.BatchId}' does not identify a JSON object row.",
+                    nameof(rowErrors));
+            }
+            rowErrorRecords.Add((rowError, record.GetRawText()));
+        }
+
+        return rowErrorRecords;
+    }
+
+    private static void InsertRowErrors(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        StoredBatch batch,
+        IReadOnlyList<(MigrationRowError Error, string PayloadJson)> rowErrors)
+    {
+        foreach (var rowError in rowErrors)
+        {
+            using var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO BatchRowErrors (
+                    RunId, BatchId, RecordIndex, Error, PayloadJson, RetryCount)
+                VALUES ($runId, $batchId, $recordIndex, $error, $payloadJson, 0);
+                """;
+            AddParameter(insert, "$runId", batch.RunId);
+            AddParameter(insert, "$batchId", batch.BatchId);
+            AddParameter(insert, "$recordIndex", rowError.Error.RecordIndex);
+            AddParameter(insert, "$error", rowError.Error.Error);
+            AddParameter(insert, "$payloadJson", rowError.PayloadJson);
+            insert.ExecuteNonQuery();
+        }
+    }
+
+    private static void ResolveRetriedRowErrors(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string retryBatchId,
+        string now)
+    {
+        var currentRetryBatchId = retryBatchId;
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        while (visited.Add(currentRetryBatchId))
+        {
+            string? parentBatchId;
+            int parentRecordIndex;
+            using (var link = connection.CreateCommand())
+            {
+                link.Transaction = transaction;
+                link.CommandText = """
+                    SELECT ParentBatchId, ParentRecordIndex
+                    FROM BatchRowRetryLinks
+                    WHERE RetryBatchId = $retryBatchId;
+                    """;
+                AddParameter(link, "$retryBatchId", currentRetryBatchId);
+                using var reader = link.ExecuteReader();
+                if (!reader.Read())
+                {
+                    return;
+                }
+
+                parentBatchId = reader.GetString(0);
+                parentRecordIndex = reader.GetInt32(1);
+            }
+
+            using (var resolve = connection.CreateCommand())
+            {
+                resolve.Transaction = transaction;
+                resolve.CommandText = """
+                    UPDATE BatchRowErrors
+                    SET ResolvedUtc = $now
+                    WHERE BatchId = $parentBatchId
+                      AND RecordIndex = $recordIndex
+                      AND ResolvedUtc IS NULL;
+                    """;
+                AddParameter(resolve, "$now", now);
+                AddParameter(resolve, "$parentBatchId", parentBatchId);
+                AddParameter(resolve, "$recordIndex", parentRecordIndex);
+                if (resolve.ExecuteNonQuery() == 1)
+                {
+                    using var updateParent = connection.CreateCommand();
+                    updateParent.Transaction = transaction;
+                    updateParent.CommandText = """
+                        UPDATE Batches
+                        SET FailedRows = MAX(0, FailedRows - 1),
+                            State = CASE WHEN FailedRows <= 1 THEN 'Succeeded' ELSE State END,
+                            PayloadJson = CASE WHEN FailedRows <= 1 THEN NULL ELSE PayloadJson END,
+                            FailureAccepted = CASE WHEN FailedRows <= 1 THEN 1 ELSE FailureAccepted END,
+                            LastError = CASE WHEN FailedRows <= 1 THEN NULL ELSE LastError END,
+                            UpdatedUtc = $now
+                        WHERE BatchId = $parentBatchId
+                          AND State = 'CompletedWithErrors';
+                        """;
+                    AddParameter(updateParent, "$now", now);
+                    AddParameter(updateParent, "$parentBatchId", parentBatchId);
+                    updateParent.ExecuteNonQuery();
+                }
+            }
+
+            currentRetryBatchId = parentBatchId;
+        }
     }
 
     public StoredBatch? GetBatch(string batchId)
@@ -2000,11 +2924,15 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
         var parentBatch = FindBatchById(connection, transaction, parentBatchId)
             ?? throw new InvalidOperationException(
                 $"Dependency event '{eventId}' references missing parent batch '{parentBatchId}'.");
-        if (!string.Equals(parentBatch.RunId, runId, StringComparison.Ordinal) ||
-            parentBatch.State != MigrationBatchState.Succeeded)
+        if (!string.Equals(parentBatch.RunId, runId, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                $"Dependency event '{eventId}' cannot be released because parent batch '{parentBatchId}' did not succeed.");
+                $"Dependency event '{eventId}' references a parent batch from another run.");
+        }
+        if (!IsDependencyEligible(connection, transaction, runId, parentBatch))
+        {
+            transaction.Rollback();
+            return null;
         }
 
         foreach (var prerequisiteBatchId in prerequisiteBatchIds)
@@ -2020,12 +2948,14 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
                 throw new InvalidOperationException(
                     $"Dependency event '{eventId}' references a prerequisite from another run.");
             }
-            if (prerequisiteBatch.State == MigrationBatchState.CompletedWithErrors)
+            if (prerequisiteBatch.State == MigrationBatchState.CompletedWithErrors &&
+                !IsDependencyEligible(connection, transaction, runId, prerequisiteBatch))
             {
-                throw new InvalidOperationException(
-                    $"Dependency event '{eventId}' is blocked by failed prerequisite batch '{prerequisiteBatchId}'.");
+                transaction.Rollback();
+                return null;
             }
-            if (prerequisiteBatch.State != MigrationBatchState.Succeeded)
+            if (prerequisiteBatch.State != MigrationBatchState.Succeeded &&
+                prerequisiteBatch.State != MigrationBatchState.CompletedWithErrors)
             {
                 transaction.Rollback();
                 return null;
@@ -2166,7 +3096,7 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
             throw new InvalidOperationException(
                 $"Database '{DatabasePath}' contains tables but no applied migration records. Create a fresh database.");
         }
-        if (appliedMigrations.Keys.Any(version => version > 14))
+        if (appliedMigrations.Keys.Any(version => version > 17))
         {
             throw new InvalidOperationException(
                 $"Database '{DatabasePath}' has a schema migration newer than this engine supports.");
@@ -2256,6 +3186,24 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
             throw new InvalidOperationException(
                 $"Database '{DatabasePath}' has an unknown schema migration at version 14.");
         }
+        if (appliedMigrations.TryGetValue(15, out var runFailureRecoveryName) &&
+            !string.Equals(runFailureRecoveryName, "015-run-failure-recovery", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an unknown schema migration at version 15.");
+        }
+        if (appliedMigrations.TryGetValue(16, out var errorContinuationName) &&
+            !string.Equals(errorContinuationName, "016-error-threshold-continuation", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an unknown schema migration at version 16.");
+        }
+        if (appliedMigrations.TryGetValue(17, out var rowRetryName) &&
+            !string.Equals(rowRetryName, "017-row-error-retry", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an unknown schema migration at version 17.");
+        }
         if (appliedMigrations.ContainsKey(2) && !appliedMigrations.ContainsKey(1))
         {
             throw new InvalidOperationException(
@@ -2311,6 +3259,21 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
             throw new InvalidOperationException(
                 $"Database '{DatabasePath}' has an incomplete schema migration history.");
         }
+        if (appliedMigrations.ContainsKey(15) && !appliedMigrations.ContainsKey(14))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an incomplete schema migration history.");
+        }
+        if (appliedMigrations.ContainsKey(16) && !appliedMigrations.ContainsKey(15))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an incomplete schema migration history.");
+        }
+        if (appliedMigrations.ContainsKey(17) && !appliedMigrations.ContainsKey(16))
+        {
+            throw new InvalidOperationException(
+                $"Database '{DatabasePath}' has an incomplete schema migration history.");
+        }
 
         if (!appliedMigrations.ContainsKey(1))
         {
@@ -2325,7 +3288,7 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
                 RunId TEXT NOT NULL PRIMARY KEY,
                 JobName TEXT NOT NULL,
                 JobHash TEXT NOT NULL,
-                Status TEXT NOT NULL CHECK (Status IN ('Running', 'Completed', 'Failed', 'Cancelled')),
+                Status TEXT NOT NULL CHECK (Status IN ('Running', 'Completed', 'CompletedWithErrors', 'Failed', 'Cancelled')),
                 CreatedUtc TEXT NOT NULL,
                 UpdatedUtc TEXT NOT NULL,
                 SchedulerLeaseOwner TEXT NULL,
@@ -2788,6 +3751,138 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
                 """);
             UpdateMigrationAppliedUtc(connection, connectionTuningTransaction, 14);
             connectionTuningTransaction.Commit();
+        }
+
+        if (!appliedMigrations.ContainsKey(15))
+        {
+            using var runFailureRecoveryTransaction = connection.BeginTransaction();
+            ExecuteNonQuery(connection, runFailureRecoveryTransaction, """
+                ALTER TABLE Runs ADD COLUMN FailureJson TEXT NULL;
+
+                CREATE TABLE BatchRetryHistory (
+                    RetryId INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                    RunId TEXT NOT NULL,
+                    BatchId TEXT NOT NULL,
+                    StepId TEXT NOT NULL,
+                    PreviousAttempts INTEGER NOT NULL CHECK (PreviousAttempts > 0),
+                    PreviousLastError TEXT NULL,
+                    PreviousOutcomesJson TEXT NOT NULL,
+                    QueuedUtc TEXT NOT NULL,
+                    FOREIGN KEY (RunId) REFERENCES Runs (RunId) ON DELETE CASCADE,
+                    FOREIGN KEY (BatchId) REFERENCES Batches (BatchId) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IX_BatchRetryHistory_Run_Queued
+                    ON BatchRetryHistory (RunId, QueuedUtc DESC, RetryId DESC);
+
+                INSERT INTO SchemaMigrations (Version, Name, AppliedUtc)
+                VALUES (15, '015-run-failure-recovery', 'initializing');
+                """);
+            UpdateMigrationAppliedUtc(connection, runFailureRecoveryTransaction, 15);
+            runFailureRecoveryTransaction.Commit();
+        }
+
+        if (!appliedMigrations.ContainsKey(16))
+        {
+            ExecuteNonQuery(connection, null, "PRAGMA foreign_keys = OFF;");
+            try
+            {
+                using var errorContinuationTransaction = connection.BeginTransaction();
+                ExecuteNonQuery(connection, errorContinuationTransaction, """
+                    CREATE TABLE Runs_16 (
+                        RunId TEXT NOT NULL PRIMARY KEY,
+                        RunName TEXT NOT NULL,
+                        StepHash TEXT NOT NULL,
+                        Status TEXT NOT NULL CHECK (
+                            Status IN ('Running', 'Completed', 'CompletedWithErrors', 'Failed', 'Cancelled')),
+                        CreatedUtc TEXT NOT NULL,
+                        UpdatedUtc TEXT NOT NULL,
+                        SchedulerLeaseOwner TEXT NULL,
+                        SchedulerLeaseExpiresUtc TEXT NULL,
+                        PipelineJson TEXT NOT NULL DEFAULT '[]',
+                        DebugCaptureEnabled INTEGER NOT NULL DEFAULT 0,
+                        FinishedUtc TEXT NULL,
+                        DebugCaptureRetentionDays INTEGER NOT NULL DEFAULT 30,
+                        ConfigurationJson TEXT NOT NULL DEFAULT 'null',
+                        ConnectionInstancesJson TEXT NOT NULL DEFAULT '[]',
+                        FailureJson TEXT NULL
+                    );
+
+                    INSERT INTO Runs_16 (
+                        RunId, RunName, StepHash, Status, CreatedUtc, UpdatedUtc,
+                        SchedulerLeaseOwner, SchedulerLeaseExpiresUtc, PipelineJson,
+                        DebugCaptureEnabled, FinishedUtc, DebugCaptureRetentionDays,
+                        ConfigurationJson, ConnectionInstancesJson, FailureJson)
+                    SELECT RunId, RunName, StepHash, Status, CreatedUtc, UpdatedUtc,
+                           SchedulerLeaseOwner, SchedulerLeaseExpiresUtc, PipelineJson,
+                           DebugCaptureEnabled, FinishedUtc, DebugCaptureRetentionDays,
+                           ConfigurationJson, ConnectionInstancesJson, FailureJson
+                    FROM Runs;
+
+                    DROP TABLE Runs;
+                    ALTER TABLE Runs_16 RENAME TO Runs;
+
+                    ALTER TABLE Batches
+                        ADD COLUMN FailureAccepted INTEGER NOT NULL DEFAULT 0 CHECK (FailureAccepted IN (0, 1));
+
+                    CREATE TABLE StepFailureContinuations (
+                        RunId TEXT NOT NULL,
+                        StepId TEXT NOT NULL,
+                        CreatedUtc TEXT NOT NULL,
+                        PRIMARY KEY (RunId, StepId),
+                        FOREIGN KEY (RunId) REFERENCES Runs (RunId) ON DELETE CASCADE
+                    );
+
+                    INSERT INTO SchemaMigrations (Version, Name, AppliedUtc)
+                    VALUES (16, '016-error-threshold-continuation', 'initializing');
+                    """);
+                UpdateMigrationAppliedUtc(connection, errorContinuationTransaction, 16);
+                errorContinuationTransaction.Commit();
+            }
+            finally
+            {
+                ExecuteNonQuery(connection, null, "PRAGMA foreign_keys = ON;");
+            }
+        }
+
+        if (!appliedMigrations.ContainsKey(17))
+        {
+            using var rowRetryTransaction = connection.BeginTransaction();
+            ExecuteNonQuery(connection, rowRetryTransaction, """
+                CREATE TABLE BatchRowErrors (
+                    RunId TEXT NOT NULL,
+                    BatchId TEXT NOT NULL,
+                    RecordIndex INTEGER NOT NULL CHECK (RecordIndex >= 0),
+                    Error TEXT NOT NULL,
+                    PayloadJson TEXT NOT NULL,
+                    ResolvedUtc TEXT NULL,
+                    RetryBatchId TEXT NULL,
+                    RetryCount INTEGER NOT NULL DEFAULT 0 CHECK (RetryCount >= 0),
+                    PRIMARY KEY (RunId, BatchId, RecordIndex),
+                    FOREIGN KEY (RunId) REFERENCES Runs (RunId) ON DELETE CASCADE,
+                    FOREIGN KEY (BatchId) REFERENCES Batches (BatchId) ON DELETE CASCADE,
+                    FOREIGN KEY (RetryBatchId) REFERENCES Batches (BatchId) ON DELETE SET NULL
+                );
+
+                CREATE TABLE BatchRowRetryLinks (
+                    RunId TEXT NOT NULL,
+                    RetryBatchId TEXT NOT NULL PRIMARY KEY,
+                    ParentBatchId TEXT NOT NULL,
+                    ParentRecordIndex INTEGER NOT NULL CHECK (ParentRecordIndex >= 0),
+                    FOREIGN KEY (RunId) REFERENCES Runs (RunId) ON DELETE CASCADE,
+                    FOREIGN KEY (RetryBatchId) REFERENCES Batches (BatchId) ON DELETE CASCADE,
+                    FOREIGN KEY (RunId, ParentBatchId, ParentRecordIndex)
+                        REFERENCES BatchRowErrors (RunId, BatchId, RecordIndex) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IX_BatchRowErrors_Run_Batch
+                    ON BatchRowErrors (RunId, BatchId, RecordIndex);
+
+                INSERT INTO SchemaMigrations (Version, Name, AppliedUtc)
+                VALUES (17, '017-row-error-retry', 'initializing');
+                """);
+            UpdateMigrationAppliedUtc(connection, rowRetryTransaction, 17);
+            rowRetryTransaction.Commit();
         }
     }
 
@@ -3281,7 +4376,8 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
         command.Transaction = transaction;
         command.CommandText = """
             SELECT BatchId, RunId, StepId, Sequence, CursorAfterJson, PayloadJson, State,
-                   Attempts, LeaseOwner, LeaseExpiresUtc, OutcomesJson, LastError, CreatedUtc, UpdatedUtc
+                   Attempts, LeaseOwner, LeaseExpiresUtc, OutcomesJson, LastError, CreatedUtc, UpdatedUtc,
+                   FailureAccepted
             FROM Batches
             WHERE BatchId = $batchId;
             """;
@@ -3290,6 +4386,36 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
         var batch = reader.Read() ? ReadBatch(reader) : null;
         reader.Close();
         return batch is null ? null : AttachDependencyParents(connection, transaction, batch);
+    }
+
+    private static bool IsDependencyEligible(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string runId,
+        StoredBatch batch)
+    {
+        return batch.State == MigrationBatchState.Succeeded ||
+               (batch.State == MigrationBatchState.CompletedWithErrors &&
+                (batch.FailureAccepted ||
+                 IsStepFailureContinuationAllowed(connection, transaction, runId, batch.StepId)));
+    }
+
+    private static bool IsStepFailureContinuationAllowed(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        string runId,
+        string stepId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT 1
+            FROM StepFailureContinuations
+            WHERE RunId = $runId AND StepId = $stepId;
+            """;
+        AddParameter(command, "$runId", runId);
+        AddParameter(command, "$stepId", stepId);
+        return command.ExecuteScalar() is not null;
     }
 
     private static StoredBatch AttachDependencyParents(
@@ -3506,7 +4632,10 @@ internal sealed partial class SqliteMigrationStore : IMigrationStore
             ReadNullableString(reader, 10),
             ReadNullableString(reader, 11),
             ParseUtc(reader.GetString(12)),
-            ParseUtc(reader.GetString(13)));
+            ParseUtc(reader.GetString(13)))
+        {
+            FailureAccepted = reader.GetInt32(14) != 0
+        };
     }
 
     private static void InsertDependencyEvent(

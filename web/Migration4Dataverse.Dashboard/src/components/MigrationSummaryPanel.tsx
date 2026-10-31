@@ -49,7 +49,7 @@ export function MigrationSummaryPanel({
   const overallThroughput = buildOverallThroughput(jobs, run);
   const estimatedCompletion = runStalled
     ? "Run stalled — resume required"
-    : run.status === "Completed"
+    : run.status === "Completed" || run.status === "CompletedWithErrors"
       ? `Completed ${new Date(run.updatedUtc).toLocaleString()}`
       : run.status !== "Running"
         ? "Unavailable"

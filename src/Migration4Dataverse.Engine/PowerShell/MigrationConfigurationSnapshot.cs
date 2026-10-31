@@ -84,7 +84,11 @@ public static class MigrationConfigurationSnapshot
             {
                 ["maxDegreeOfParallelism"] = schedulerLimits.MaxDegreeOfParallelism,
                 ["maxQueuedBatches"] = schedulerLimits.MaxQueuedBatches,
-                ["maxQueuedBatchesPerStep"] = schedulerLimits.MaxQueuedBatchesPerStep
+                ["maxQueuedBatchesPerStep"] = schedulerLimits.MaxQueuedBatchesPerStep,
+                ["maxAttempts"] = schedulerLimits.MaxAttempts,
+                ["maxErrorRatePercent"] = schedulerLimits.MaxErrorRatePercent,
+                ["sourceReadMaxAttempts"] = schedulerLimits.SourceReadMaxAttempts,
+                ["sourceReadRetryDelaySeconds"] = schedulerLimits.SourceReadRetryDelaySeconds
             };
         }
         return configuration.ToJsonString();

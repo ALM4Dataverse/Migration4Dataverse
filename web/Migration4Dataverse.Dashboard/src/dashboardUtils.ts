@@ -10,6 +10,7 @@ export const emptySnapshotFilters: Record<string, string> = {};
 export const statusInfo: Record<JobStatus | RunStatus, { label: string; color: string; icon: typeof Activity }> = {
   Running: { label: "Running", color: "blue", icon: Play },
   Completed: { label: "Completed", color: "green", icon: CheckCircle2 },
+  CompletedWithErrors: { label: "Completed with errors", color: "yellow", icon: AlertTriangle },
   Pending: { label: "Pending", color: "gray", icon: CircleDashed },
   Queued: { label: "Queued", color: "yellow", icon: Clock3 },
   Failed: { label: "Failed", color: "red", icon: XCircle },
@@ -171,7 +172,9 @@ export function readSourceDependencies(properties: Record<string, unknown> | und
 
 export function statusFor(job: DashboardJob, jobs: DashboardJob[], configurationOnly = false): JobStatus {
   if (configurationOnly) return "Configured";
-  if (job.batchesWithErrors > 0) return "Failed";
+  if ((job.unacceptedErrorBatches ?? job.batchesWithErrors) > 0 && !job.failureContinuationAllowed) {
+    return "Failed";
+  }
   if (job.inFlightBatches > 0) return "Running";
   if (job.pendingBatches > 0) return job.succeededBatches > 0 ? "Running" : "Queued";
   if (job.pendingDependencyEvents > 0) return job.succeededBatches > 0 ? "Running" : "Queued";
@@ -179,7 +182,10 @@ export function statusFor(job: DashboardJob, jobs: DashboardJob[], configuration
   const parents = job.dependsOn
     .map((parentName) => jobs.find((candidate) => candidate.name === parentName))
     .filter((parent): parent is DashboardJob => parent !== undefined);
-  if (parents.some((parent) => parent.batchesWithErrors > 0)) return "Blocked";
+  if (parents.some((parent) =>
+    (parent.unacceptedErrorBatches ?? parent.batchesWithErrors) > 0 && !parent.failureContinuationAllowed)) {
+    return "Blocked";
+  }
   if (job.hasSource &&
     job.completionDependencies.some((dependency) =>
       parents.some((parent) => parent.name === dependency && !parent.isComplete))) {
@@ -242,7 +248,10 @@ export function furthestFailedDependency(job: DashboardJob, jobs: DashboardJob[]
   }
 
   return jobs
-    .filter((candidate) => candidate.batchesWithErrors > 0 && distances.has(candidate.name))
+    .filter((candidate) =>
+      (candidate.unacceptedErrorBatches ?? candidate.batchesWithErrors) > 0 &&
+      !candidate.failureContinuationAllowed &&
+      distances.has(candidate.name))
     .toSorted((left, right) =>
       (distances.get(right.name) ?? 0) - (distances.get(left.name) ?? 0) ||
       left.name.localeCompare(right.name),

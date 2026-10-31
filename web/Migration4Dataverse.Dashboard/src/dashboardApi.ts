@@ -1,8 +1,8 @@
 import { ApiConfiguration, ApiDebugSnapshot, ApiDebugSnapshotPage, ApiRunSummary, DebugSnapshot, DebugSnapshotPage, MigrationConfiguration, RunSummary, SnapshotGridSortState } from "./types";
 import { getStringProperty, readSourceDependencies } from "./dashboardUtils";
 
-export const api = async <T,>(path: string, signal?: AbortSignal): Promise<T> => {
-  const response = await fetch(path, { cache: "no-store", signal });
+export const api = async <T,>(path: string, signal?: AbortSignal, init?: RequestInit): Promise<T> => {
+  const response = await fetch(path, { cache: "no-store", signal, ...init });
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     throw new Error(body?.message ?? `${response.status} ${response.statusText}`);

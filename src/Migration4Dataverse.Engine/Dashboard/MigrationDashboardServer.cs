@@ -17,6 +17,7 @@ public static class MigrationDashboardServer
 {
     private const string DefaultUrl = "http://127.0.0.1:5180/";
     private const int MaxConcurrentRequests = 8;
+    private const long MaxRetryRowRequestBytes = 10 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public static Task<MigrationDashboardHandle> StartAsync(
@@ -183,11 +184,40 @@ public static class MigrationDashboardServer
                 rawSegments[0] == "api" &&
                 rawSegments[1] == "runs" &&
                 rawSegments[3] == "binary";
-            if (request.HttpMethod != "GET" && !isBinaryArtifactHead)
+            var isRetryFailedBatchesPost = request.HttpMethod == "POST" &&
+                rawSegments.Length == 4 &&
+                rawSegments[0] == "api" &&
+                rawSegments[1] == "runs" &&
+                rawSegments[3] == "retry-failed-batches";
+            var isRetryFailedRowPost = request.HttpMethod == "POST" &&
+                rawSegments.Length == 4 &&
+                rawSegments[0] == "api" &&
+                rawSegments[1] == "runs" &&
+                rawSegments[3] == "retry-row";
+            var isContinueAfterFailedStepPost = request.HttpMethod == "POST" &&
+                rawSegments.Length == 6 &&
+                rawSegments[0] == "api" &&
+                rawSegments[1] == "runs" &&
+                rawSegments[3] == "steps" &&
+                rawSegments[5] == "continue-after-failure";
+            if (request.HttpMethod != "GET" &&
+                !isBinaryArtifactHead &&
+                !isRetryFailedBatchesPost &&
+                !isRetryFailedRowPost &&
+                !isContinueAfterFailedStepPost)
             {
                 await WriteJsonAsync(response, HttpStatusCode.MethodNotAllowed, new
                 {
-                    message = "The migration dashboard API is read-only."
+                    message = "The migration dashboard API is read-only except for explicit failed-batch recovery and step continuation."
+                }, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            if ((isRetryFailedBatchesPost || isRetryFailedRowPost || isContinueAfterFailedStepPost) &&
+                !IsSameOriginRequest(request))
+            {
+                await WriteJsonAsync(response, HttpStatusCode.Forbidden, new
+                {
+                    message = "Migration recovery actions require a same-origin dashboard request."
                 }, cancellationToken).ConfigureAwait(false);
                 return;
             }
@@ -207,10 +237,8 @@ public static class MigrationDashboardServer
             {
                 if (string.IsNullOrWhiteSpace(configurationJson))
                 {
-                    await WriteJsonAsync(response, HttpStatusCode.NotFound, new
-                    {
-                        message = "No configuration preview was supplied to this dashboard."
-                    }, cancellationToken).ConfigureAwait(false);
+                    await WriteJsonAsync(response, HttpStatusCode.OK, null, cancellationToken)
+                        .ConfigureAwait(false);
                     return;
                 }
 
@@ -259,6 +287,74 @@ public static class MigrationDashboardServer
                         response,
                         HttpStatusCode.OK,
                         store.GetDashboardRun(runId),
+                        cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
+                if (segments.Length == 4 && segments[3] == "retry-failed-batches" &&
+                    request.HttpMethod == "POST")
+                {
+                    var queuedBatches = store.QueueFailedBatchesForRetry(runId);
+                    await WriteJsonAsync(
+                        response,
+                        HttpStatusCode.OK,
+                        new { queuedBatches },
+                        cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
+                if (segments.Length == 4 && segments[3] == "retry-row" &&
+                    request.HttpMethod == "POST")
+                {
+                    if (request.ContentLength64 > MaxRetryRowRequestBytes)
+                    {
+                        throw new ArgumentOutOfRangeException(
+                            nameof(request),
+                            $"The edited row payload must be no larger than {MaxRetryRowRequestBytes / (1024 * 1024)} MB.");
+                    }
+
+                    var retryRequest = await JsonSerializer.DeserializeAsync<RetryFailedRowRequest>(
+                        request.InputStream,
+                        JsonOptions,
+                        cancellationToken).ConfigureAwait(false)
+                        ?? throw new ArgumentException("A row-retry request body is required.");
+                    var retryBatchId = store.QueueFailedRowForRetry(
+                        runId,
+                        retryRequest.StepId,
+                        retryRequest.BatchId,
+                        retryRequest.RecordIndex,
+                        retryRequest.PayloadJson);
+                    await WriteJsonAsync(
+                        response,
+                        HttpStatusCode.OK,
+                        new { queuedBatchId = retryBatchId },
+                        cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
+                if (segments.Length == 6 &&
+                    segments[3] == "steps" &&
+                    segments[5] == "continue-after-failure" &&
+                    request.HttpMethod == "POST")
+                {
+                    var allowed = store.AllowStepFailureContinuation(runId, segments[4]);
+                    await WriteJsonAsync(
+                        response,
+                        HttpStatusCode.OK,
+                        new { allowed },
+                        cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
+                if (segments.Length == 4 && segments[3] == "retry-history")
+                {
+                    await WriteJsonAsync(
+                        response,
+                        HttpStatusCode.OK,
+                        store.GetDashboardBatchRetryHistory(
+                            runId,
+                            ParseLimit(query["limit"], 100),
+                            ParseOffset(query["offset"])),
                         cancellationToken).ConfigureAwait(false);
                     return;
                 }
@@ -482,12 +578,22 @@ public static class MigrationDashboardServer
             await WriteJsonAsync(response, HttpStatusCode.NotFound, new { message = exception.Message }, cancellationToken)
                 .ConfigureAwait(false);
         }
+        catch (InvalidOperationException exception)
+        {
+            await WriteJsonAsync(response, HttpStatusCode.Conflict, new { message = exception.Message }, cancellationToken)
+                .ConfigureAwait(false);
+        }
         catch (ArgumentOutOfRangeException exception)
         {
             await WriteJsonAsync(response, HttpStatusCode.BadRequest, new { message = exception.Message }, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (ArgumentException exception)
+        {
+            await WriteJsonAsync(response, HttpStatusCode.BadRequest, new { message = exception.Message }, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (JsonException exception)
         {
             await WriteJsonAsync(response, HttpStatusCode.BadRequest, new { message = exception.Message }, cancellationToken)
                 .ConfigureAwait(false);
@@ -534,6 +640,23 @@ public static class MigrationDashboardServer
          host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
          host.Equals("::1", StringComparison.OrdinalIgnoreCase) ||
          host.Equals("[::1]", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsSameOriginRequest(HttpListenerRequest request)
+    {
+        var originHeader = request.Headers["Origin"];
+        return request.Url is not null &&
+               Uri.TryCreate(originHeader, UriKind.Absolute, out var origin) &&
+               string.Equals(
+                   origin.GetLeftPart(UriPartial.Authority),
+                   request.Url.GetLeftPart(UriPartial.Authority),
+                   StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed record RetryFailedRowRequest(
+        string StepId,
+        string BatchId,
+        int RecordIndex,
+        string PayloadJson);
 
     private static int ParseLimit(string? value, int defaultValue)
     {
@@ -645,7 +768,7 @@ public static class MigrationDashboardServer
     private static async Task WriteJsonAsync(
         HttpListenerResponse response,
         HttpStatusCode statusCode,
-        object value,
+        object? value,
         CancellationToken cancellationToken)
     {
         var json = JsonSerializer.Serialize(value, JsonOptions);

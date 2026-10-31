@@ -228,11 +228,8 @@ export function useDashboardController() {
       });
       const configurationResponse = await fetch("/api/configuration", { cache: "no-store", signal });
       if (configurationResponse.ok) {
-        setPreviewConfiguration(normalizeConfiguration(
-          await configurationResponse.json() as ApiConfiguration,
-        ));
-      } else if (configurationResponse.status === 404) {
-        setPreviewConfiguration(null);
+        const configuration = await configurationResponse.json() as ApiConfiguration | null;
+        setPreviewConfiguration(configuration ? normalizeConfiguration(configuration) : null);
       } else {
         throw new Error(`${configurationResponse.status} ${configurationResponse.statusText}`);
       }

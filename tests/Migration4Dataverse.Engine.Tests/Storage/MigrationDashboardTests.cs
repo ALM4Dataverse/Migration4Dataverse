@@ -1016,6 +1016,149 @@ public sealed class MigrationDashboardTests
     }
 
     [Fact]
+    public async Task DashboardQueuesAnEditedFailedRowForSingleRowRetry()
+    {
+        using var database = new TemporaryDatabase();
+        const string runId = "dashboard-row-retry-run";
+        const string batchId = "failed-transform-batch";
+        const string stepId = "Transform";
+        const string pipelineJson = """
+            [{"Id":"Transform","Inputs":[],"CompletionDependencies":[],"HasSource":false,"Type":"transform"}]
+            """;
+        var store = new SqliteMigrationStore(database.Path);
+        store.CreateRun(runId, "dashboard-row-retry-test", "hash", pipelineJson: pipelineJson);
+        store.EnqueueBatch(
+            runId,
+            stepId,
+            0,
+            batchId,
+            null,
+            """{"Records":[{"Name":"before"}],"__LineageReferences":[[]]}""");
+        var failedBatch = store.TryLeaseNextBatch(runId, "worker", TimeSpan.FromMinutes(1));
+        Assert.NotNull(failedBatch);
+        store.TryCompleteBatchWithErrorPolicy(
+            batchId,
+            "worker",
+            """{"succeeded":0,"failed":[{"recordIndex":0,"error":"invalid name"}]}""",
+            dependencyEvents: null,
+            lastError: "invalid name",
+            maxErrorRatePercent: 0,
+            rowErrors: [new MigrationRowError(0, "invalid name")]);
+        store.SetRunStatus(runId, MigrationRunStatus.Failed);
+
+        var port = GetAvailablePort();
+        await using var dashboard = await MigrationDashboardServer.StartAsync(
+            database.Path,
+            $"http://127.0.0.1:{port}");
+        using var client = new HttpClient();
+
+        var errors = await client.GetFromJsonAsync<MigrationDashboardBatch[]>(
+            new Uri(dashboard.Url, $"/api/runs/{runId}/batch-errors/{stepId}"));
+        var error = Assert.Single(errors!);
+        var rowError = Assert.Single(error.RowErrors);
+        Assert.Equal(0, rowError.RecordIndex);
+        Assert.Equal("""{"Name":"before"}""", rowError.PayloadJson);
+        Assert.True(rowError.CanRetry);
+
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            new Uri(dashboard.Url, $"/api/runs/{runId}/retry-row"));
+        request.Headers.Add("Origin", dashboard.Url.GetLeftPart(UriPartial.Authority));
+        request.Content = JsonContent.Create(new
+        {
+            stepId,
+            batchId,
+            recordIndex = 0,
+            payloadJson = """{"Name":"after"}"""
+        });
+        using var response = await client.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var retryBatchId = result.GetProperty("queuedBatchId").GetString();
+        Assert.NotNull(retryBatchId);
+        var retryBatch = store.GetBatch(retryBatchId);
+        Assert.NotNull(retryBatch);
+        Assert.Equal(1, retryBatch.Sequence);
+        Assert.Equal(
+            """{"Records":[{"Name":"after"}],"__LineageReferences":[[]]}""",
+            retryBatch.PayloadJson);
+
+        var leasedRetryBatch = store.TryLeaseNextBatch(runId, "retry-worker", TimeSpan.FromMinutes(1));
+        Assert.NotNull(leasedRetryBatch);
+        store.CompleteBatch(
+            retryBatchId,
+            "retry-worker",
+            """{"succeeded":1,"failed":0}""",
+            hasErrors: false);
+        Assert.Equal(0, store.GetDashboardRun(runId).FailedRows);
+        Assert.Empty(store.GetDashboardBatchErrors(runId, stepId));
+    }
+
+    [Fact]
+    public async Task DashboardShowsRunFailuresAndQueuesFailedBatchesForReplay()
+    {
+        using var database = new TemporaryDatabase();
+        const string runId = "dashboard-recovery-run";
+        var store = new SqliteMigrationStore(database.Path);
+        store.CreateRun(runId, "dashboard-recovery-test", "hash");
+        store.EnqueueBatch(runId, "BrokenStep", 0, "failed-batch", null, """{"Records":[]}""");
+        var batch = store.TryLeaseNextBatch(runId, "worker", TimeSpan.FromMinutes(1));
+        Assert.NotNull(batch);
+        store.CompleteBatch(
+            batch.BatchId,
+            "worker",
+            """{"succeeded":0,"failed":[{"id":"row-1"}]}""",
+            hasErrors: true,
+            lastError: "Target failed.");
+        store.SetRunFailure(
+            runId,
+            new MigrationRunFailure(
+                "Batch processing",
+                "BrokenStep",
+                "Target failed.",
+                "InvalidOperationException",
+                "Target failed.\n   at Example.Target()",
+                DateTimeOffset.UtcNow));
+        store.SetRunStatus(runId, MigrationRunStatus.Failed);
+
+        var port = GetAvailablePort();
+        await using var dashboard = await MigrationDashboardServer.StartAsync(
+            database.Path,
+            $"http://127.0.0.1:{port}");
+        using var client = new HttpClient();
+
+        var beforeRetry = await client.GetFromJsonAsync<MigrationRunSummary>(
+            new Uri(dashboard.Url, $"/api/runs/{runId}"));
+        Assert.Equal("Target failed.", beforeRetry?.Failure?.Message);
+
+        var retryUri = new Uri(dashboard.Url, $"/api/runs/{runId}/retry-failed-batches");
+        using var crossOriginRequest = new HttpRequestMessage(HttpMethod.Post, retryUri);
+        crossOriginRequest.Headers.TryAddWithoutValidation("Origin", "https://example.test");
+        using var crossOriginResponse = await client.SendAsync(crossOriginRequest);
+        Assert.Equal(HttpStatusCode.Forbidden, crossOriginResponse.StatusCode);
+
+        using var retryRequest = new HttpRequestMessage(HttpMethod.Post, retryUri);
+        retryRequest.Headers.TryAddWithoutValidation(
+            "Origin",
+            dashboard.Url.GetLeftPart(UriPartial.Authority));
+        using var queuedResponse = await client.SendAsync(retryRequest);
+        Assert.Equal(HttpStatusCode.OK, queuedResponse.StatusCode);
+        var queued = await queuedResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(1, queued.GetProperty("queuedBatches").GetInt32());
+
+        var afterRetry = await client.GetFromJsonAsync<MigrationRunSummary>(
+            new Uri(dashboard.Url, $"/api/runs/{runId}"));
+        Assert.Equal(0, afterRetry?.BatchesWithErrors);
+        Assert.Equal(1, afterRetry?.PendingBatches);
+
+        var history = await client.GetFromJsonAsync<MigrationBatchRetryHistory[]>(
+            new Uri(dashboard.Url, $"/api/runs/{runId}/retry-history"));
+        var retry = Assert.Single(history!);
+        Assert.Equal(batch.BatchId, retry.BatchId);
+        Assert.Equal("Target failed.", retry.PreviousLastError);
+    }
+
+    [Fact]
     public async Task DashboardServesConfigurationWithoutRunDatabase()
     {
         var port = GetAvailablePort();
@@ -1031,6 +1174,79 @@ public sealed class MigrationDashboardTests
         Assert.Empty(await client.GetFromJsonAsync<MigrationRunSummary[]>(new Uri(dashboard.Url, "/api/runs")) ?? []);
         using var runResponse = await client.GetAsync(new Uri(dashboard.Url, "/api/runs/none"));
         Assert.Equal(HttpStatusCode.NotFound, runResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task DashboardReturnsNullConfigurationWhenNoPreviewWasSupplied()
+    {
+        using var database = new TemporaryDatabase();
+        var port = GetAvailablePort();
+        await using var dashboard = await MigrationDashboardServer.StartAsync(
+            database.Path,
+            $"http://127.0.0.1:{port}");
+        using var client = new HttpClient();
+
+        using var response = await client.GetAsync(new Uri(dashboard.Url, "/api/configuration"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("null", (await response.Content.ReadAsStringAsync()).Trim());
+    }
+
+    [Fact]
+    public async Task FailedStepContinuationRequiresSameOriginAndIsPersisted()
+    {
+        using var database = new TemporaryDatabase();
+        const string runId = "dashboard-step-continuation-run";
+        const string stepId = "BrokenStep";
+        var store = new SqliteMigrationStore(database.Path);
+        store.CreateRun(
+            runId,
+            "dashboard-step-continuation-test",
+            "hash-1",
+            pipelineJson: """[{"Id":"BrokenStep","Inputs":[],"HasSource":true,"Type":"source"}]""");
+        store.EnqueueBatch(runId, stepId, 0, "failed-batch", null, """{"Records":[{"id":1}]}""");
+        var batch = store.TryLeaseNextBatch(runId, "worker", TimeSpan.FromMinutes(1));
+        Assert.NotNull(batch);
+        store.CompleteBatch(
+            "failed-batch",
+            "worker",
+            """{"succeeded":0,"failed":1}""",
+            hasErrors: true,
+            lastError: "One row failed.");
+        store.SetRunStatus(runId, MigrationRunStatus.Failed);
+
+        var port = GetAvailablePort();
+        await using var dashboard = await MigrationDashboardServer.StartAsync(
+            database.Path,
+            $"http://127.0.0.1:{port}");
+        using var client = new HttpClient();
+        var summaryUri = new Uri(dashboard.Url, $"/api/runs/{runId}");
+        var before = await client.GetFromJsonAsync<MigrationRunSummary>(summaryUri);
+        var beforeStep = Assert.Single(before!.Steps);
+        Assert.Equal(1, beforeStep.UnacceptedErrorBatches);
+        Assert.False(beforeStep.FailureContinuationOverride);
+
+        var continueUri = new Uri(
+            dashboard.Url,
+            $"/api/runs/{runId}/steps/{stepId}/continue-after-failure");
+        using var crossOriginRequest = new HttpRequestMessage(HttpMethod.Post, continueUri);
+        crossOriginRequest.Headers.TryAddWithoutValidation("Origin", "https://example.test");
+        using var crossOriginResponse = await client.SendAsync(crossOriginRequest);
+        Assert.Equal(HttpStatusCode.Forbidden, crossOriginResponse.StatusCode);
+
+        using var continueRequest = new HttpRequestMessage(HttpMethod.Post, continueUri);
+        continueRequest.Headers.TryAddWithoutValidation(
+            "Origin",
+            dashboard.Url.GetLeftPart(UriPartial.Authority));
+        using var continueResponse = await client.SendAsync(continueRequest);
+        Assert.Equal(HttpStatusCode.OK, continueResponse.StatusCode);
+        var result = await continueResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(result.GetProperty("allowed").GetBoolean());
+
+        var after = await client.GetFromJsonAsync<MigrationRunSummary>(summaryUri);
+        var afterStep = Assert.Single(after!.Steps);
+        Assert.True(afterStep.FailureContinuationOverride);
+        Assert.True(afterStep.FailureContinuationAllowed);
     }
 
     private static void CompleteBatch(

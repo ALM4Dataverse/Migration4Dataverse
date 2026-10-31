@@ -338,6 +338,7 @@ internal static partial class PowerShellMigrationStepFactory
         $inputRecords = @($payload.Records)
         $outputRecords = [System.Collections.Generic.List[object]]::new()
         $parentRecordIndices = [System.Collections.Generic.List[System.Collections.Generic.IReadOnlyList[int]]]::new()
+        $rowErrors = [System.Collections.Generic.List[Migration4Dataverse.Engine.Storage.MigrationRowError]]::new()
         $targetOutputRecords = $null
         $filteredRows = 0
 
@@ -509,7 +510,10 @@ internal static partial class PowerShellMigrationStepFactory
                                 }
                             }
                             catch {
-                                throw "Transform step '$($context.StepId)' failed: $($_.Exception.Message)"
+                                $rowErrors.Add([Migration4Dataverse.Engine.Storage.MigrationRowError]::new(
+                                    $index,
+                                    "Transform step '$($context.StepId)' failed: $($_.Exception.Message)"))
+                                continue
                             }
                             foreach ($value in $values) {
                                 $fields = ConvertTo-MigrationFields -Value $value -StepId $context.StepId
@@ -544,7 +548,10 @@ internal static partial class PowerShellMigrationStepFactory
                         $values = @(& $script $inputRecords[$index])
                     }
                     catch {
-                        throw "Filter step '$($context.StepId)' failed: $($_.Exception.Message)"
+                        $rowErrors.Add([Migration4Dataverse.Engine.Storage.MigrationRowError]::new(
+                            $index,
+                            "Filter step '$($context.StepId)' failed: $($_.Exception.Message)"))
+                        continue
                     }
                     $keep = $false
                     if ($values.Count -eq 1) {
@@ -598,7 +605,7 @@ internal static partial class PowerShellMigrationStepFactory
                     [void]$contributingInputIndices.Add($index)
                 }
             }
-            $filteredRows += $inputRecords.Count - $contributingInputIndices.Count
+            $filteredRows += $inputRecords.Count - $contributingInputIndices.Count - $rowErrors.Count
         }
 
         if ($context.Type -eq 'target' -and $outputRecords.Count -gt 0) {
@@ -1017,19 +1024,34 @@ internal static partial class PowerShellMigrationStepFactory
             [ordered]@{ Succeeded = 0; Failed = 0; Previewed = $outputRecords.Count }
         }
         else {
-            [ordered]@{ Succeeded = $outputRecords.Count; Failed = 0 }
+            [ordered]@{
+                Succeeded = $outputRecords.Count
+                Failed = @($rowErrors | ForEach-Object {
+                    [ordered]@{
+                        RecordIndex = $_.RecordIndex
+                        Error = $_.Error
+                    }
+                })
+            }
         }
         if ($context.TargetType -eq 'dataverse' -and $null -ne $context.TargetController) {
             $outcomeData.SpecialistInfo = $context.TargetController.GetDashboardState($context.StepId)
         }
         $outcomes = ConvertTo-Json -InputObject $outcomeData -Depth 10 -Compress -ErrorAction Stop
+        $lastError = if ($rowErrors.Count -eq 0) {
+            $null
+        }
+        else {
+            ($rowErrors | ForEach-Object { $_.Error }) -join [Environment]::NewLine
+        }
         [Migration4Dataverse.Engine.Scheduling.MigrationBatchResult]::new(
             $outcomes,
-            $false,
+            ($rowErrors.Count -gt 0),
             [Migration4Dataverse.Engine.Scheduling.MigrationDependencyOutput[]]$dependencyOutputs.ToArray(),
-            $null,
+            $lastError,
             [Migration4Dataverse.Engine.Storage.MigrationDebugStage[]]$debugStages.ToArray(),
-            [long]$filteredRows)
+            [long]$filteredRows,
+            [Migration4Dataverse.Engine.Storage.MigrationRowError[]]$rowErrors.ToArray())
         """;
 
     private static IReadOnlyList<GraphDependencyInput> ParseDependencies(object? value, string stepId)
@@ -1681,6 +1703,23 @@ internal static partial class PowerShellMigrationStepFactory
     {
         var value = Unwrap(GetProperty(input, name));
         return value is null ? defaultValue : LanguagePrimitives.ConvertTo<int>(value);
+    }
+
+    private static double? GetDouble(IDictionary input, string name, double? defaultValue)
+    {
+        var value = Unwrap(GetProperty(input, name));
+        if (value is null)
+        {
+            return defaultValue;
+        }
+
+        var converted = LanguagePrimitives.ConvertTo<double>(value);
+        if (!double.IsFinite(converted))
+        {
+            throw new ArgumentOutOfRangeException(name, "A finite numeric value is required.");
+        }
+
+        return converted;
     }
 
     private static long GetLong(IDictionary input, string name, long defaultValue)

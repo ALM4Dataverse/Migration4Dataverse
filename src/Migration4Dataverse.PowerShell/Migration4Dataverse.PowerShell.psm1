@@ -128,5 +128,8 @@ function Stop-MigrationDashboard {
 Export-ModuleMember `
         -Function New-MigrationJobStore, Complete-MigrationBatch, Set-MigrationRunStatus, `
         Start-MigrationDashboard, Stop-MigrationDashboard `
-        -Cmdlet Invoke-Migration, Get-MigrationRun, Clear-MigrationTargetTuning, `
-        Start-MigrationDatabaseServer, New-MigrationBinaryValue
+        -Cmdlet Invoke-Migration, Get-MigrationRun, Get-MigrationStep, Get-MigrationBatch, `
+        Get-MigrationError, Get-MigrationRetryHistory, Get-MigrationDebugRow, `
+        Get-MigrationDebugRowBinary, Get-MigrationConfigurationPreview, Get-MigrationProcessMetric, `
+        Get-MigrationDataverseConnectionThroughput, Invoke-MigrationRecovery, `
+        Clear-MigrationTargetTuning, Start-MigrationDatabaseServer, New-MigrationBinaryValue

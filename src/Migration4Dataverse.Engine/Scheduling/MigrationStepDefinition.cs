@@ -61,6 +61,8 @@ public sealed class MigrationStepDefinition
 
     public double DispatchWeight { get; init; } = 1;
 
+    public double? ErrorRateThresholdPercent { get; init; }
+
     public long? ExpectedRecordCount { get; init; }
 
     public Func<CancellationToken, Task<long>>? ResolveExpectedRecordCountAsync { get; init; }
@@ -111,7 +113,22 @@ public sealed record MigrationBatchResult(
         FilteredRows = filteredRows;
     }
 
+    public MigrationBatchResult(
+        string outcomesJson,
+        bool hasErrors,
+        IReadOnlyList<MigrationDependencyOutput>? dependencies,
+        string? lastError,
+        IReadOnlyList<MigrationDebugStage>? debugStages,
+        long filteredRows,
+        IReadOnlyList<MigrationRowError>? rowErrors)
+        : this(outcomesJson, hasErrors, dependencies, lastError, debugStages, filteredRows)
+    {
+        RowErrors = rowErrors ?? Array.Empty<MigrationRowError>();
+    }
+
     public long FilteredRows { get; init; }
+
+    public IReadOnlyList<MigrationRowError> RowErrors { get; init; } = Array.Empty<MigrationRowError>();
 }
 
 public sealed record DependencySchedulerOptions
@@ -124,6 +141,10 @@ public sealed record DependencySchedulerOptions
 
     public int MaxAttempts { get; init; } = 5;
 
+    public double MaxErrorRatePercent { get; init; }
+
+    public int SourceReadMaxAttempts { get; init; } = 3;
+
     public TimeSpan BatchLeaseDuration { get; init; } = TimeSpan.FromMinutes(30);
 
     public TimeSpan RunLeaseDuration { get; init; } = TimeSpan.FromMinutes(1);
@@ -131,6 +152,8 @@ public sealed record DependencySchedulerOptions
     public TimeSpan PollInterval { get; init; } = TimeSpan.FromMilliseconds(250);
 
     public TimeSpan RetryDelay { get; init; } = TimeSpan.FromSeconds(2);
+
+    public TimeSpan SourceReadRetryDelay { get; init; } = TimeSpan.FromSeconds(2);
 
     public bool CaptureDebugData { get; init; }
 
@@ -143,6 +166,8 @@ public sealed record DependencySchedulerResult(
     DateTimeOffset StartedUtc,
     DateTimeOffset CompletedUtc)
 {
+    public bool CompletedWithErrors { get; init; }
+
     public bool IsWhatIf { get; init; }
 
     public long TargetRowsProcessed { get; init; }
