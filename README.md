@@ -32,9 +32,19 @@ The project is also intended to run locally without SSIS, a separate SQL Server,
 - Extend the engine with custom PowerShell connectors and streaming file-format readers and writers.
 - Move binary attachments through file-backed values, sidecars, and Dataverse File/Image or document connectors; mappings can pass values through or apply Base64, JSON-stream, and MIME-type transformations.
 
+## Install
+
+Install the module from the PowerShell Gallery:
+
+```powershell
+Install-Module Migration4Dataverse -Scope CurrentUser
+```
+
+The Gallery package requires PowerShell 7.6 or later and installs the required `Rnwood.Dataverse.Data.PowerShell` connector (3.3.0 or later) as a dependency.
+
 ## Quick start
 
-You need PowerShell 7.6 or later, the .NET 10 SDK, and Node.js/npm to build the dashboard assets. Build the module, install the Dataverse connector module, and run the Dataverse example from the repository root:
+The repository examples run from a source checkout. Building from source requires PowerShell 7.6 or later, the .NET 10 SDK, and Node.js 24 or later with npm 11 or later to build the dashboard assets. Build the module, install the Dataverse connector module, and run the Dataverse example from the repository root:
 
 ```powershell
 dotnet build Migration4Dataverse.slnx --configuration Release
@@ -52,6 +62,9 @@ To exercise error inspection and recovery locally without an external service:
 pwsh ./examples/error-recovery/Setup-Example.ps1
 pwsh ./examples/error-recovery/example.ps1
 ```
+
+> [!NOTE]
+> The module manifest requires `Rnwood.Dataverse.Data.PowerShell` 3.3.0 or later even for offline examples. Install it with `Install-Module Rnwood.Dataverse.Data.PowerShell -MinimumVersion 3.3.0 -Scope CurrentUser` if you have not already.
 
 The recovery example pauses after each expected failure so you can inspect it in the dashboard before applying the demonstrated cmdlet action.
 
@@ -181,4 +194,8 @@ Open the printed `http://127.0.0.1:5180` URL while a migration runs. See the [da
 
 ## For contributors
 
-The C# implementation is an internal detail, not a supported public C# API. Build instructions, scheduler internals, and architecture material are kept in the [developer documentation](./docs/dev/README.md).
+The C# implementation is an internal detail, not a supported public C# API. Build instructions, scheduler internals, and architecture material are kept in the [developer documentation](./docs/dev/README.md). Release automation and package publishing are documented in the [releasing guide](./docs/dev/releasing.md).
+
+## License
+
+MIT. See [LICENSE](./LICENSE).

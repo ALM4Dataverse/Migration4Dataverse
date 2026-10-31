@@ -1,9 +1,17 @@
 Set-StrictMode -Version Latest
 
-$engineAssemblyPath = [System.IO.Path]::GetFullPath(
+$packagedEngineAssemblyPath = [System.IO.Path]::GetFullPath(
+    (Join-Path $PSScriptRoot 'lib/net10.0/Migration4Dataverse.Engine.dll'))
+$developmentEngineAssemblyPath = [System.IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot '../Migration4Dataverse.Engine/bin/Release/net10.0/Migration4Dataverse.Engine.dll'))
-if (-not (Test-Path -LiteralPath $engineAssemblyPath -PathType Leaf)) {
-    throw "Migration4Dataverse.Engine.dll was not found at '$engineAssemblyPath'. Build the engine in Release configuration first."
+$engineAssemblyPath = if (Test-Path -LiteralPath $packagedEngineAssemblyPath -PathType Leaf) {
+    $packagedEngineAssemblyPath
+}
+elseif (Test-Path -LiteralPath $developmentEngineAssemblyPath -PathType Leaf) {
+    $developmentEngineAssemblyPath
+}
+else {
+    throw "Migration4Dataverse.Engine.dll was not found at '$packagedEngineAssemblyPath' or '$developmentEngineAssemblyPath'. Run build/Stage-MigrationModule.ps1 or build the engine in Release configuration first."
 }
 
 [void][System.Reflection.Assembly]::LoadFrom($engineAssemblyPath)

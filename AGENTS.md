@@ -6,7 +6,7 @@
 - Keep public reference pages focused on the PowerShell contract: supported migration steps, connectors and options, custom callback contracts, and migration-graph transformation semantics.
 - For Dataverse, document Migration4Dataverse-specific adapter behavior and constraints. Link to the relevant upstream `Rnwood.Dataverse.Data.PowerShell` cmdlet and concept pages on GitHub for complete command options, authentication, connections, querying, and writes; do not reproduce their full option catalogs except where needed to explain an adapter difference or safety concern.
 - Use GitHub callouts (`[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]`) for meaningful guidance and risks; avoid using them as decoration.
-- Keep quick-start prerequisites accurate. Building the repository requires PowerShell 7.6+, the .NET 10 SDK, and Node.js/npm for the embedded dashboard assets.
+- Keep quick-start prerequisites accurate. Building the repository requires PowerShell 7.6+, the .NET 10 SDK, and Node.js 24+ with npm 11+ for the embedded dashboard assets.
 
 ## Keep documentation in sync
 
@@ -16,3 +16,10 @@
 - Update `docs/reference.md` when a supported PowerShell job shape, connector option, callback contract, or transformation behavior changes. Keep internal C# behavior in the developer guides.
 - When documentation structure or audience boundaries change, keep `docs/README.md` and `docs/dev/README.md` aligned with the available guides.
 - Check relative Markdown links and heading anchors when adding, moving, or renaming documentation. Keep the README's example and contributor links current.
+
+## Release and versioning
+
+- Squash-merged Conventional Commit PR titles drive semantic-release. Use `!` or a `BREAKING CHANGE` footer for major changes.
+- Do not hand-edit `ModuleVersion` for release numbering; `build/Stage-MigrationModule.ps1` injects the semantic-release version into the staged manifest.
+- Keep `docs/dev/releasing.md`, `.releaserc.json`, and `.github/workflows/release.yml` in sync when packaging or publishing behavior changes.
+- Run `build/Test-MigrationModulePackage.ps1` after changes to the module manifest, loader, packaging scripts, or release workflows.

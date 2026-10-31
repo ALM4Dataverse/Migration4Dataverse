@@ -60,13 +60,21 @@ The implementation also contains a separate named data-flow DAG with streaming A
 
 ## Build and test
 
-Building the engine also builds the embedded dashboard frontend, so install Node.js and npm as well as the .NET 10 SDK.
+Building the engine also builds the embedded dashboard frontend, so install Node.js 24+ and npm 11+ as well as the .NET 10 SDK. Vite writes generated assets to `web/Migration4Dataverse.Dashboard/dist`; do not commit them.
 
 Build and run the test suite with:
 
 ```powershell
 dotnet test Migration4Dataverse.slnx
 ```
+
+To stage and validate the distributable PowerShell Gallery package after a Release build:
+
+```powershell
+pwsh ./build/Test-MigrationModulePackage.ps1 -Version 0.0.0 -SkipBuild
+```
+
+See the [releasing guide](./releasing.md) for package layout, Gallery publishing, and semantic-release details.
 
 The tests cover JSONL/CSV/Parquet/Excel/SQLite/DuckDB/SQL Server/PostgreSQL/MySQL/Oracle/custom connectors, object-storage option and connection handling, MongoDB options and replay markers, HTTP/OData pagination, Salesforce REST and Bulk API reads, SharePoint/HubSpot/Zendesk/ServiceNow paging and flattening, per-row database transforms, SQLite parameterized/read-only source queries, per-batch and whole-dataset SQL, schema/index validation and keyed upserts, Dataverse source query modes through mocked PowerShell cmdlets, custom-module imports in runspaces, streaming transformation nodes and sort spill cleanup, typed PowerShell handlers and cancellation, SQLite schema migration, and scheduler concurrency, dependency priority/gating, retries, and recovery paths. They do not replace end-to-end tests against live SQL, object-storage, MongoDB, HTTP, Salesforce, SharePoint, HubSpot, Zendesk, ServiceNow, or non-production Dataverse services.
 

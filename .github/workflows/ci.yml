@@ -12,7 +12,7 @@ jobs:
   test:
     name: .NET tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -22,5 +22,36 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/Migration4Dataverse.Dashboard/package-lock.json
+
+      - name: Install release tooling
+        run: npm ci
+
+      - name: Restore .NET dependencies
+        run: dotnet restore Migration4Dataverse.slnx --locked-mode
+
       - name: Run solution tests
-        run: dotnet test Migration4Dataverse.slnx --configuration Release
+        run: dotnet test Migration4Dataverse.slnx --configuration Release --no-restore
+
+      - name: Cache PowerShell modules
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/powershell/Modules
+          key: psmodules-${{ runner.os }}-psresourceget-1.2.0-rnwood-3.3.0
+
+      - name: Install PowerShell modules
+        shell: pwsh
+        run: |
+          Install-Module Microsoft.PowerShell.PSResourceGet -MinimumVersion 1.2.0 -Force -AllowClobber -Scope CurrentUser
+          Install-Module Rnwood.Dataverse.Data.PowerShell -RequiredVersion 3.3.0 -Force -Scope CurrentUser
+
+      - name: Validate PowerShell module package
+        shell: pwsh
+        run: ./build/Test-MigrationModulePackage.ps1 -Version 0.0.0 -SkipBuild

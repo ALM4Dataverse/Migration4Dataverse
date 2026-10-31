@@ -1,0 +1,28 @@
+{
+  "branches": [
+    "main"
+  ],
+  "tagFormat": "v${version}",
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    [
+      "@semantic-release/exec",
+      {
+        "publishCmd": "pwsh -NoProfile -File ./build/Publish-MigrationModule.ps1 -Version ${nextRelease.version}",
+        "successCmd": "pwsh -NoProfile -File ./build/Update-GitHubReleaseNotes.ps1 -Version ${nextRelease.version} -Tag ${nextRelease.gitTag}"
+      }
+    ],
+    [
+      "@semantic-release/github",
+      {
+        "assets": [
+          {
+            "path": "artifacts/packages/*.nupkg"
+          }
+        ],
+        "successComment": false
+      }
+    ]
+  ]
+}

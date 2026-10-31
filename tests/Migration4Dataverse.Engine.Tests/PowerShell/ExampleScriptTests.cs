@@ -8,8 +8,12 @@ public sealed class ExampleScriptTests
     [InlineData("examples/dataverse/Setup-Example.ps1")]
     [InlineData("examples/dataverse/example.ps1")]
     [InlineData("examples/dataverse/example-sequential.ps1")]
-    [InlineData("src/Migration4Dataverse.PowerShell/Migration4Dataverse.PowerShell.psm1")]
-    [InlineData("src/Migration4Dataverse.PowerShell/Migration4Dataverse.PowerShell.psd1")]
+    [InlineData("src/Migration4Dataverse/Migration4Dataverse.psm1")]
+    [InlineData("src/Migration4Dataverse/Migration4Dataverse.psd1")]
+    [InlineData("build/Stage-MigrationModule.ps1")]
+    [InlineData("build/Test-MigrationModulePackage.ps1")]
+    [InlineData("build/Publish-MigrationModule.ps1")]
+    [InlineData("build/Update-GitHubReleaseNotes.ps1")]
     public void PowerShellFilesHaveNoParseErrorsOrScriptParameters(string relativePath)
     {
         var repositoryRoot = FindRepositoryRoot();
@@ -23,6 +27,22 @@ public sealed class ExampleScriptTests
         {
             Assert.Null(syntax.ParamBlock);
         }
+    }
+
+    [Fact]
+    public void ModuleManifestDeclaresGalleryMetadataAndDependencies()
+    {
+        var manifestPath = Path.Combine(
+            FindRepositoryRoot(),
+            "src/Migration4Dataverse/Migration4Dataverse.psd1");
+        var manifest = File.ReadAllText(manifestPath);
+
+        Assert.Contains("RootModule = 'Migration4Dataverse.psm1'", manifest, StringComparison.Ordinal);
+        Assert.Contains("ModuleName = 'Rnwood.Dataverse.Data.PowerShell'", manifest, StringComparison.Ordinal);
+        Assert.Contains("ModuleVersion = '3.3.0'", manifest, StringComparison.Ordinal);
+        Assert.Contains("ProjectUri = 'https://github.com/rnwood/Migration4Dataverse'", manifest, StringComparison.Ordinal);
+        Assert.Contains("LicenseUri = 'https://github.com/rnwood/Migration4Dataverse/blob/main/LICENSE'", manifest, StringComparison.Ordinal);
+        Assert.Contains("ReleaseNotes = 'https://github.com/rnwood/Migration4Dataverse/releases'", manifest, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -88,7 +108,7 @@ public sealed class ExampleScriptTests
         Assert.False(File.Exists(Path.Combine(examplesDirectory, "example.ps1")));
         Assert.False(File.Exists(Path.Combine(
             FindRepositoryRoot(),
-            "src/Migration4Dataverse.PowerShell/Public/Invoke-DataverseMigration.ps1")));
+            "src/Migration4Dataverse/Public/Invoke-DataverseMigration.ps1")));
     }
 
     private static string FindRepositoryRoot()

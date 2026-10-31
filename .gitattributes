@@ -1,0 +1,16 @@
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.sqlite binary
+*.sqlite3 binary
+*.db binary
+*.parquet binary
+*.dll binary
+*.nupkg binary
+*.zip binary
+*.gz binary

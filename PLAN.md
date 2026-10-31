@@ -4,7 +4,7 @@
 
 ## Remaining short-term work
 
-- Prepare for distribution on the PowerShell Gallery, including required connector module versions.
+- Complete the one-time `v0.1.0` PowerShell Gallery bootstrap release and verify installation in a clean PowerShell 7.6 environment.
 
 ## Goal
 

@@ -4,7 +4,7 @@ Choose the section that matches what you are doing. The PowerShell guides descri
 
 ## PowerShell users
 
-Start with the [repository README](../README.md) to build the module and run an example.
+Start with the [repository README](../README.md) to install the module or build it from a source checkout, then run an example.
 
 ### Define a migration
 
@@ -40,6 +40,7 @@ The C# engine is an internal implementation, not a supported public C# API. Thes
 
 - [Developer documentation](./dev/README.md) — entry point for implementation material.
 - [Engine overview](./dev/engine-overview.md) — internal scheduler, development, and test workflow.
+- [Releasing](./dev/releasing.md) — module packaging, PowerShell Gallery publishing, and semantic-release workflow.
 - [Architecture](./dev/architecture.md) — persistence, scheduling, recovery, and component boundaries.
 - [Internal data-flow transformations](./dev/transformations/README.md) — the separate engine transformation pipeline, not `Invoke-Migration` step types.
 - [Feature plan](../PLAN.md) — implementation status and remaining work.

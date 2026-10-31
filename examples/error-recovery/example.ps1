@@ -15,7 +15,7 @@ if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
 }
 
 $null = [System.IO.Directory]::CreateDirectory($outputDirectory)
-$moduleManifest = Join-Path $repositoryRoot 'src/Migration4Dataverse.PowerShell/Migration4Dataverse.PowerShell.psd1'
+$moduleManifest = Join-Path $repositoryRoot 'src/Migration4Dataverse/Migration4Dataverse.psd1'
 Import-Module -Name $moduleManifest -Force -ErrorAction Stop
 $connections = @{
     files = [System.IO.DirectoryInfo]$dataDirectory

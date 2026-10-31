@@ -30,7 +30,7 @@ foreach ($fileName in $requiredFiles) {
     }
 }
 
-$moduleManifest = Join-Path $repositoryRoot 'src/Migration4Dataverse.PowerShell/Migration4Dataverse.PowerShell.psd1'
+$moduleManifest = Join-Path $repositoryRoot 'src/Migration4Dataverse/Migration4Dataverse.psd1'
 Import-Module -Name $moduleManifest -Force -ErrorAction Stop
 $connections = @{
     'example-files' = [System.IO.DirectoryInfo]::new($dataDirectory)
