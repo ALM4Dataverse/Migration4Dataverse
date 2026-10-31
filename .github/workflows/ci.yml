@@ -55,3 +55,7 @@ jobs:
       - name: Validate PowerShell module package
         shell: pwsh
         run: ./build/Test-MigrationModulePackage.ps1 -Version 0.0.0 -SkipBuild
+
+      - name: Publish and smoke-test Linux CLI package
+        shell: pwsh
+        run: ./build/Publish-MigrationCli.ps1 -Version 0.0.0 -RuntimeIdentifiers linux-x64 -SkipBuild

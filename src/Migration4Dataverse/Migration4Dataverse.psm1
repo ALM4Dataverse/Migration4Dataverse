@@ -18,6 +18,16 @@ else {
 Import-Module -Name $engineAssemblyPath -Scope Local
 
 function New-M4dMigrationJobStore {
+<#
+.SYNOPSIS
+Opens a migration database store for advanced PowerShell integrations.
+
+.DESCRIPTION
+Initializes a file-backed SQLite migration store. Ordinary migrations should use Invoke-M4dMigration, which manages the store automatically.
+
+.PARAMETER DatabasePath
+Path to a file-backed SQLite migration database.
+#>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -29,6 +39,37 @@ function New-M4dMigrationJobStore {
 }
 
 function Complete-M4dMigrationBatch {
+<#
+.SYNOPSIS
+Completes a leased batch through the lower-level migration store interface.
+
+.DESCRIPTION
+Records batch outcomes and optional dependency output. The scheduler normally performs batch completion itself.
+
+.PARAMETER Store
+Store object returned by New-M4dMigrationJobStore.
+
+.PARAMETER BatchId
+ID of the batch being completed.
+
+.PARAMETER WorkerId
+Worker that owns the batch lease.
+
+.PARAMETER OutcomesJson
+JSON object containing the batch outcomes.
+
+.PARAMETER HasErrors
+Marks the completion as containing row errors.
+
+.PARAMETER ChildTable
+Child job or table name for one dependency output. Supply together with ChildPayloadJson.
+
+.PARAMETER ChildPayloadJson
+JSON payload for the child work. Supply together with ChildTable.
+
+.PARAMETER LastError
+Optional final error text stored with the batch.
+#>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -70,6 +111,22 @@ function Complete-M4dMigrationBatch {
 }
 
 function Set-M4dMigrationRunStatus {
+<#
+.SYNOPSIS
+Sets a run status through the lower-level migration store interface.
+
+.DESCRIPTION
+Updates the status of a migration run. Invoke-M4dMigration manages status transitions when running a migration.
+
+.PARAMETER Store
+Store object returned by New-M4dMigrationJobStore.
+
+.PARAMETER RunId
+ID of the run to update.
+
+.PARAMETER Status
+New MigrationRunStatus value: Running, Completed, Failed, or Cancelled.
+#>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -89,6 +146,25 @@ function Set-M4dMigrationRunStatus {
 }
 
 function Start-M4dMigrationDashboard {
+<#
+.SYNOPSIS
+Starts the local Migration4Dataverse dashboard.
+
+.DESCRIPTION
+Starts the engine-hosted dashboard for persisted run history, configuration previews, and captured migration data. The dashboard does not start or resume migrations.
+
+.PARAMETER DatabasePath
+File-backed SQLite migration database whose stored runs are displayed.
+
+.PARAMETER Steps
+Step definitions to preview, using the same objects as Invoke-M4dMigration.
+
+.PARAMETER Connections
+Connection map used with Steps. Cannot be supplied without steps.
+
+.PARAMETER Url
+HTTP loopback address and port for the dashboard. Non-loopback URLs are rejected.
+#>
     [CmdletBinding()]
     param(
         [string]$DatabasePath,
@@ -122,6 +198,16 @@ function Start-M4dMigrationDashboard {
 }
 
 function Stop-M4dMigrationDashboard {
+<#
+.SYNOPSIS
+Stops and disposes a dashboard server handle.
+
+.DESCRIPTION
+Stops the dashboard represented by the supplied handle. A handle is local to the PowerShell process that started it.
+
+.PARAMETER Dashboard
+Dashboard handle returned by Start-M4dMigrationDashboard.
+#>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory, ValueFromPipeline)]

@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>m4d</AssemblyName>
+    <RootNamespace>Migration4Dataverse.Cli</RootNamespace>
+    <Version Condition="'$(Version)' == ''">0.1.0</Version>
+    <RuntimeIdentifiers>win-x64;win-arm64;linux-x64;linux-arm64;osx-arm64</RuntimeIdentifiers>
+    <RuntimeFrameworkVersion>10.0.13</RuntimeFrameworkVersion>
+    <DisableImplicitLibraryPacksFolder>true</DisableImplicitLibraryPacksFolder>
+    <DataversePowerShellModuleVersion>3.3.0</DataversePowerShellModuleVersion>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishSingleFile>true</PublishSingleFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" />
+    <ProjectReference Include="..\Migration4Dataverse.Engine\Migration4Dataverse.Engine.csproj">
+      <GlobalPropertiesToRemove>Version</GlobalPropertiesToRemove>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(CliModulesDirectory)' != '' and Exists('$(CliModulesDirectory)')">
+    <Content Include="$(CliModulesDirectory)/**/*">
+      <Link>modules/%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Migration4Dataverse.Cli.Tests" />
+    <AssemblyMetadata Include="Migration4DataverseModuleVersion" Value="$(Version)" />
+    <AssemblyMetadata Include="DataversePowerShellModuleVersion" Value="$(DataversePowerShellModuleVersion)" />
+  </ItemGroup>
+
+</Project>

@@ -1,8 +1,10 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/Migration4Dataverse.Engine/Migration4Dataverse.Engine.csproj" />
+    <Project Path="src/Migration4Dataverse.Cli/Migration4Dataverse.Cli.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Migration4Dataverse.Engine.Tests/Migration4Dataverse.Engine.Tests.csproj" />
+    <Project Path="tests/Migration4Dataverse.Cli.Tests/Migration4Dataverse.Cli.Tests.csproj" />
   </Folder>
 </Solution>

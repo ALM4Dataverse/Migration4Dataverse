@@ -24,6 +24,7 @@ Start with the [repository README](../README.md) to install the module or build 
 
 ### Run and monitor
 
+- [Standalone CLI](./cli.md) — bundled runtimes, commands, options, output, and exit codes.
 - [Cmdlets and functions](./cmdlets/README.md) — command index.
 - [Invoke-M4dMigration](./cmdlets/invoke-migration.md) — run, resume, preview, and debug capture.
 - [Migration dashboard](./cmdlets/migration-dashboard.md) — local monitoring and row inspection.

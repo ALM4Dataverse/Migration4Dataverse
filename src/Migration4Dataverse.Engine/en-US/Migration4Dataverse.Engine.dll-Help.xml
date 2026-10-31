@@ -1,0 +1,255 @@
+<?xml version="1.0" encoding="utf-8"?>
+<helpItems schema="maml" xmlns="http://msh">
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>Clear-M4dMigrationTargetTuning</command:name>
+      <command:verb>Clear</command:verb>
+      <command:noun>M4dMigrationTargetTuning</command:noun>
+      <maml:description><maml:para>Removes legacy Dataverse tuning profiles from a migration SQLite database.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>Current migrations no longer read or write legacy target tuning profiles. Use this cmdlet to remove profiles created by older versions.</maml:para></maml:description>
+    <command:parameters>
+      <command:parameter><maml:name>DatabasePath</maml:name><maml:description><maml:para>Existing migration SQLite database. A missing file is left untouched.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>StepId</maml:name><maml:description><maml:para>Clear the legacy profile for this exact step ID. Use either StepId or All.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>All</maml:name><maml:description><maml:para>Clear every legacy Dataverse target tuning profile in the database. Use either All or StepId.</maml:para></maml:description></command:parameter>
+    </command:parameters>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>Get-M4dMigrationBatch</command:name>
+      <command:verb>Get</command:verb>
+      <command:noun>M4dMigrationBatch</command:noun>
+      <maml:description><maml:para>Lists recent batches for a migration run and step.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>Returns persisted batch state, outcomes, and timing for the selected run and step.</maml:para></maml:description>
+    <command:parameters>
+      <command:parameter><maml:name>DatabasePath</maml:name><maml:description><maml:para>SQLite migration database containing the run.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>RunId</maml:name><maml:description><maml:para>ID of the migration run to inspect.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>StepId</maml:name><maml:description><maml:para>ID of the step whose batches are listed.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Limit</maml:name><maml:description><maml:para>Maximum number of recent batches to return.</maml:para></maml:description></command:parameter>
+    </command:parameters>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>Get-M4dMigrationConfigurationPreview</command:name>
+      <command:verb>Get</command:verb>
+      <command:noun>M4dMigrationConfigurationPreview</command:noun>
+      <maml:description><maml:para>Creates a sanitized preview of migration steps and connections.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>Returns the configuration preview used by the migration dashboard without executing the migration or connecting to endpoints.</maml:para></maml:description>
+    <command:parameters>
+      <command:parameter><maml:name>Steps</maml:name><maml:description><maml:para>Migration step definitions to include in the preview.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Connections</maml:name><maml:description><maml:para>Connection map associated with the step definitions.</maml:para></maml:description></command:parameter>
+    </command:parameters>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>Get-M4dMigrationDataverseConnectionThroughput</command:name>
+      <command:verb>Get</command:verb>
+      <command:noun>M4dMigrationDataverseConnectionThroughput</command:noun>
+      <maml:description><maml:para>Samples live Dataverse connection-pool throughput for a migration run.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>Returns current Dataverse pool counters from the process that owns the active connection pools. These counters are not retained as run history.</maml:para></maml:description>
+    <command:parameters>
+      <command:parameter><maml:name>DatabasePath</maml:name><maml:description><maml:para>SQLite migration database containing the run.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>RunId</maml:name><maml:description><maml:para>ID of the migration run whose active pools are sampled.</maml:para></maml:description></command:parameter>
+    </command:parameters>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>Get-M4dMigrationDebugRow</command:name>
+      <command:verb>Get</command:verb>
+      <command:noun>M4dMigrationDebugRow</command:noun>
+      <maml:description><maml:para>Reads captured input and output rows from a debug-enabled migration run.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>Searches, filters, sorts, or traces retained row snapshots. Debug capture must have been enabled for the run.</maml:para></maml:description>
+    <command:parameters>
+      <command:parameter><maml:name>DatabasePath</maml:name><maml:description><maml:para>SQLite migration database containing the run.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>RunId</maml:name><maml:description><maml:para>ID of the migration run to inspect.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>StepId</maml:name><maml:description><maml:para>Limit snapshots to this pipeline step.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>BatchId</maml:name><maml:description><maml:para>Limit snapshots to this batch.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Trace</maml:name><maml:description><maml:para>Trace a lineage ID across captured steps.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>LineageId</maml:name><maml:description><maml:para>Lineage identifier to select or trace.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>StageName</maml:name><maml:description><maml:para>Filter snapshots to this exact captured stage.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Search</maml:name><maml:description><maml:para>Search captured row values for this text.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Limit</maml:name><maml:description><maml:para>Maximum number of snapshots to return.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Offset</maml:name><maml:description><maml:para>Number of matching snapshots to skip before returning results.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>ColumnFilters</maml:name><maml:description><maml:para>Column filters to apply to captured row values.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>SortColumn</maml:name><maml:description><maml:para>Column used to order the matching snapshots.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>SortDirection</maml:name><maml:description><maml:para>Ascending or descending order for the selected sort column.</maml:para></maml:description></command:parameter>
+    </command:parameters>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>Get-M4dMigrationDebugRowBinary</command:name>
+      <command:verb>Get</command:verb>
+      <command:noun>M4dMigrationDebugRowBinary</command:noun>
+      <maml:description><maml:para>Resolves a captured binary property from a migration debug snapshot.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>Returns a MigrationBinaryValue for the selected captured row property. Use its OpenRead method to stream the staged bytes.</maml:para></maml:description>
+    <command:parameters>
+      <command:parameter><maml:name>DatabasePath</maml:name><maml:description><maml:para>SQLite migration database containing the snapshot.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>RunId</maml:name><maml:description><maml:para>ID of the migration run containing the snapshot.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>StepId</maml:name><maml:description><maml:para>ID of the pipeline step that captured the row.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>BatchId</maml:name><maml:description><maml:para>ID of the batch that captured the row.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>RecordIndex</maml:name><maml:description><maml:para>Zero-based record index in the captured batch.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>PropertyName</maml:name><maml:description><maml:para>Name of the captured binary property to resolve.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Attempt</maml:name><maml:description><maml:para>Batch attempt number containing the snapshot.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>CapturedUtc</maml:name><maml:description><maml:para>UTC capture timestamp used to select the snapshot.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>StageName</maml:name><maml:description><maml:para>Name of the captured stage containing the property.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>LineageId</maml:name><maml:description><maml:para>Lineage identifier of the captured row.</maml:para></maml:description></command:parameter>
+    </command:parameters>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>Get-M4dMigrationError</command:name>
+      <command:verb>Get</command:verb>
+      <command:noun>M4dMigrationError</command:noun>
+      <maml:description><maml:para>Lists run-level failures and failed batches for a migration run.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>Returns recorded error details, including batch outcomes and any exactly attributed input-row errors and payloads.</maml:para></maml:description>
+    <command:parameters>
+      <command:parameter><maml:name>DatabasePath</maml:name><maml:description><maml:para>SQLite migration database containing the run.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>RunId</maml:name><maml:description><maml:para>ID of the migration run to inspect.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>StepId</maml:name><maml:description><maml:para>Limit batch errors to this pipeline step.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Limit</maml:name><maml:description><maml:para>Maximum number of batch errors to return per selected step.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Offset</maml:name><maml:description><maml:para>Number of batch errors to skip when paging results.</maml:para></maml:description></command:parameter>
+    </command:parameters>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>Get-M4dMigrationProcessMetric</command:name>
+      <command:verb>Get</command:verb>
+      <command:noun>M4dMigrationProcessMetric</command:noun>
+      <maml:description><maml:para>Samples metrics for the current PowerShell process.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>Returns process CPU time, working set, managed heap, logical processor count, and available runtime memory-budget information.</maml:para></maml:description>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>Get-M4dMigrationRetryHistory</command:name>
+      <command:verb>Get</command:verb>
+      <command:noun>M4dMigrationRetryHistory</command:noun>
+      <maml:description><maml:para>Lists prior batch attempts retained when failed batches were queued for replay.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>Returns retry history for a migration run, including prior attempts, error text, outcomes, and queue time.</maml:para></maml:description>
+    <command:parameters>
+      <command:parameter><maml:name>DatabasePath</maml:name><maml:description><maml:para>SQLite migration database containing the run.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>RunId</maml:name><maml:description><maml:para>ID of the migration run to inspect.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Limit</maml:name><maml:description><maml:para>Maximum number of retry-history entries to return.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Offset</maml:name><maml:description><maml:para>Number of retry-history entries to skip when paging results.</maml:para></maml:description></command:parameter>
+    </command:parameters>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>Get-M4dMigrationRun</command:name>
+      <command:verb>Get</command:verb>
+      <command:noun>M4dMigrationRun</command:noun>
+      <maml:description><maml:para>Lists persisted migration runs or returns one run with its status and configuration snapshot.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>Returns migration run summaries, including step state, progress, safe configuration, and connection instance snapshots when available.</maml:para></maml:description>
+    <command:parameters>
+      <command:parameter><maml:name>DatabasePath</maml:name><maml:description><maml:para>SQLite job store used by Invoke-M4dMigration and the dashboard.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>RunId</maml:name><maml:description><maml:para>Return one run by its stable run ID.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Limit</maml:name><maml:description><maml:para>Maximum number of runs when listing history. Ignored when RunId is supplied.</maml:para></maml:description></command:parameter>
+    </command:parameters>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>Get-M4dMigrationStep</command:name>
+      <command:verb>Get</command:verb>
+      <command:noun>M4dMigrationStep</command:noun>
+      <maml:description><maml:para>Returns the persisted state and progress for one migration step.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>Reads one step from a migration run, including its type, status, row counts, and scheduler details.</maml:para></maml:description>
+    <command:parameters>
+      <command:parameter><maml:name>DatabasePath</maml:name><maml:description><maml:para>SQLite migration database containing the run.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>RunId</maml:name><maml:description><maml:para>ID of the migration run to inspect.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>StepId</maml:name><maml:description><maml:para>ID of the step to return.</maml:para></maml:description></command:parameter>
+    </command:parameters>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>Invoke-M4dMigration</command:name>
+      <command:verb>Invoke</command:verb>
+      <command:noun>M4dMigration</command:noun>
+      <maml:description><maml:para>Runs a PowerShell-defined migration graph.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>Executes a migration graph with durable SQLite-backed progress, bounded scheduling, retry handling, and optional debug capture.</maml:para></maml:description>
+    <command:parameters>
+      <command:parameter><maml:name>DatabasePath</maml:name><maml:description><maml:para>Path to the file-backed SQLite migration store. Its parent directory is created if needed.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>RunName</maml:name><maml:description><maml:para>Human-readable run name. A reused run ID must keep the same name.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>RunId</maml:name><maml:description><maml:para>Stable run identity. Supply the same ID to resume a compatible run.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>StepHash</maml:name><maml:description><maml:para>Resume-compatibility identity. By default, the engine generates a hash from migration definitions and dependencies.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Steps</maml:name><maml:description><maml:para>One or more PowerShell objects that define the migration graph.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Connections</maml:name><maml:description><maml:para>Map of connection IDs to live objects. The caller retains ownership of each object.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>MaxDegreeOfParallelism</maml:name><maml:description><maml:para>Global worker limit. Higher values use more workers and can increase resource use.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>MaxQueuedBatches</maml:name><maml:description><maml:para>Maximum queued and in-flight work; applies backpressure to source readers.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>MaxQueuedBatchesPerStep</maml:name><maml:description><maml:para>Per-step bound on queued dependency work and producer reservations.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>MaxAttempts</maml:name><maml:description><maml:para>Maximum handler attempts before a batch fails.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>MaxErrorRatePercent</maml:name><maml:description><maml:para>Maximum cumulative failed-row percentage allowed per step. Zero keeps row errors fatal.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>SourceReadMaxAttempts</maml:name><maml:description><maml:para>Maximum attempts to enumerate a source feeder.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>SourceReadRetryDelaySeconds</maml:name><maml:description><maml:para>Initial source-reader retry delay; later delays back off exponentially.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>DataverseNoRetryDiagnosticMode</maml:name><maml:description><maml:para>Disables Dataverse connection, cmdlet, source-reader, and batch-handler retries for diagnostic runs.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>ModulesToImport</maml:name><maml:description><maml:para>Module names or paths imported into pooled runspaces.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>RequiredModules</maml:name><maml:description><maml:para>Module requirements, optionally pinned by version or GUID. Missing requirements fail before scheduling.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>ScriptsToLoad</maml:name><maml:description><maml:para>Shared helper script paths loaded into pooled runspaces.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>SharedScripts</maml:name><maml:description><maml:para>Inline helper definitions loaded into PowerShell-backed invocations.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>BatchSize</maml:name><maml:description><maml:para>Default batch size for steps and non-Dataverse targets.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>EnableDebugCapture</maml:name><maml:description><maml:para>Opt in to row snapshots, callback stages, and batch outcomes stored in SQLite.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>DebugCaptureRetentionDays</maml:name><maml:description><maml:para>Retention period for debug snapshots. Basic run and batch metadata is not removed.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>WhatIf</maml:name><maml:description><maml:para>Run readers and transforms, capture planned target rows, and skip target writes and callback batch handlers.</maml:para></maml:description></command:parameter>
+    </command:parameters>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>Invoke-M4dMigrationRecovery</command:name>
+      <command:verb>Invoke</command:verb>
+      <command:noun>M4dMigrationRecovery</command:noun>
+      <maml:description><maml:para>Queues a persisted recovery decision for a failed or cancelled migration run.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>This cmdlet queues failed batches for replay, retries an exactly attributed row, or approves continuing downstream from a failed step. It does not execute a migration.</maml:para></maml:description>
+    <command:parameters>
+      <command:parameter><maml:name>DatabasePath</maml:name><maml:description><maml:para>SQLite migration database containing the run.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>RunId</maml:name><maml:description><maml:para>ID of the failed or cancelled run to update.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>StepId</maml:name><maml:description><maml:para>Step associated with the row retry or continuation decision.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>BatchId</maml:name><maml:description><maml:para>Failed batch associated with an exactly attributed row retry.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>RecordIndex</maml:name><maml:description><maml:para>Zero-based input row index to retry.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>PayloadJson</maml:name><maml:description><maml:para>JSON object containing the edited input row to queue for retry.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>RetryFailedBatches</maml:name><maml:description><maml:para>Queue every terminal failed batch for replay.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>ContinueAfterFailure</maml:name><maml:description><maml:para>Approve continuing downstream from the selected failed step without retrying it.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>WhatIf</maml:name><maml:description><maml:para>Show the recovery decision without persisting it.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Confirm</maml:name><maml:description><maml:para>Prompt for confirmation before persisting the recovery decision.</maml:para></maml:description></command:parameter>
+    </command:parameters>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>New-M4dMigrationBinaryValue</command:name>
+      <command:verb>New</command:verb>
+      <command:noun>M4dMigrationBinaryValue</command:noun>
+      <maml:description><maml:para>Creates a file-backed binary value for a migration callback or mapping.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>Stages binary data outside the migration database and stores only a small versioned reference in migration batches. FilePath and InputStream are copied using streams.</maml:para></maml:description>
+    <command:parameters>
+      <command:parameter><maml:name>FilePath</maml:name><maml:description><maml:para>Path to a file whose content is copied to staging.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>InputStream</maml:name><maml:description><maml:para>Readable stream whose content is copied to staging.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Bytes</maml:name><maml:description><maml:para>Byte array to write to staging.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Base64</maml:name><maml:description><maml:para>Base64-encoded content to decode and write to staging.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>StagingRoot</maml:name><maml:description><maml:para>Directory where the staged binary content is stored.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>FileName</maml:name><maml:description><maml:para>Optional file name metadata for the binary value.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>ContentType</maml:name><maml:description><maml:para>Optional media type metadata for the binary value.</maml:para></maml:description></command:parameter>
+    </command:parameters>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
+      <command:name>Start-M4dMigrationDatabaseServer</command:name>
+      <command:verb>Start</command:verb>
+      <command:noun>M4dMigrationDatabaseServer</command:noun>
+      <maml:description><maml:para>Starts the local owner for a file-backed migration database.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>Keeps the PowerShell process alive as the single-process owner for SQLite access while other module processes use local IPC.</maml:para></maml:description>
+    <command:parameters>
+      <command:parameter><maml:name>DatabasePath</maml:name><maml:description><maml:para>Path to the file-backed SQLite migration database to own.</maml:para></maml:description></command:parameter>
+    </command:parameters>
+  </command:command>
+</helpItems>

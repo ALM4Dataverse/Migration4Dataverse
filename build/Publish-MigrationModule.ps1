@@ -18,6 +18,9 @@ if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
     throw "The package '$packagePath' was not created."
 }
 
+$cliPublishScriptPath = Join-Path $PSScriptRoot 'Publish-MigrationCli.ps1'
+$null = & $cliPublishScriptPath -Version $Version -SkipBuild
+
 Publish-PSResource `
     -NupkgPath $packagePath `
     -Repository 'PSGallery' `

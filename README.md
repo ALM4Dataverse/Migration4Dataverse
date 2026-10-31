@@ -42,6 +42,19 @@ Install-Module Migration4Dataverse -Scope CurrentUser
 
 The Gallery package requires PowerShell 7.6 or later and installs the required `Rnwood.Dataverse.Data.PowerShell` connector (3.3.0 or later) as a dependency.
 
+## Standalone CLI
+
+Releases also provide a single-file CLI for Windows x64/ARM64, Linux x64/ARM64, and macOS ARM64. It bundles pinned .NET 10, PowerShell 7.6.7, and Dataverse PowerShell 3.3.0; no runtime or module installation is needed, and the executable can run offline after download.
+Release assets have platform-specific filenames; rename the downloaded executable to `m4d` or use its full path in the examples below.
+
+```sh
+m4d --help
+m4d run --script ./migration-job.ps1 --database-path ./migration.sqlite3
+m4d get-run --database-path ./migration.sqlite3 --run-id <run-id> --json
+```
+
+See the [standalone CLI guide](./docs/cli.md) for script modes, commands, JSON events, and exit codes.
+
 ## Quick start
 
 The repository examples run from a source checkout. Building from source requires PowerShell 7.6 or later, the .NET 10 SDK, and Node.js 24 or later with npm 11 or later to build the dashboard assets. Build the module, install the Dataverse connector module, and run the Dataverse example from the repository root:

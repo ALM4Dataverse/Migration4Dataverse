@@ -9,7 +9,7 @@ Migration4Dataverse is published to the PowerShell Gallery and GitHub Releases. 
 - `feat:` creates a minor release.
 - `!` in the title or a `BREAKING CHANGE` footer creates a major release.
 - `docs:`, `test:`, `build:`, `ci:`, `chore:`, `refactor:`, and `revert:` do not create a release by themselves.
-- semantic-release tags the repository, publishes to the PowerShell Gallery, creates a GitHub Release, uploads the nupkg, and appends the version-specific installation command.
+- semantic-release tags the repository, publishes to the PowerShell Gallery, creates a GitHub Release, uploads the nupkg and standalone CLI executables, and appends the version-specific installation command.
 - There is no release pull request. Merging a release-worthy PR to `main` publishes immediately.
 
 The source manifest keeps a development version. `build/Stage-MigrationModule.ps1` injects the semantic-release version into the staged manifest. Do not hand-edit `ModuleVersion` for releases.
@@ -60,16 +60,18 @@ Configure these settings before the first automated release:
 
 1. Restores and builds the .NET solution with the locked dependency graph.
 2. Installs `Microsoft.PowerShell.PSResourceGet` and `Rnwood.Dataverse.Data.PowerShell`.
-3. Skips semantic-release until the `v0.1.0` baseline tag exists.
-4. Runs semantic-release from the root `package.json`.
+3. Installs the pinned Dataverse PowerShell module used in the CLI bundle.
+4. Skips semantic-release until the `v0.1.0` baseline tag exists.
+5. Runs semantic-release from the root `package.json`.
 
 `.releaserc.json` uses this plugin order:
 
 1. Analyze the commit and calculate the next version.
 2. Generate release notes.
-3. Stage, test, pack, and publish the module to the PowerShell Gallery.
-4. Create the GitHub Release and upload the nupkg.
-5. Append the exact installation command to the GitHub Release.
+3. Stage, test, and publish the self-contained CLI for all five supported runtime identifiers.
+4. Stage, test, pack, and publish the module to the PowerShell Gallery.
+5. Create the GitHub Release and upload the nupkg and CLI executables.
+6. Append the exact installation command to the GitHub Release.
 
 If Gallery publishing fails, the GitHub Release is not created. If GitHub release creation fails after publishing, do not republish the same version; retry only the GitHub release step.
 
@@ -86,6 +88,8 @@ The manifest requires `Rnwood.Dataverse.Data.PowerShell` 3.3.0 or later. `Instal
 
 `build/Test-MigrationModulePackage.ps1` creates the nupkg under `artifacts/packages`, verifies the expected module and native-library entries, rejects packages above 240 MB, and imports the staged module. The full package is currently about 460 MiB installed and roughly 169 MB compressed.
 
+`build/Publish-MigrationCli.ps1` stages the versioned Migration4Dataverse module alongside exactly `Rnwood.Dataverse.Data.PowerShell` 3.3.0, then publishes self-contained single-file executables with .NET 10.0.13 and PowerShell SDK 7.6.7 for `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, and `osx-arm64`. It runs `build/Test-MigrationCliPackage.ps1` against Linux x64, which checks the full command surface, parser errors, NDJSON output, and a local file-to-file migration. CLI binaries are written under `artifacts/cli/<version>/`.
+
 ## Local validation
 
 Run the normal test suite and package smoke test before merging packaging changes:
@@ -95,7 +99,10 @@ dotnet restore Migration4Dataverse.slnx --locked-mode
 dotnet build Migration4Dataverse.slnx --configuration Release --no-restore
 dotnet test Migration4Dataverse.slnx --configuration Release --no-build
 pwsh ./build/Test-MigrationModulePackage.ps1 -Version 0.0.0 -SkipBuild
+pwsh ./build/Publish-MigrationCli.ps1 -Version 0.0.0 -RuntimeIdentifiers linux-x64 -SkipBuild
 ```
+
+Publishing all five release assets requires network access to restore the RID-specific .NET runtime packs. Building a CLI requires PowerShell 7.6+ to stage the module and .NET 10 SDK; the produced executable does not require either on the target machine.
 
 To validate a clean Gallery installation after publishing:
 

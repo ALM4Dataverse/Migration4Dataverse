@@ -19,6 +19,9 @@
         "assets": [
           {
             "path": "artifacts/packages/*.nupkg"
+          },
+          {
+            "path": "artifacts/cli/*/Migration4Dataverse.Cli-*"
           }
         ],
         "successComment": false
