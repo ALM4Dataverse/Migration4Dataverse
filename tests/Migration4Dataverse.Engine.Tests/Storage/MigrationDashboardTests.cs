@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using Migration4Dataverse.Engine.Connectors;
 using Microsoft.Data.Sqlite;
 using Migration4Dataverse.Engine.Dashboard;
 using Migration4Dataverse.Engine.PowerShell;
@@ -98,6 +99,113 @@ public sealed class MigrationDashboardTests
         Assert.Equal(2, members.Length);
         Assert.Equal(2, members.Sum(member => member.GetProperty("totalRequests").GetInt64()));
         Assert.Equal(2, members.Sum(member => member.GetProperty("totalRequestUnits").GetInt64()));
+    }
+
+    [Fact]
+    public async Task DashboardStreamsCapturedBinaryArtifactAndReportsCleanedUpFiles()
+    {
+        using var database = new TemporaryDatabase();
+        var store = new SqliteMigrationStore(database.Path);
+        const string runId = "binary-dashboard-run";
+        const string batchId = "binary-dashboard-batch";
+        const string stepId = "Documents";
+        const string lineageId = "document-lineage";
+        const string stageName = "TargetWriteInput";
+        var capturedUtc = DateTimeOffset.UtcNow;
+        var bytes = new byte[] { 0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37 };
+        var stagingRoot = MigrationBinaryValue.GetRunStagingRoot(database.Path, runId);
+        var binaryValue = MigrationBinaryValue.FromBytes(
+            bytes,
+            stagingRoot,
+            "sample report.pdf",
+            "application/pdf");
+        var encodedBinaryValue = binaryValue.EncodeBase64();
+        var payload = MigrationBinaryValue.PrepareForTransport(
+            new Dictionary<string, object?>
+            {
+                ["Attachment"] = binaryValue,
+                ["EncodedAttachment"] = encodedBinaryValue
+            },
+            stagingRoot);
+        store.CreateRun(runId, "binary-dashboard-test", "hash", debugCaptureEnabled: true);
+        store.EnqueueBatch(runId, stepId, 0, batchId, null, "{}");
+        store.CaptureDebugSnapshots(
+        [
+            new MigrationDebugSnapshot(
+                runId,
+                batchId,
+                stepId,
+                stageName,
+                0,
+                1,
+                lineageId,
+                Array.Empty<string>(),
+                JsonSerializer.Serialize(payload),
+                capturedUtc)
+        ]);
+
+        var port = GetAvailablePort();
+        await using var dashboard = await MigrationDashboardServer.StartAsync(
+            database.Path,
+            $"http://127.0.0.1:{port}");
+        using var client = new HttpClient();
+        var query = new Dictionary<string, string>
+        {
+            ["stepId"] = stepId,
+            ["batchId"] = batchId,
+            ["stageName"] = stageName,
+            ["recordIndex"] = "0",
+            ["attempt"] = "1",
+            ["lineageId"] = lineageId,
+            ["capturedUtc"] = capturedUtc.ToString("O"),
+            ["property"] = "Attachment"
+        };
+        var queryString = string.Join("&", query.Select(pair =>
+            $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}"));
+        var artifactUri = new Uri(dashboard.Url, $"/api/runs/{runId}/binary?{queryString}");
+
+        using var headRequest = new HttpRequestMessage(HttpMethod.Head, artifactUri);
+        using var headResponse = await client.SendAsync(headRequest);
+        Assert.Equal(HttpStatusCode.OK, headResponse.StatusCode);
+        Assert.Equal(bytes.Length, headResponse.Content.Headers.ContentLength);
+        Assert.Equal("application/pdf", headResponse.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(
+            "sample report.pdf",
+            headResponse.Content.Headers.ContentDisposition?.FileNameStar);
+
+        var capturedSnapshots = await client.GetFromJsonAsync<JsonElement>(
+            new Uri(dashboard.Url, $"/api/runs/{runId}/snapshots?lineageId={lineageId}"));
+        var displayedPayload = Assert.Single(capturedSnapshots.EnumerateArray().ToArray())
+            .GetProperty("payloadJson")
+            .GetString();
+        Assert.NotNull(displayedPayload);
+        Assert.DoesNotContain("\"Path\"", displayedPayload, StringComparison.Ordinal);
+        Assert.Contains("\"FileName\"", displayedPayload, StringComparison.Ordinal);
+
+        using var getResponse = await client.GetAsync(artifactUri, HttpCompletionOption.ResponseHeadersRead);
+        Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
+        await using var downloaded = await getResponse.Content.ReadAsStreamAsync();
+        using var downloadedBytes = new MemoryStream();
+        await downloaded.CopyToAsync(downloadedBytes);
+        Assert.Equal(bytes, downloadedBytes.ToArray());
+
+        query["property"] = "EncodedAttachment";
+        var encodedUri = new Uri(
+            dashboard.Url,
+            $"/api/runs/{runId}/binary?{string.Join("&", query.Select(pair =>
+                $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}"))}");
+        using var encodedResponse = await client.GetAsync(
+            encodedUri,
+            HttpCompletionOption.ResponseHeadersRead);
+        Assert.Equal(HttpStatusCode.OK, encodedResponse.StatusCode);
+        Assert.Equal("text/plain", encodedResponse.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(
+            Convert.ToBase64String(bytes),
+            await encodedResponse.Content.ReadAsStringAsync());
+
+        MigrationBinaryValue.DeleteRunStagingRoot(database.Path, runId);
+        using var unavailableResponse = await client.GetAsync(artifactUri);
+        Assert.Equal(HttpStatusCode.Gone, unavailableResponse.StatusCode);
     }
 
     [Fact]

@@ -1,10 +1,13 @@
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using System.Web;
+using Migration4Dataverse.Engine.Connectors;
 using Migration4Dataverse.Engine.PowerShell;
 using Migration4Dataverse.Engine.Storage;
 
@@ -174,7 +177,13 @@ public static class MigrationDashboardServer
 
             var path = request.Url?.AbsolutePath ?? "/";
             var query = HttpUtility.ParseQueryString(request.Url?.Query ?? string.Empty);
-            if (request.HttpMethod != "GET")
+            var rawSegments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            var isBinaryArtifactHead = request.HttpMethod == "HEAD" &&
+                rawSegments.Length == 4 &&
+                rawSegments[0] == "api" &&
+                rawSegments[1] == "runs" &&
+                rawSegments[3] == "binary";
+            if (request.HttpMethod != "GET" && !isBinaryArtifactHead)
             {
                 await WriteJsonAsync(response, HttpStatusCode.MethodNotAllowed, new
                 {
@@ -235,9 +244,7 @@ public static class MigrationDashboardServer
                 return;
             }
 
-            var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries)
-                .Select(Uri.UnescapeDataString)
-                .ToArray();
+            var segments = rawSegments.Select(Uri.UnescapeDataString).ToArray();
             if (segments.Length >= 3 && segments[0] == "api" && segments[1] == "runs")
             {
                 if (store is null)
@@ -252,6 +259,90 @@ public static class MigrationDashboardServer
                         response,
                         HttpStatusCode.OK,
                         store.GetDashboardRun(runId),
+                        cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
+                if (segments.Length == 4 && segments[3] == "binary")
+                {
+                    if (!store.GetDashboardRun(runId).DebugCaptureEnabled)
+                    {
+                        await WriteJsonAsync(response, HttpStatusCode.NotFound, new
+                        {
+                            message = "Debug capture was not enabled for this run."
+                        }, cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+
+                    var snapshot = store.GetDebugSnapshot(
+                        runId,
+                        query["stepId"] ?? throw new ArgumentException("A stepId query parameter is required."),
+                        query["batchId"] ?? throw new ArgumentException("A batchId query parameter is required."),
+                        query["stageName"] ?? throw new ArgumentException("A stageName query parameter is required."),
+                        ParseRequiredInteger(query["recordIndex"], "recordIndex", minimum: 0),
+                        ParseRequiredInteger(query["attempt"], "attempt", minimum: 1),
+                        query["lineageId"] ?? throw new ArgumentException("A lineageId query parameter is required."),
+                        ParseCapturedUtc(query["capturedUtc"]));
+                    if (snapshot is null)
+                    {
+                        await WriteJsonAsync(response, HttpStatusCode.NotFound, new
+                        {
+                            message = "The captured row snapshot was not found."
+                        }, cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+
+                    var propertyName = query["property"] ??
+                        throw new ArgumentException("A property query parameter is required.");
+                    using var payload = JsonDocument.Parse(snapshot.PayloadJson);
+                    if (payload.RootElement.ValueKind != JsonValueKind.Object ||
+                        !payload.RootElement.TryGetProperty(propertyName, out var propertyValue))
+                    {
+                        await WriteJsonAsync(response, HttpStatusCode.NotFound, new
+                        {
+                            message = "The captured property was not found."
+                        }, cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+
+                    var transportValue = JsonSerializer.Deserialize<object?>(propertyValue.GetRawText());
+                    MigrationBinaryValue binaryValue;
+                    try
+                    {
+                        binaryValue = MigrationBinaryValue.RestoreFromTransport(
+                            transportValue,
+                            MigrationBinaryValue.GetRunStagingRoot(databasePath, runId)) as MigrationBinaryValue
+                            ?? throw new InvalidDataException("The captured property is not a binary artifact.");
+                    }
+                    catch (FileNotFoundException)
+                    {
+                        await WriteJsonAsync(response, HttpStatusCode.Gone, new
+                        {
+                            message = "The staged file is no longer available."
+                        }, cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+                    catch (DirectoryNotFoundException)
+                    {
+                        await WriteJsonAsync(response, HttpStatusCode.Gone, new
+                        {
+                            message = "The staged file is no longer available."
+                        }, cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+                    catch (InvalidDataException)
+                    {
+                        await WriteJsonAsync(response, HttpStatusCode.NotFound, new
+                        {
+                            message = "The captured property is not a valid binary artifact."
+                        }, cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+
+                    await WriteBinaryAsync(
+                        response,
+                        binaryValue,
+                        request.HttpMethod == "HEAD",
                         cancellationToken).ConfigureAwait(false);
                     return;
                 }
@@ -314,11 +405,11 @@ public static class MigrationDashboardServer
                     await WriteJsonAsync(
                         response,
                         HttpStatusCode.OK,
-                        store.GetDebugSnapshots(
+                        SanitizeSnapshots(store.GetDebugSnapshots(
                             runId,
                             query["lineageId"],
                             query["batchId"],
-                            ParseLimit(query["limit"], 500)),
+                            ParseLimit(query["limit"], 500))),
                         cancellationToken).ConfigureAwait(false);
                     return;
                 }
@@ -334,19 +425,20 @@ public static class MigrationDashboardServer
                         return;
                     }
 
+                    var snapshotPage = store.GetDebugSnapshotPage(
+                        runId,
+                        query["stepId"] ?? throw new ArgumentException("A stepId query parameter is required."),
+                        query["search"],
+                        ParseLimit(query["limit"], 100),
+                        ParseOffset(query["offset"]),
+                        query["stageName"],
+                        query["sortColumn"] ?? "record",
+                        query["sortDirection"] ?? "descending",
+                        ParseSnapshotFilters(query["filters"]));
                     await WriteJsonAsync(
                         response,
                         HttpStatusCode.OK,
-                        store.GetDebugSnapshotPage(
-                            runId,
-                            query["stepId"] ?? throw new ArgumentException("A stepId query parameter is required."),
-                            query["search"],
-                            ParseLimit(query["limit"], 100),
-                            ParseOffset(query["offset"]),
-                            query["stageName"],
-                            query["sortColumn"] ?? "record",
-                            query["sortDirection"] ?? "descending",
-                            ParseSnapshotFilters(query["filters"])),
+                        SanitizeSnapshotPage(snapshotPage),
                         cancellationToken).ConfigureAwait(false);
                     return;
                 }
@@ -365,7 +457,7 @@ public static class MigrationDashboardServer
                     await WriteJsonAsync(
                         response,
                         HttpStatusCode.OK,
-                        store.GetDebugSnapshots(runId, lineageId: segments[4], limit: 2000),
+                        SanitizeSnapshots(store.GetDebugSnapshots(runId, lineageId: segments[4], limit: 2000)),
                         cancellationToken).ConfigureAwait(false);
                     return;
                 }
@@ -473,6 +565,32 @@ public static class MigrationDashboardServer
         return offset;
     }
 
+    private static int ParseRequiredInteger(string? value, string parameterName, int minimum)
+    {
+        if (!int.TryParse(value, out var result) || result < minimum)
+        {
+            throw new ArgumentException(
+                $"The {parameterName} query parameter must be an integer greater than or equal to {minimum}.",
+                parameterName);
+        }
+
+        return result;
+    }
+
+    private static DateTimeOffset ParseCapturedUtc(string? value)
+    {
+        if (!DateTimeOffset.TryParse(
+                value,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind,
+                out var capturedUtc))
+        {
+            throw new ArgumentException("A valid capturedUtc query parameter is required.", nameof(value));
+        }
+
+        return capturedUtc;
+    }
+
     private static IReadOnlyDictionary<string, string> ParseSnapshotFilters(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -535,6 +653,76 @@ public static class MigrationDashboardServer
         response.ContentType = "application/json; charset=utf-8";
         response.Headers["Cache-Control"] = "no-store";
         await WriteBodyAsync(response, json, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task WriteBinaryAsync(
+        HttpListenerResponse response,
+        MigrationBinaryValue binaryValue,
+        bool headOnly,
+        CancellationToken cancellationToken)
+    {
+        response.StatusCode = (int)HttpStatusCode.OK;
+        var storedContentType = binaryValue.Representation.Equals("base64", StringComparison.OrdinalIgnoreCase)
+            ? "text/plain; charset=us-ascii"
+            : binaryValue.ContentType;
+        response.ContentType = MediaTypeHeaderValue.TryParse(storedContentType, out var contentType)
+            ? contentType.ToString()
+            : "application/octet-stream";
+        response.ContentLength64 = binaryValue.Length;
+        response.Headers["Cache-Control"] = "no-store";
+        var fileName = binaryValue.FileName ?? "attachment";
+        fileName = new string(fileName.Replace('\\', '/').Split('/').Last().Where(character => !char.IsControl(character)).ToArray());
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            fileName = "attachment";
+        }
+        response.Headers["Content-Disposition"] = new ContentDispositionHeaderValue("attachment")
+        {
+            FileNameStar = fileName
+        }.ToString();
+        if (headOnly)
+        {
+            return;
+        }
+
+        await using var stream = binaryValue.OpenRead();
+        await stream.CopyToAsync(response.OutputStream, 64 * 1024, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static IReadOnlyList<MigrationDebugSnapshot> SanitizeSnapshots(
+        IReadOnlyList<MigrationDebugSnapshot> snapshots) =>
+        snapshots.Select(SanitizeSnapshot).ToArray();
+
+    private static MigrationDebugSnapshotPage SanitizeSnapshotPage(MigrationDebugSnapshotPage page) =>
+        page with { Items = SanitizeSnapshots(page.Items) };
+
+    private static MigrationDebugSnapshot SanitizeSnapshot(MigrationDebugSnapshot snapshot)
+    {
+        var payload = JsonNode.Parse(snapshot.PayloadJson);
+        RemoveBinaryArtifactPaths(payload);
+        return snapshot with { PayloadJson = payload?.ToJsonString(JsonOptions) ?? "null" };
+    }
+
+    private static void RemoveBinaryArtifactPaths(JsonNode? value)
+    {
+        if (value is JsonObject record)
+        {
+            if (record["__migration4dataverse_binary_v1"] is JsonObject descriptor)
+            {
+                descriptor.Remove("Path");
+            }
+            foreach (var child in record.ToArray())
+            {
+                RemoveBinaryArtifactPaths(child.Value);
+            }
+        }
+        else if (value is JsonArray values)
+        {
+            foreach (var item in values)
+            {
+                RemoveBinaryArtifactPaths(item);
+            }
+        }
     }
 
     private static async Task WriteAssetAsync(

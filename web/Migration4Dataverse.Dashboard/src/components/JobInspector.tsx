@@ -4,6 +4,7 @@ import { ConfigurationJob, ConnectionInstanceSnapshot, DebugSnapshot, DebugSnaps
 import { friendlyStageName, modelDrivenRecordUrl, number, prettyJson, traceJobCount } from "../dashboardUtils";
 import { Text } from "./Text";
 import { SnapshotTable } from "./SnapshotTable";
+import { BinaryLineageSummary } from "./BinaryLineageSummary";
 
 export function JobInspector({
   rows,
@@ -146,6 +147,7 @@ export function JobInspector({
               Open in model-driven app
             </a>
           )}
+          {trace.length > 0 && <BinaryLineageSummary snapshots={trace} />}
           <pre className="configuration-json">{prettyJson(selectedSnapshot.payloadJson)}</pre>
         </section>
       )}

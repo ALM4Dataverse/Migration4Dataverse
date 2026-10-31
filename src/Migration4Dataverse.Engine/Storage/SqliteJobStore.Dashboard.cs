@@ -600,6 +600,57 @@ internal sealed partial class SqliteMigrationStore
         return snapshots;
     }
 
+    public MigrationDebugSnapshot? GetDebugSnapshot(
+        string runId,
+        string stepId,
+        string batchId,
+        string stageName,
+        int recordIndex,
+        int attempt,
+        string lineageId,
+        DateTimeOffset capturedUtc)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stageName);
+        ArgumentOutOfRangeException.ThrowIfNegative(recordIndex);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(attempt);
+        ArgumentException.ThrowIfNullOrWhiteSpace(lineageId);
+
+        var retentionDays = GetDashboardRun(runId).DebugCaptureRetentionDays;
+        var retentionStart = FormatUtc(DateTimeOffset.UtcNow.AddDays(-retentionDays));
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT RunId, BatchId, StepId, StageName, RecordIndex, Attempt,
+                   LineageId, ParentLineageIdsJson, PayloadJson, CapturedUtc
+            FROM DebugSnapshots
+            WHERE RunId = $runId
+              AND StepId = $stepId
+              AND BatchId = $batchId
+              AND StageName = $stageName
+              AND RecordIndex = $recordIndex
+              AND Attempt = $attempt
+              AND LineageId = $lineageId
+              AND CapturedUtc = $capturedUtc
+              AND CapturedUtc >= $retentionStart
+            ORDER BY SnapshotId DESC
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$runId", runId);
+        command.Parameters.AddWithValue("$stepId", stepId);
+        command.Parameters.AddWithValue("$batchId", batchId);
+        command.Parameters.AddWithValue("$stageName", stageName);
+        command.Parameters.AddWithValue("$recordIndex", recordIndex);
+        command.Parameters.AddWithValue("$attempt", attempt);
+        command.Parameters.AddWithValue("$lineageId", lineageId);
+        command.Parameters.AddWithValue("$capturedUtc", FormatUtc(capturedUtc));
+        command.Parameters.AddWithValue("$retentionStart", retentionStart);
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? ReadDebugSnapshot(reader) : null;
+    }
+
     public IReadOnlyList<string> GetBatchInputLineageIds(string runId, string batchId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);

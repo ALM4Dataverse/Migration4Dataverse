@@ -61,6 +61,20 @@ export function normalizeSnapshotPage(page: ApiDebugSnapshotPage): DebugSnapshot
   return { ...page, items: page.items.map(normalizeSnapshot) };
 }
 
+export function createBinaryArtifactUrl(snapshot: DebugSnapshot, propertyName: string): string {
+  const query = new URLSearchParams({
+    stepId: snapshot.jobName,
+    batchId: snapshot.batchId,
+    stageName: snapshot.stageName,
+    recordIndex: String(snapshot.recordIndex),
+    attempt: String(snapshot.attempt),
+    lineageId: snapshot.lineageId,
+    capturedUtc: snapshot.capturedUtc,
+    property: propertyName,
+  });
+  return `/api/runs/${encodeURIComponent(snapshot.runId)}/binary?${query}`;
+}
+
 export function createSnapshotQuery({
   stepId,
   search,

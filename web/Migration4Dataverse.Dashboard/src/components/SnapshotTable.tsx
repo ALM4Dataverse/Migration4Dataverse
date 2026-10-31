@@ -2,9 +2,10 @@ import { Button, DataGrid, DataGridBody, DataGridCell, DataGridHeader, DataGridH
 import { Columns3, GripVertical, ListFilter, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { DebugSnapshot, SnapshotGridSortState } from "../types";
-import { compareGridValues, defaultSnapshotSort, formatPayloadValue, friendlyStageName, isSelectedSnapshot, number, parsePayload, snapshotKey } from "../dashboardUtils";
+import { compareGridValues, defaultSnapshotSort, formatPayloadValue, friendlyStageName, getBinaryValueMetadata, isSelectedSnapshot, number, parsePayload, prettyJson, snapshotKey } from "../dashboardUtils";
 import { Text } from "./Text";
 import { CopyableValue } from "./CopyableValue";
+import { BinaryAttachmentValue } from "./BinaryAttachmentValue";
 
 interface SnapshotGridColumn {
   id: string;
@@ -132,8 +133,8 @@ export function SnapshotTable({
         id: "payload-json",
         label: "Payload JSON",
         value: (item) => item.payloadJson,
-        display: (item) => item.payloadJson.replace(/\s+/g, " "),
-        copyValue: (item) => item.payloadJson,
+        display: (item) => prettyJson(item.payloadJson).replace(/\s+/g, " "),
+        copyValue: (item) => prettyJson(item.payloadJson),
       });
     } else {
       for (const property of payloadColumns) {
@@ -241,6 +242,18 @@ export function SnapshotTable({
         ),
         renderCell: (item) => {
           const displayValue = column.display(item);
+          if (column.id.startsWith("payload:")) {
+            const metadata = getBinaryValueMetadata(column.value(item));
+            if (metadata) {
+              return (
+                <BinaryAttachmentValue
+                  snapshot={item}
+                  propertyName={column.id.slice("payload:".length)}
+                  metadata={metadata}
+                />
+              );
+            }
+          }
           if (column.selectsLineage) {
             return (
               <button

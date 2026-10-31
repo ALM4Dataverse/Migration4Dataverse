@@ -788,9 +788,95 @@ export function parsePayload(payloadJson: string): Record<string, unknown> {
   }
 }
 
+export interface BinaryValueMetadata {
+  fileName: string | null;
+  contentType: string | null;
+  representation: string;
+  length: number | null;
+  sha256: string | null;
+}
+
+export function displayBinaryFileName(fileName: string | null): string {
+  const safeName = fileName
+    ?.replaceAll("\\", "/")
+    .split("/")
+    .at(-1)
+    ?.replace(/[\u0000-\u001f\u007f]/g, "");
+  return safeName || "Binary value";
+}
+
+export function getBinaryValueMetadata(value: unknown): BinaryValueMetadata | null {
+  const wrapper = asRecord(value);
+  if (!wrapper || Object.keys(wrapper).length !== 1) return null;
+  const descriptor = asRecord(wrapper.__migration4dataverse_binary_v1);
+  if (!descriptor || typeof descriptor.Representation !== "string") {
+    return null;
+  }
+  const length = typeof descriptor.Length === "number" &&
+    Number.isFinite(descriptor.Length) &&
+    descriptor.Length >= 0
+    ? descriptor.Length
+    : null;
+  return {
+    fileName: typeof descriptor.FileName === "string" ? descriptor.FileName : null,
+    contentType: typeof descriptor.ContentType === "string" ? descriptor.ContentType : null,
+    representation: descriptor.Representation,
+    length,
+    sha256: typeof descriptor.Sha256 === "string" ? descriptor.Sha256 : null,
+  };
+}
+
+function safePayloadValue(value: unknown): unknown {
+  const binaryValue = getBinaryValueMetadata(value);
+  if (binaryValue) {
+    return {
+      type: "binary",
+      fileName: displayBinaryFileName(binaryValue.fileName),
+      contentType: binaryValue.contentType,
+      representation: binaryValue.representation,
+      length: binaryValue.length,
+      sha256: binaryValue.sha256,
+    };
+  }
+  if (Array.isArray(value)) return value.map(safePayloadValue);
+  const record = asRecord(value);
+  if (record) {
+    return Object.fromEntries(
+      Object.entries(record).map(([key, entry]) => [
+        key,
+        key === "__migration4dataverse_binary_v1"
+          ? "[binary metadata omitted]"
+          : safePayloadValue(entry),
+      ]),
+    );
+  }
+  return value;
+}
+
+export function formatByteCount(byteCount: number | null): string {
+  if (byteCount === null || !Number.isFinite(byteCount) || byteCount < 0) return "Size unknown";
+  if (byteCount < 1024) return `${number.format(byteCount)} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = byteCount / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex++;
+  }
+  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)} ${units[unitIndex]}`;
+}
+
 export function formatPayloadValue(value: unknown): string {
   if (value === null || value === undefined) return "";
-  return typeof value === "object" ? JSON.stringify(value) : String(value);
+  const binaryValue = getBinaryValueMetadata(value);
+  if (binaryValue) {
+    const fileName = displayBinaryFileName(binaryValue.fileName);
+    const contentType = binaryValue.contentType ?? "Unknown type";
+    return `${fileName} · ${contentType} · ${formatByteCount(binaryValue.length)}`;
+  }
+  return typeof value === "object"
+    ? JSON.stringify(safePayloadValue(value)) ?? ""
+    : String(value);
 }
 
 export function isSelectedSnapshot(candidate: DebugSnapshot, selected: DebugSnapshot | null): boolean {
@@ -820,7 +906,7 @@ export function traceJobCount(snapshots: DebugSnapshot[]): number {
 
 export function prettyJson(source: string): string {
   try {
-    return JSON.stringify(JSON.parse(source), null, 2);
+    return JSON.stringify(safePayloadValue(JSON.parse(source)), null, 2);
   } catch {
     return source;
   }

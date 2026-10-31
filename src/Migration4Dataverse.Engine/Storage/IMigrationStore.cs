@@ -178,6 +178,15 @@ public interface IMigrationStore
         string? lineageId = null,
         string? batchId = null,
         int limit = 500);
+    MigrationDebugSnapshot? GetDebugSnapshot(
+        string runId,
+        string stepId,
+        string batchId,
+        string stageName,
+        int recordIndex,
+        int attempt,
+        string lineageId,
+        DateTimeOffset capturedUtc);
     IReadOnlyList<string> GetBatchInputLineageIds(string runId, string batchId);
     IReadOnlyList<string> GetBatchOutputLineageIds(string runId, string batchId);
     MigrationDebugSnapshotPage GetDebugSnapshotPage(

@@ -1,15 +1,17 @@
 import { Button } from "@fluentui/react-components";
 import { Check, Copy } from "lucide-react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 export function CopyableValue({
   label,
   displayValue,
   copyValue,
+  displayContent,
 }: {
   label: string;
   displayValue: string;
   copyValue: string;
+  displayContent?: ReactNode;
 }) {
   const [copyStatus, setCopyStatus] = useState<{ message: string; isError: boolean } | null>(null);
   const copy = async () => {
@@ -24,7 +26,7 @@ export function CopyableValue({
 
   return (
     <span className="grid-copy-cell">
-      <span className="grid-cell-text" title={displayValue}>{displayValue}</span>
+      <span className="grid-cell-text" title={displayValue}>{displayContent ?? displayValue}</span>
       <Button
         className="grid-copy-button"
         appearance="subtle"
