@@ -12,19 +12,26 @@ public static class HierarchyRecordReaderFactory
 
     public static IHierarchyRecordReader CreateFileReader(HierarchySourceLevel level)
     {
+        return CreateFileReader(level, null);
+    }
+
+    internal static IHierarchyRecordReader CreateFileReader(
+        HierarchySourceLevel level,
+        Func<HierarchySourceLevel, IHierarchyRecordReader>? nestedFileReaderFactory)
+    {
         ArgumentNullException.ThrowIfNull(level);
+        if (level.Type == "file" && level.FormatType == "custom")
+        {
+            return nestedFileReaderFactory?.Invoke(level)
+                ?? throw new InvalidOperationException(
+                    $"Custom file format source '{level.StepId}' requires a PowerShell format reader.");
+        }
+
         return level.Type switch
         {
-            "jsonl" => HierarchyBatchSource.CreateJsonLinesReader(level),
-            "csv" => new CsvHierarchyRecordReader(
-                level,
-                DeserializeOptions<CsvConnectorOptions>(level.OptionsJson, level)),
-            "parquet" => new ParquetHierarchyRecordReader(
-                level,
-                DeserializeOptions<ParquetConnectorOptions>(level.OptionsJson, level)),
-            "excel" => new ExcelHierarchyRecordReader(
-                level,
-                ExcelSourceOptions.FromJson(level.OptionsJson, level.StepId)),
+            "file" => RecordFileFormatRegistry.GetRequired(level.FormatType!).CreateSourceReader(level),
+            "jsonl" or "csv" or "parquet" or "binary" or "excel" =>
+                RecordFileFormatRegistry.GetRequired(level.FormatType!).CreateSourceReader(level),
             "salesforce" => new SalesforceHierarchyRecordReader(
                 level,
                 SalesforceSourceOptions.FromJson(level.OptionsJson, level.StepId)),
@@ -46,10 +53,10 @@ public static class HierarchyRecordReaderFactory
                     ?? throw new InvalidOperationException(
                         $"Database source '{level.StepId}' has no runtime connection."),
                 DatabaseSourceOptions.FromJson(level.OptionsJson, level.StepId)),
-            "azureblob" => CreateObjectStorageReader(level, "azureblob"),
-            "s3" => CreateObjectStorageReader(level, "s3"),
-            "adlsgen2" => CreateObjectStorageReader(level, "adlsgen2"),
-            "gcs" => CreateObjectStorageReader(level, "gcs"),
+            "azureblob" => CreateObjectStorageReader(level, "azureblob", nestedFileReaderFactory),
+            "s3" => CreateObjectStorageReader(level, "s3", nestedFileReaderFactory),
+            "adlsgen2" => CreateObjectStorageReader(level, "adlsgen2", nestedFileReaderFactory),
+            "gcs" => CreateObjectStorageReader(level, "gcs", nestedFileReaderFactory),
             "mongodb" => CreateMongoReader(level),
             "http" => CreateHttpReader(level, "http"),
             "odata" => CreateHttpReader(level, "odata"),
@@ -61,7 +68,8 @@ public static class HierarchyRecordReaderFactory
 
     private static IHierarchyRecordReader CreateObjectStorageReader(
         HierarchySourceLevel level,
-        string connectorType)
+        string connectorType,
+        Func<HierarchySourceLevel, IHierarchyRecordReader>? nestedFileReaderFactory)
     {
         var options = DeserializeOptions<ObjectStorageSourceOptions>(level.OptionsJson, level);
         options.Validate(level.StepId);
@@ -81,11 +89,17 @@ public static class HierarchyRecordReaderFactory
                     gcsClient,
                     gcsBucket,
                     options,
+                    level.FormatType!,
+                    level.FormatExtensions,
                     prefix,
                     CancellationToken.None)
                 .GetAwaiter()
                 .GetResult();
-            return new ObjectStorageHierarchyRecordReader(level, gcsItems, options);
+            return new ObjectStorageHierarchyRecordReader(
+                level,
+                gcsItems,
+                options,
+                nestedFileReaderFactory ?? CreateFileReader);
         }
 
         if (connectorType == "adlsgen2")
@@ -97,11 +111,17 @@ public static class HierarchyRecordReaderFactory
             var dataLakeItems = DataLakeConnectionSupport.ListItemsAsync(
                     fileSystem,
                     options,
+                    level.FormatType!,
+                    level.FormatExtensions,
                     prefix,
                     CancellationToken.None)
                 .GetAwaiter()
                 .GetResult();
-            return new ObjectStorageHierarchyRecordReader(level, dataLakeItems, options);
+            return new ObjectStorageHierarchyRecordReader(
+                level,
+                dataLakeItems,
+                options,
+                nestedFileReaderFactory ?? CreateFileReader);
         }
 
         if (connectorType == "azureblob")
@@ -113,11 +133,17 @@ public static class HierarchyRecordReaderFactory
             var items = ObjectStorageHierarchyRecordReader.ListAzureBlobItemsAsync(
                     container,
                     options,
+                    level.FormatType!,
+                    level.FormatExtensions,
                     prefix,
                     CancellationToken.None)
                 .GetAwaiter()
                 .GetResult();
-            return new ObjectStorageHierarchyRecordReader(level, items, options);
+            return new ObjectStorageHierarchyRecordReader(
+                level,
+                items,
+                options,
+                nestedFileReaderFactory ?? CreateFileReader);
         }
 
         var client = ObjectStorageConnectionSupport.GetS3Client(
@@ -130,11 +156,17 @@ public static class HierarchyRecordReaderFactory
                 client,
                 bucket,
                 options,
+                level.FormatType!,
+                level.FormatExtensions,
                 prefix,
                 CancellationToken.None)
             .GetAwaiter()
             .GetResult();
-        return new ObjectStorageHierarchyRecordReader(level, s3Items, options);
+        return new ObjectStorageHierarchyRecordReader(
+            level,
+            s3Items,
+            options,
+            nestedFileReaderFactory ?? CreateFileReader);
     }
 
     private static IHierarchyRecordReader CreateMongoReader(HierarchySourceLevel level)
@@ -169,14 +201,14 @@ public static class HierarchyRecordReaderFactory
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(level);
-        if (level.Type != "parquet")
+        if (level.FormatType != "parquet")
         {
             throw new ArgumentException(
                 "Metadata record counts are available only for Parquet sources.",
                 nameof(level));
         }
 
-        var options = DeserializeOptions<ParquetConnectorOptions>(level.OptionsJson, level);
+        var options = DeserializeOptions<ParquetConnectorOptions>(level.FormatOptionsJson, level);
         return ParquetHierarchyRecordReader.GetMetadataRecordCountAsync(
             level.Path
                 ?? throw new ArgumentException($"Parquet source '{level.StepId}' has no file path."),

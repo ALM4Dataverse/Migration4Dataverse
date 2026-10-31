@@ -81,14 +81,257 @@ internal static partial class PowerShellMigrationStepFactory
             throw "Transform step '$StepId' must emit a dictionary or custom object."
         }
 
+        function ConvertTo-MigrationJson {
+            param($Value, [int]$Depth = 100)
+            if ([Migration4Dataverse.Engine.Connectors.MigrationBinaryValue]::ContainsBinaryValues($Value)) {
+                if ([string]::IsNullOrWhiteSpace([string]$context.BinaryStagingRoot)) {
+                    throw "Step '$($context.StepId)' cannot transport binary values without a staging directory."
+                }
+                $transportValue = [Migration4Dataverse.Engine.Connectors.MigrationBinaryValue]::PrepareForTransport(
+                    $Value,
+                    [string]$context.BinaryStagingRoot)
+            }
+            else {
+                $transportValue = $Value
+            }
+            ConvertTo-Json -InputObject $transportValue -Depth $Depth -Compress -ErrorAction Stop
+        }
+
+        function Upload-DataverseFileColumn {
+            param($Connection, [string]$TableName, [guid]$RecordId, [string]$ColumnName, $Value)
+
+            if ($Value.Length -eq 0) {
+                throw "Dataverse file column '$ColumnName' cannot be uploaded with empty content."
+            }
+            $fileName = if ([string]::IsNullOrWhiteSpace([string]$Value.FileName)) {
+                "$ColumnName.bin"
+            }
+            else {
+                [System.IO.Path]::GetFileName([string]$Value.FileName)
+            }
+            $initialize = [Microsoft.Crm.Sdk.Messages.InitializeFileBlocksUploadRequest]::new()
+            $initialize.Target = [Microsoft.Xrm.Sdk.EntityReference]::new($TableName, $RecordId)
+            $initialize.FileAttributeName = $ColumnName
+            $initialize.FileName = $fileName
+            $upload = $Connection.Execute($initialize)
+            $blockIds = [System.Collections.Generic.List[string]]::new()
+            $blockSize = 4MB
+            $offset = [long]0
+            $blockNumber = 0
+            $stream = $Value.OpenRead()
+            try {
+                while ($offset -lt $Value.Length) {
+                    $currentBlockLength = [int][Math]::Min($blockSize, $Value.Length - $offset)
+                    $blockData = [byte[]]::new($currentBlockLength)
+                    $read = 0
+                    while ($read -lt $currentBlockLength) {
+                        $count = $stream.Read($blockData, $read, $currentBlockLength - $read)
+                        if ($count -eq 0) {
+                            throw "Binary value '$fileName' ended before its recorded length of $($Value.Length) bytes."
+                        }
+                        $read += $count
+                    }
+
+                    $blockId = [Convert]::ToBase64String(
+                        [System.Text.Encoding]::UTF8.GetBytes(('block-{0:D6}' -f $blockNumber)))
+                    $blockIds.Add($blockId)
+                    $request = [Microsoft.Xrm.Sdk.OrganizationRequest]::new('UploadBlock')
+                    $request.Parameters['BlockId'] = $blockId
+                    $request.Parameters['BlockData'] = $blockData
+                    $request.Parameters['FileContinuationToken'] = $upload.FileContinuationToken
+                    $null = $Connection.Execute($request)
+                    $offset += $currentBlockLength
+                    $blockNumber++
+                }
+            }
+            finally {
+                $stream.Dispose()
+            }
+
+            $commit = [Microsoft.Crm.Sdk.Messages.CommitFileBlocksUploadRequest]::new()
+            $commit.FileContinuationToken = $upload.FileContinuationToken
+            $commit.BlockList = [string[]]$blockIds.ToArray()
+            $commit.FileName = $fileName
+            $commit.MimeType = if ([string]::IsNullOrWhiteSpace([string]$Value.ContentType)) {
+                $Value.DetectMimeType()
+            }
+            else {
+                [string]$Value.ContentType
+            }
+            $null = $Connection.Execute($commit)
+        }
+
+        function Prepare-DataverseBinaryRecords {
+            param([object[]]$Records, [string]$TableName)
+
+            $preparedRecords = [object[]]::new($Records.Count)
+            $fileValues = [System.Collections.Generic.List[object]]::new()
+            $isAttachmentTable = $TableName -in @('annotation', 'activitymimeattachment')
+            for ($recordIndex = 0; $recordIndex -lt $Records.Count; $recordIndex++) {
+                $sourceRecord = ConvertTo-MigrationFields -Value $Records[$recordIndex] -StepId $context.StepId
+                $record = [ordered]@{}
+                foreach ($field in $sourceRecord.Keys) {
+                    $record[[string]$field] = $sourceRecord[$field]
+                }
+                foreach ($field in @($record.Keys)) {
+                    $value = $record[$field]
+                    if ($value -isnot [Migration4Dataverse.Engine.Connectors.MigrationBinaryValue]) {
+                        continue
+                    }
+                    if ($isAttachmentTable) {
+                        $contentColumn = if ($TableName -eq 'annotation') { 'documentbody' } else { 'body' }
+                        if (-not [string]::Equals(
+                            [string]$field,
+                            $contentColumn,
+                            [System.StringComparison]::OrdinalIgnoreCase)) {
+                            throw "Binary values on Dataverse attachment table '$TableName' must map to '$contentColumn'."
+                        }
+                        $record[$field] = $value.ToBase64String()
+                        continue
+                    }
+                    if ($value.Representation -eq 'base64') {
+                        $value = $value.DecodeBase64()
+                    }
+                    $fileValues.Add([pscustomobject]@{
+                        RecordIndex = $recordIndex
+                        ColumnName = [string]$field
+                        Value = $value
+                    })
+                    $record.Remove($field)
+                }
+                $preparedRecords[$recordIndex] = $record
+            }
+            [pscustomobject]@{
+                Records = $preparedRecords
+                FileValues = $fileValues
+            }
+        }
+
         function ConvertTo-FileTargetBatch {
             param($Records, [string]$TargetPath, [string]$StepId, [string]$RunId, [string]$BatchId, [long]$Sequence)
-            $recordsJson = ConvertTo-Json -InputObject $Records -Depth 100 -Compress -ErrorAction Stop
+            $recordsJson = ConvertTo-MigrationJson -Value $Records
             [Migration4Dataverse.Engine.Connectors.FileBatchTargetWriter]::WriteSingleFileTargetBatch(
                 $TargetPath, $RunId, $StepId, $BatchId, $Sequence, $recordsJson)
         }
 
+        function ConvertTo-ExternalBinaryTargetRecords {
+            param([object[]]$Records, [long]$Sequence)
+
+            $configuredColumns = [Migration4Dataverse.Engine.Connectors.BinaryFileReferenceSupport]::GetConfiguredBinaryColumns(
+                $context.TargetFormatOptionsJson,
+                $context.StepId)
+            $configuredColumnSet = [System.Collections.Generic.HashSet[string]]::new(
+                [System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($column in $configuredColumns) {
+                [void]$configuredColumnSet.Add($column)
+            }
+            $referenceCallback = if ([string]::IsNullOrWhiteSpace($context.TargetBinaryReferenceText)) {
+                $null
+            }
+            else {
+                [scriptblock]::Create($context.TargetBinaryReferenceText)
+            }
+            $preparedRecords = [object[]]::new($Records.Count)
+            for ($recordIndex = 0; $recordIndex -lt $Records.Count; $recordIndex++) {
+                $record = $Records[$recordIndex]
+                $fields = ConvertTo-MigrationFields -Value $record -StepId $context.StepId
+                $columns = if ($configuredColumns.Count -gt 0) {
+                    $configuredColumns
+                }
+                else {
+                    @($fields.Keys | Where-Object {
+                        $value = $fields[$_]
+                        $value -is [Migration4Dataverse.Engine.Connectors.MigrationBinaryValue] -or
+                            $value -is [byte[]] -or $value -is [System.IO.Stream]
+                    })
+                }
+                foreach ($columnName in $columns) {
+                    if (-not $fields.Contains($columnName)) {
+                        throw "Binary target column '$columnName' is missing from record $recordIndex in step '$($context.StepId)'."
+                    }
+                    $value = $fields[$columnName]
+                    if ($null -eq $value) {
+                        continue
+                    }
+                    if ($value -isnot [Migration4Dataverse.Engine.Connectors.MigrationBinaryValue] -and
+                        $value -isnot [byte[]] -and $value -isnot [System.IO.Stream]) {
+                        throw "Binary target column '$columnName' in step '$($context.StepId)' must contain a MigrationBinaryValue, byte array, stream, or null."
+                    }
+                    if ($value -is [System.IO.Stream]) {
+                        try {
+                            $binaryValue = [Migration4Dataverse.Engine.Connectors.BinaryFileReferenceSupport]::NormalizeBinaryValue(
+                                $value,
+                                [string]$context.BinaryStagingRoot)
+                        }
+                        finally {
+                            $value.Dispose()
+                        }
+                    }
+                    else {
+                        $binaryValue = [Migration4Dataverse.Engine.Connectors.BinaryFileReferenceSupport]::NormalizeBinaryValue(
+                            $value,
+                            [string]$context.BinaryStagingRoot)
+                    }
+                    $defaultRelativePath = [Migration4Dataverse.Engine.Connectors.BinaryFileReferenceSupport]::GetDefaultRelativePath(
+                        $Sequence,
+                        $recordIndex,
+                        [string]$columnName,
+                        $binaryValue)
+                    $relativePath = $defaultRelativePath
+                    if ($null -ne $referenceCallback) {
+                        $binaryContext = [pscustomobject]@{
+                            StepId = $context.StepId
+                            RunId = $batch.RunId
+                            Sequence = $Sequence
+                            RecordIndex = $recordIndex
+                            TargetPath = $context.TargetPath
+                            StagingRoot = $context.BinaryStagingRoot
+                        }
+                        $callbackOutput = @(& $referenceCallback `
+                            $fields `
+                            ([string]$columnName) `
+                            $binaryValue `
+                            $defaultRelativePath `
+                            $binaryContext)
+                        if ($callbackOutput.Count -ne 1 -or $callbackOutput[0] -isnot [string]) {
+                            throw "CreateBinaryReference for target step '$($context.StepId)' must return exactly one relative path string."
+                        }
+                        $relativePath = $callbackOutput[0]
+                    }
+                    $fields[$columnName] = [Migration4Dataverse.Engine.Connectors.BinaryFileReferenceSupport]::CreateTransportReference(
+                        $binaryValue,
+                        [string]$batch.RunId,
+                        $relativePath)
+                }
+
+                foreach ($fieldName in $fields.Keys) {
+                    $fieldValue = $fields[$fieldName]
+                    if ($fieldValue -is [System.Collections.IDictionary] -and
+                        ([System.Collections.IDictionary]$fieldValue).Contains(
+                            [Migration4Dataverse.Engine.Connectors.BinaryFileReferenceSupport]::TransportMarker)) {
+                        continue
+                    }
+                    $isDirectBinary = $fieldValue -is [Migration4Dataverse.Engine.Connectors.MigrationBinaryValue] -or
+                        $fieldValue -is [byte[]] -or $fieldValue -is [System.IO.Stream]
+                    if ($isDirectBinary -and
+                        $configuredColumns.Count -gt 0 -and
+                        -not $configuredColumnSet.Contains([string]$fieldName)) {
+                        throw "Binary value in target column '$fieldName' is not listed in Options.BinaryColumns for step '$($context.StepId)'."
+                    }
+                    if (-not $isDirectBinary -and
+                        [Migration4Dataverse.Engine.Connectors.MigrationBinaryValue]::ContainsBinaryValues($fieldValue)) {
+                        throw "Binary values in target step '$($context.StepId)' must be mapped to top-level columns before sidecar output."
+                    }
+                }
+                $preparedRecords[$recordIndex] = [pscustomobject]$fields
+            }
+            return ,$preparedRecords
+        }
+
         $payload = ConvertFrom-Json -InputObject $batch.PayloadJson -AsHashtable -Depth 100 -ErrorAction Stop
+        $payload = [Migration4Dataverse.Engine.Connectors.MigrationBinaryValue]::RestoreFromTransport(
+            $payload,
+            [string]$context.BinaryStagingRoot)
         if ($payload -isnot [System.Collections.IDictionary] -or -not $payload.Contains('Records')) {
             throw "Batch '$($batch.BatchId)' does not contain a Records array."
         }
@@ -100,6 +343,15 @@ internal static partial class PowerShellMigrationStepFactory
 
         switch ($context.Type) {
             'source' {
+                $binaryColumns = [Migration4Dataverse.Engine.Connectors.BinaryFileReferenceSupport]::GetConfiguredBinaryColumns(
+                    $context.SourceFormatOptionsJson,
+                    $context.StepId)
+                $binaryResolver = if ([string]::IsNullOrWhiteSpace($context.SourceBinaryResolverText)) {
+                    $null
+                }
+                else {
+                    [scriptblock]::Create($context.SourceBinaryResolverText)
+                }
                 for ($index = 0; $index -lt $inputRecords.Count; $index++) {
                     $wrapper = $inputRecords[$index]
                     if ($wrapper -isnot [System.Collections.IDictionary] -or
@@ -109,6 +361,52 @@ internal static partial class PowerShellMigrationStepFactory
                     $record = [ordered]@{}
                     foreach ($field in $wrapper.Source.Keys) {
                         $record[[string]$field] = $wrapper.Source[$field]
+                    }
+                    foreach ($columnName in $binaryColumns) {
+                        $sourceColumn = @($wrapper.Source.Keys | Where-Object {
+                            [string]::Equals(
+                                [string]$_,
+                                $columnName,
+                                [System.StringComparison]::OrdinalIgnoreCase)
+                        }) | Select-Object -First 1
+                        if ($null -eq $sourceColumn) {
+                            throw "Binary source column '$columnName' is missing from record $index in step '$($context.StepId)'."
+                        }
+                        $reference = $wrapper.Source[$sourceColumn]
+                        if ($null -eq $reference) {
+                            continue
+                        }
+                        if ($null -ne $binaryResolver) {
+                            $binaryContext = [pscustomobject]@{
+                                StepId = $context.StepId
+                                RunId = $batch.RunId
+                                ColumnName = [string]$sourceColumn
+                                SourcePath = $context.SourcePath
+                                StagingRoot = $context.BinaryStagingRoot
+                            }
+                            $resolverOutput = @(& $binaryResolver `
+                                $reference `
+                                $wrapper.Source `
+                                ([string]$sourceColumn) `
+                                $binaryContext)
+                            if ($resolverOutput.Count -ne 1) {
+                                throw "ResolveBinaryReference for source step '$($context.StepId)' must return exactly one value."
+                            }
+                            $binaryValue = [Migration4Dataverse.Engine.Connectors.BinaryFileReferenceSupport]::FromResolverResult(
+                                $resolverOutput[0],
+                                [string]$context.SourcePath,
+                                [string]$context.BinaryStagingRoot)
+                        }
+                        else {
+                            if ($reference -isnot [string]) {
+                                throw "Binary source column '$sourceColumn' in step '$($context.StepId)' must contain a relative file reference string."
+                            }
+                            $binaryValue = [Migration4Dataverse.Engine.Connectors.BinaryFileReferenceSupport]::FromFileReference(
+                                $reference,
+                                [string]$context.SourcePath,
+                                [string]$context.BinaryStagingRoot)
+                        }
+                        $record[[string]$sourceColumn] = $binaryValue
                     }
                     if (-not [string]::IsNullOrWhiteSpace($context.IdProperty) -and
                         $wrapper.Source.Contains($context.IdProperty)) {
@@ -147,7 +445,7 @@ internal static partial class PowerShellMigrationStepFactory
                         }
                     }
                     elseif (-not [string]::IsNullOrWhiteSpace($context.TransformSql)) {
-                        $recordsJson = ConvertTo-Json -InputObject $inputRecords -Depth 100 -Compress -ErrorAction Stop
+                        $recordsJson = ConvertTo-MigrationJson -Value $inputRecords
                         if ($context.TransformMode -eq 'per_batch') {
                             if ($context.TransformType -eq 'sqlite') {
                                 $outputsJson = [Migration4Dataverse.Engine.Connectors.PreparedDatabaseTransformRunner]::ExecuteSqliteBatch(
@@ -196,13 +494,18 @@ internal static partial class PowerShellMigrationStepFactory
                     }
                     else {
                         $script = [scriptblock]::Create($context.ScriptText)
+                        $binaryContext = [pscustomobject]@{
+                            StepId = $context.StepId
+                            RunId = $batch.RunId
+                            StagingRoot = $context.BinaryStagingRoot
+                        }
                         for ($index = 0; $index -lt $inputRecords.Count; $index++) {
                             try {
                                 $values = if ($hasConnectedTransform) {
-                                    @(& $script $inputRecords[$index] $transformConnection)
+                                    @(& $script $inputRecords[$index] $transformConnection $binaryContext)
                                 }
                                 else {
-                                    @(& $script $inputRecords[$index])
+                                    @(& $script $inputRecords[$index] $binaryContext)
                                 }
                             }
                             catch {
@@ -300,6 +603,12 @@ internal static partial class PowerShellMigrationStepFactory
 
         if ($context.Type -eq 'target' -and $outputRecords.Count -gt 0) {
             $records = $outputRecords.ToArray()
+            if ($context.TargetType -eq 'file' -and
+                $context.TargetFormatType -in @('csv', 'jsonl', 'parquet')) {
+                $records = ConvertTo-ExternalBinaryTargetRecords `
+                    -Records $records `
+                    -Sequence $batch.Sequence
+            }
             $targetExecutionLease = $null
             $targetDataverseLease = $null
             if (-not $context.WhatIf -and $context.TargetType -in @('dataverse', 'custom', 'sqlite', 'duckdb', 'sqlserver', 'postgresql', 'mysql', 'oracle', 'azureblob', 's3', 'adlsgen2', 'gcs', 'mongodb')) {
@@ -326,6 +635,11 @@ internal static partial class PowerShellMigrationStepFactory
                         if ($targetOptions -isnot [System.Collections.IDictionary]) {
                             throw "Target Options for step '$($context.StepId)' must be a hashtable or dictionary."
                         }
+                        $originalRecords = $records
+                        $binaryPreparation = Prepare-DataverseBinaryRecords `
+                            -Records $records -TableName $context.TableName
+                        $records = [object[]]$binaryPreparation.Records
+                        $dataverseFileValues = $binaryPreparation.FileValues
                         $targetParameters = @{
                             TableName = $context.TableName
                             Connection = $targetConnection
@@ -373,8 +687,11 @@ internal static partial class PowerShellMigrationStepFactory
                         if ($targetOperation -eq 'Delete' -and $context.JoinInputConsumers.Count -gt 0) {
                             throw "Dataverse Delete target step '$($context.StepId)' cannot provide parent records to Join steps."
                         }
-                        if ($context.JoinInputConsumers.Count -gt 0) {
-                            if ($null -eq $context.Store) {
+                        if ($targetOperation -eq 'Delete' -and $dataverseFileValues.Count -gt 0) {
+                            throw "Dataverse Delete target step '$($context.StepId)' cannot write file column content."
+                        }
+                        if ($context.JoinInputConsumers.Count -gt 0 -or $dataverseFileValues.Count -gt 0) {
+                            if ($context.JoinInputConsumers.Count -gt 0 -and $null -eq $context.Store) {
                                 throw "Target step '$($context.StepId)' must have a migration store to stage Join input records."
                             }
                             $targetParameters.PassThru = $true
@@ -383,30 +700,50 @@ internal static partial class PowerShellMigrationStepFactory
                                 throw "Set-DataverseRecord -PassThru returned $($writtenRecords.Count) records for $($records.Count) inputs in step '$($context.StepId)'."
                             }
 
-                            $targetOutputRecords = [System.Collections.Generic.List[object]]::new()
-                            for ($recordIndex = 0; $recordIndex -lt $writtenRecords.Count; $recordIndex++) {
-                                $writtenRecord = $writtenRecords[$recordIndex]
+                            foreach ($fileValue in $dataverseFileValues) {
+                                $writtenRecord = $writtenRecords[[int]$fileValue.RecordIndex]
                                 $idProperty = $writtenRecord.PSObject.Properties['Id']
                                 if ($null -eq $idProperty -or $null -eq $idProperty.Value) {
-                                    throw "Set-DataverseRecord -PassThru did not return a primary-key Id for step '$($context.StepId)'."
+                                    throw "Set-DataverseRecord -PassThru did not return a primary-key Id for file upload in step '$($context.StepId)'."
                                 }
                                 $recordId = [guid]$idProperty.Value
                                 if ($recordId -eq [guid]::Empty) {
-                                    throw "Set-DataverseRecord -PassThru returned an empty Id for step '$($context.StepId)'."
+                                    throw "Set-DataverseRecord -PassThru returned an empty Id for file upload in step '$($context.StepId)'."
                                 }
+                                Upload-DataverseFileColumn `
+                                    -Connection $targetConnection `
+                                    -TableName $context.TableName `
+                                    -RecordId $recordId `
+                                    -ColumnName ([string]$fileValue.ColumnName) `
+                                    -Value $fileValue.Value
+                            }
 
-                                $recordFields = [ordered]@{}
-                                foreach ($field in $records[$recordIndex].Keys) {
-                                    $recordFields[[string]$field] = $records[$recordIndex][$field]
-                                }
-                                foreach ($property in $writtenRecord.PSObject.Properties) {
-                                    if ($property.IsGettable -and
-                                        $property.MemberType -ne [System.Management.Automation.PSMemberTypes]::Method) {
-                                        $recordFields[$property.Name] = $property.Value
+                            if ($context.JoinInputConsumers.Count -gt 0) {
+                                $targetOutputRecords = [System.Collections.Generic.List[object]]::new()
+                                for ($recordIndex = 0; $recordIndex -lt $writtenRecords.Count; $recordIndex++) {
+                                    $writtenRecord = $writtenRecords[$recordIndex]
+                                    $idProperty = $writtenRecord.PSObject.Properties['Id']
+                                    if ($null -eq $idProperty -or $null -eq $idProperty.Value) {
+                                        throw "Set-DataverseRecord -PassThru did not return a primary-key Id for step '$($context.StepId)'."
                                     }
+                                    $recordId = [guid]$idProperty.Value
+                                    if ($recordId -eq [guid]::Empty) {
+                                        throw "Set-DataverseRecord -PassThru returned an empty Id for step '$($context.StepId)'."
+                                    }
+
+                                    $recordFields = [ordered]@{}
+                                    foreach ($field in $originalRecords[$recordIndex].Keys) {
+                                        $recordFields[[string]$field] = $originalRecords[$recordIndex][$field]
+                                    }
+                                    foreach ($property in $writtenRecord.PSObject.Properties) {
+                                        if ($property.IsGettable -and
+                                            $property.MemberType -ne [System.Management.Automation.PSMemberTypes]::Method) {
+                                            $recordFields[$property.Name] = $property.Value
+                                        }
+                                    }
+                                    $recordFields.Id = $recordId
+                                    $targetOutputRecords.Add([pscustomobject]$recordFields)
                                 }
-                                $recordFields.Id = $recordId
-                                $targetOutputRecords.Add([pscustomobject]$recordFields)
                             }
                         }
                         elseif ($targetOperation -eq 'Delete') {
@@ -433,84 +770,85 @@ internal static partial class PowerShellMigrationStepFactory
                             $null = $records | Set-DataverseRecord @targetParameters
                         }
                     }
-                    'jsonl' {
-                        ConvertTo-FileTargetBatch -Records $records -TargetPath $context.TargetPath `
-                            -StepId $context.StepId -RunId $batch.RunId `
-                            -BatchId $batch.BatchId -Sequence $batch.Sequence
-                    }
-                    'csv' {
-                        ConvertTo-FileTargetBatch -Records $records -TargetPath $context.TargetPath `
-                            -StepId $context.StepId -RunId $batch.RunId `
-                            -BatchId $batch.BatchId -Sequence $batch.Sequence
-                    }
-                    'parquet' {
+                    'file' {
                         ConvertTo-FileTargetBatch -Records $records -TargetPath $context.TargetPath `
                             -StepId $context.StepId -RunId $batch.RunId `
                             -BatchId $batch.BatchId -Sequence $batch.Sequence
                     }
                     'sqlite' {
-                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        $recordsJson = ConvertTo-MigrationJson -Value $records
                         [Migration4Dataverse.Engine.Connectors.DatabaseBatchTargetWriter]::WriteBatch(
                             $targetConnection, 'sqlite', $context.TableName, $context.StepId,
                             $batch.RunId, $batch.BatchId, $recordsJson, $context.TargetOptionsJson)
                     }
                     'duckdb' {
-                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        $recordsJson = ConvertTo-MigrationJson -Value $records
                         [Migration4Dataverse.Engine.Connectors.DatabaseBatchTargetWriter]::WriteBatch(
                             $targetConnection, 'duckdb', $context.TableName, $context.StepId,
                             $batch.RunId, $batch.BatchId, $recordsJson, $context.TargetOptionsJson)
                     }
                     'sqlserver' {
-                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        $recordsJson = ConvertTo-MigrationJson -Value $records
                         [Migration4Dataverse.Engine.Connectors.DatabaseBatchTargetWriter]::WriteBatch(
                             $targetConnection, 'sqlserver', $context.TableName, $context.StepId,
                             $batch.RunId, $batch.BatchId, $recordsJson, $context.TargetOptionsJson)
                     }
                     'postgresql' {
-                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        $recordsJson = ConvertTo-MigrationJson -Value $records
                         [Migration4Dataverse.Engine.Connectors.DatabaseBatchTargetWriter]::WriteBatch(
                             $targetConnection, 'postgresql', $context.TableName, $context.StepId,
                             $batch.RunId, $batch.BatchId, $recordsJson, $context.TargetOptionsJson)
                     }
                     'mysql' {
-                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        $recordsJson = ConvertTo-MigrationJson -Value $records
                         [Migration4Dataverse.Engine.Connectors.DatabaseBatchTargetWriter]::WriteBatch(
                             $targetConnection, 'mysql', $context.TableName, $context.StepId,
                             $batch.RunId, $batch.BatchId, $recordsJson, $context.TargetOptionsJson)
                     }
                     'oracle' {
-                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        $recordsJson = ConvertTo-MigrationJson -Value $records
                         [Migration4Dataverse.Engine.Connectors.DatabaseBatchTargetWriter]::WriteBatch(
                             $targetConnection, 'oracle', $context.TableName, $context.StepId,
                             $batch.RunId, $batch.BatchId, $recordsJson, $context.TargetOptionsJson)
                     }
                     'azureblob' {
-                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        $recordsJson = ConvertTo-MigrationJson -Value $records
                         [Migration4Dataverse.Engine.Connectors.ObjectStorageTargetWriter]::WriteBatch(
-                            $targetConnection, 'azureblob', $context.TargetPath, $context.StepId,
+                            $targetConnection, 'azureblob', $context.TargetPath, $context.TargetFormatType,
+                            [string[]]$context.TargetFormatExtensions, $context.StepId,
                             $batch.RunId, $batch.BatchId, $batch.Sequence, $recordsJson,
-                            $context.TargetOptionsJson, $context.StagingRoot)
+                            $context.TargetOptionsJson, $context.TargetFormatOptionsJson, $context.StagingRoot)
                     }
                     's3' {
-                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        $recordsJson = ConvertTo-MigrationJson -Value $records
                         [Migration4Dataverse.Engine.Connectors.ObjectStorageTargetWriter]::WriteBatch(
-                            $targetConnection, 's3', $context.TargetPath, $context.StepId,
+                            $targetConnection, 's3', $context.TargetPath, $context.TargetFormatType,
+                            [string[]]$context.TargetFormatExtensions, $context.StepId,
                             $batch.RunId, $batch.BatchId, $batch.Sequence, $recordsJson,
-                            $context.TargetOptionsJson, $context.StagingRoot)
+                            $context.TargetOptionsJson, $context.TargetFormatOptionsJson, $context.StagingRoot)
                     }
                     'adlsgen2' {
-                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        $recordsJson = ConvertTo-MigrationJson -Value $records
                         [Migration4Dataverse.Engine.Connectors.ObjectStorageTargetWriter]::WriteBatch(
-                            $targetConnection, 'adlsgen2', $context.TargetPath, $context.StepId,
+                            $targetConnection, 'adlsgen2', $context.TargetPath, $context.TargetFormatType,
+                            [string[]]$context.TargetFormatExtensions, $context.StepId,
                             $batch.RunId, $batch.BatchId, $batch.Sequence, $recordsJson,
-                            $context.TargetOptionsJson, $context.StagingRoot)
+                            $context.TargetOptionsJson, $context.TargetFormatOptionsJson, $context.StagingRoot)
                     }
                     'gcs' {
-                        $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
+                        $recordsJson = ConvertTo-MigrationJson -Value $records
                         [Migration4Dataverse.Engine.Connectors.ObjectStorageTargetWriter]::WriteBatch(
-                            $targetConnection, 'gcs', $context.TargetPath, $context.StepId,
+                            $targetConnection, 'gcs', $context.TargetPath, $context.TargetFormatType,
+                            [string[]]$context.TargetFormatExtensions, $context.StepId,
                             $batch.RunId, $batch.BatchId, $batch.Sequence, $recordsJson,
-                            $context.TargetOptionsJson, $context.StagingRoot)
+                            $context.TargetOptionsJson, $context.TargetFormatOptionsJson, $context.StagingRoot)
+                    }
+                    'sharepoint' {
+                        $recordsJson = ConvertTo-MigrationJson -Value $records
+                        [Migration4Dataverse.Engine.Connectors.SharePointTargetWriter]::WriteBatch(
+                            $targetConnection, $context.StepId, $batch.RunId, $batch.BatchId,
+                            $batch.Sequence, $recordsJson, $context.TargetOptionsJson,
+                            $context.StagingRoot)
                     }
                     'mongodb' {
                         $recordsJson = ConvertTo-Json -InputObject $records -Depth 100 -Compress -ErrorAction Stop
@@ -527,6 +865,7 @@ internal static partial class PowerShellMigrationStepFactory
                             BatchId = $batch.BatchId
                             Sequence = $batch.Sequence
                             TargetPath = $context.TargetPath
+                            BinaryStagingRoot = $context.BinaryStagingRoot
                         }
                         $result = @(& $callback $targetConnection $records $stepContext)
                         if ($result.Count -ne 1 -or $result[0] -isnot [bool] -or -not $result[0]) {
@@ -564,8 +903,7 @@ internal static partial class PowerShellMigrationStepFactory
                     if ($index -lt $parentRecordIndices.Count -and $parentRecordIndices[$index].Count -gt 0) {
                         $originRecordIndex = [int]$parentRecordIndices[$index][0]
                     }
-                    $recordJson = ConvertTo-Json -InputObject $joinInputRecords[$index] `
-                        -Depth 100 -Compress -ErrorAction Stop
+                    $recordJson = ConvertTo-MigrationJson -Value $joinInputRecords[$index]
                     $stagedRecords.Add([Migration4Dataverse.Engine.Storage.JoinInputRecordMapping]::new(
                         $joinConsumer.JoinStepId,
                         $context.StepId,
@@ -588,7 +926,7 @@ internal static partial class PowerShellMigrationStepFactory
 
         $debugStages = [System.Collections.Generic.List[Migration4Dataverse.Engine.Storage.MigrationDebugStage]]::new()
         if ($context.CaptureDebugData) {
-            $recordsJson = ConvertTo-Json -InputObject $outputRecords.ToArray() -Depth 100 -Compress -ErrorAction Stop
+            $recordsJson = ConvertTo-MigrationJson -Value $outputRecords.ToArray()
             if ($context.Type -eq 'source') {
                 if ($payload.Contains('__LineageReferences')) {
                     $debugStages.Add([Migration4Dataverse.Engine.Storage.MigrationDebugStage]::new(
@@ -646,10 +984,10 @@ internal static partial class PowerShellMigrationStepFactory
                     $count = [Math]::Min($child.BatchSize, $childRows.Count - $offset)
                     $chunk = [object[]]$childRows.GetRange($offset, $count).ToArray()
                     $lineageChunk = [object[]]$lineageReferences.GetRange($offset, $count).ToArray()
-                    $childPayload = ConvertTo-Json -InputObject ([ordered]@{
+                    $childPayload = ConvertTo-MigrationJson -Value ([ordered]@{
                         Records = $chunk
                         __LineageReferences = $lineageChunk
-                    }) -Depth 100 -Compress -ErrorAction Stop
+                    })
                     $dependencyOutputs.Add([Migration4Dataverse.Engine.Scheduling.MigrationDependencyOutput]::new(
                         $child.StepId, $childPayload))
                 }
@@ -666,10 +1004,10 @@ internal static partial class PowerShellMigrationStepFactory
                         RecordIndex = $offset + $recordOffset
                     }))
                 }
-                $childPayload = ConvertTo-Json -InputObject ([ordered]@{
+                $childPayload = ConvertTo-MigrationJson -Value ([ordered]@{
                     Records = $chunk
                     __LineageReferences = $lineageReferences.ToArray()
-                }) -Depth 100 -Compress -ErrorAction Stop
+                })
                 $dependencyOutputs.Add([Migration4Dataverse.Engine.Scheduling.MigrationDependencyOutput]::new(
                     $child.StepId, $childPayload))
             }
@@ -739,7 +1077,7 @@ internal static partial class PowerShellMigrationStepFactory
                 "QueryType", "TableName", "VerboseRecordCount", "RecordCount", "FilterValues", "Criteria",
                 "Links", "ExcludeFilterValues", "ExcludeFilterOr", "ActiveOnly", "Id", "Name", "ExcludeId",
                 "Columns", "ExcludeColumns", "OrderBy", "Top", "PageSize", "LookupValuesReturnName",
-                "IncludeSystemColumns", "IncludeFileAndImageMetadataColumns", "Unpublished"
+                "IncludeSystemColumns", "IncludeFileAndImageMetadataColumns", "Unpublished", "FileColumns"
             ],
             "fetchxml" =>
             [
@@ -764,6 +1102,12 @@ internal static partial class PowerShellMigrationStepFactory
                 throw new ArgumentException(
                     $"Dataverse source step '{stepId}' option '{optionName}' is not supported for query type '{queryType}'.");
             }
+        }
+
+        if (normalizedType != "simple" && GetProperty(options, "FileColumns") is not null)
+        {
+            throw new ArgumentException(
+                $"Dataverse source step '{stepId}' supports Options.FileColumns only with QueryType 'Simple'.");
         }
 
         if (normalizedType == "simple")
@@ -1023,7 +1367,7 @@ internal static partial class PowerShellMigrationStepFactory
             return ResolveRelativePath(databaseDirectory, configuredPath, role);
         }
 
-        if (connectorType is "jsonl" or "csv" or "parquet" or "excel")
+        if (connectorType == "file")
         {
             if (connection is FileInfo file)
             {
@@ -1038,7 +1382,7 @@ internal static partial class PowerShellMigrationStepFactory
             if (connection is not DirectoryInfo fileDirectory)
             {
                 throw new ArgumentException(
-                    $"The {connectorType} connector requires a DirectoryInfo or FileInfo connection for {role}.");
+                    $"The file connector requires a DirectoryInfo or FileInfo connection for {role}.");
             }
             if (string.IsNullOrWhiteSpace(configuredPath))
             {

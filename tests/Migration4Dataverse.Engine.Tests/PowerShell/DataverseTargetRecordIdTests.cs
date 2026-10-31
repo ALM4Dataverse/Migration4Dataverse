@@ -356,7 +356,8 @@ public sealed class DataverseTargetParentRecordTests
             Inputs = Array.Empty<string>(),
             Source = new
             {
-                Type = "jsonl",
+                Type = "file",
+                Format = new { Type = "jsonl" },
                 ConnectionId = "files",
                 Path = fileName,
                 Key = "id"

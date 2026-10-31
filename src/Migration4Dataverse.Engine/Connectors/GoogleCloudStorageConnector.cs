@@ -9,6 +9,8 @@ internal static class GoogleCloudStorageConnectorSupport
         StorageClient client,
         string bucket,
         ObjectStorageSourceOptions options,
+        string formatType,
+        IReadOnlyList<string> formatExtensions,
         string? prefix,
         CancellationToken cancellationToken)
     {
@@ -18,8 +20,9 @@ internal static class GoogleCloudStorageConnectorSupport
             if (item.Name is null ||
                 !ObjectStorageConnectorSupport.MatchesFormat(
                     item.Name,
-                    options.Format,
-                    options.IncludeAllExtensions))
+                    formatType,
+                    options.IncludeAllExtensions,
+                    formatExtensions))
             {
                 continue;
             }
@@ -34,7 +37,15 @@ internal static class GoogleCloudStorageConnectorSupport
                         key,
                         file,
                         cancellationToken: token).ConfigureAwait(false);
-                }));
+                })
+            {
+                ContentType = item.ContentType,
+                DownloadToStreamAsync = (stream, token) => client.DownloadObjectAsync(
+                    bucket,
+                    key,
+                    stream,
+                    cancellationToken: token)
+            });
         }
         items.Sort((left, right) => string.Compare(left.Key, right.Key, StringComparison.Ordinal));
         return items;

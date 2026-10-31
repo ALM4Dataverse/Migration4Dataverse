@@ -26,6 +26,8 @@ public sealed class ParquetConnectorOptions
 
     public string[]? Columns { get; init; }
 
+    public string[]? BinaryColumns { get; init; }
+
     public Dictionary<string, ParquetFieldSchema[]>? SchemaByStep { get; init; }
 
     public Dictionary<string, ParquetFieldSchema[]>? SourceSchemaByStep { get; init; }
@@ -80,6 +82,10 @@ public sealed class ParquetConnectorOptions
         if (Columns is not null)
         {
             ValidateNames(Columns, nameof(Columns));
+        }
+        if (BinaryColumns is not null)
+        {
+            ValidateNames(BinaryColumns, nameof(BinaryColumns));
         }
         ValidateSchemas(SchemaByStep, "SchemaByStep");
         ValidateSchemas(SourceSchemaByStep, "SourceSchemaByStep");

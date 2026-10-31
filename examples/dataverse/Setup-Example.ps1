@@ -92,6 +92,48 @@ foreach ($sortDefinition in $sortDefinitions) {
     $rows | Export-Csv -LiteralPath $path -NoTypeInformation -Encoding utf8NoBOM -ErrorAction Stop
 }
 
+$attachmentAccount = Import-Csv `
+    -LiteralPath (Join-Path $dataDirectory 'account.csv') `
+    -ErrorAction Stop |
+    Select-Object -First 1
+if ($null -eq $attachmentAccount -or [string]::IsNullOrWhiteSpace([string]$attachmentAccount.id)) {
+    throw 'The account dataset must contain a row with an id for the attachment example.'
+}
+
+$attachmentManifestName = 'account-attachments.jsonl'
+$attachmentFileName = 'migration-example-contract.txt'
+$attachmentSidecarName = '{0}.attachments' -f $attachmentManifestName
+$attachmentSidecarDirectory = Join-Path $dataDirectory $attachmentSidecarName
+$null = [System.IO.Directory]::CreateDirectory($attachmentSidecarDirectory)
+$attachmentPath = Join-Path $attachmentSidecarDirectory $attachmentFileName
+$attachmentWriter = [System.IO.StreamWriter]::new(
+    $attachmentPath,
+    $false,
+    [System.Text.UTF8Encoding]::new($false))
+try {
+    $attachmentWriter.WriteLine('Migration4Dataverse generated file-attachment example.')
+    $attachmentWriter.WriteLine("Source account: $($attachmentAccount.id)")
+    for ($lineNumber = 0; $lineNumber -lt 12288; $lineNumber++) {
+        $attachmentWriter.WriteLine(
+            ('Streaming attachment block {0:D5}: replace this generated text with a real file.' -f $lineNumber))
+    }
+}
+finally {
+    $attachmentWriter.Dispose()
+}
+
+$attachmentReference = "$attachmentSidecarName/$attachmentFileName"
+$attachmentRecord = [ordered]@{
+    Id = 'a3138d90-7b6b-4b59-96e4-7cbf2c51e051'
+    AccountSourceId = [string]$attachmentAccount.id
+    Content = $attachmentReference
+}
+[System.IO.File]::WriteAllText(
+    (Join-Path $dataDirectory $attachmentManifestName),
+    (ConvertTo-Json -InputObject $attachmentRecord -Depth 4 -Compress) + [Environment]::NewLine,
+    [System.Text.UTF8Encoding]::new($false))
+$attachmentFile = Get-Item -LiteralPath $attachmentPath -ErrorAction Stop
+
 $manifest = [ordered]@{
     Dataset = 'Sample Sales CRM Data'
     DatasetUrl = 'https://www.kaggle.com/datasets/sushicatsan/sample-sales-crm-data'
@@ -99,6 +141,9 @@ $manifest = [ordered]@{
     License = 'CC0: Public Domain'
     TotalRows = 257375
     Files = [ordered]@{}
+    AttachmentManifest = $attachmentManifestName
+    AttachmentRows = 1
+    AttachmentBytes = $attachmentFile.Length
 }
 foreach ($file in $datasetFiles) {
     $manifest.Files[$file.Name] = $file.Rows
@@ -163,6 +208,7 @@ $tableAttributes = @{
         @{ Name = 'new_salesforceid'; Schema = 'new_SalesforceId'; Display = 'Salesforce ID'; Type = 'String'; MaxLength = 100 }
         @{ Name = 'new_sourceownerid'; Schema = 'new_SourceOwnerId'; Display = 'Source Owner ID'; Type = 'String'; MaxLength = 100 }
         @{ Name = 'new_sourcerowjson'; Schema = 'new_SourceRowJson'; Display = 'Source Row JSON'; Type = 'Memo'; MaxLength = 1048576 }
+        @{ Name = 'new_m4dexamplefile'; Schema = 'new_M4DExampleFile'; Display = 'Migration Example File'; Type = 'File'; MaxSizeInKB = 10240 }
     )
     contact = @(
         @{ Name = 'new_salesforceid'; Schema = 'new_SalesforceId'; Display = 'Salesforce ID'; Type = 'String'; MaxLength = 100 }
@@ -208,10 +254,14 @@ foreach ($tableName in @($requiredStandardTables) + @($sourceUserTable)) {
     $metadata = Get-DataverseEntityMetadata -EntityName $tableName -Connection $connection -ErrorAction Stop
     $existingAttributes = @{}
     foreach ($attribute in @($metadata.Attributes)) {
-        $existingAttributes[[string]$attribute.LogicalName] = $true
+        $existingAttributes[[string]$attribute.LogicalName] = $attribute
     }
     foreach ($attribute in $tableAttributes[$tableName]) {
         if ($existingAttributes.ContainsKey($attribute.Name)) {
+            if ($attribute.Type -eq 'File' -and
+                [string]$existingAttributes[$attribute.Name].AttributeType -ne 'File') {
+                throw "Existing Dataverse attribute '$tableName.$($attribute.Name)' is not a File column."
+            }
             continue
         }
 
@@ -226,6 +276,9 @@ foreach ($tableName in @($requiredStandardTables) + @($sourceUserTable)) {
         }
         if ($attribute.ContainsKey('MaxLength')) {
             $parameters.MaxLength = $attribute.MaxLength
+        }
+        if ($attribute.ContainsKey('MaxSizeInKB')) {
+            $parameters.MaxSizeInKB = $attribute.MaxSizeInKB
         }
         Set-DataverseAttributeMetadata @parameters | Out-Null
         $null = $changedEntities.Add($tableName)
@@ -262,4 +315,4 @@ foreach ($tableName in $alternateKeyTables) {
         -ErrorAction Stop | Out-Null
 }
 
-Write-Host "Created or verified the Salesforce ID alternate keys and source fields. Saved the connection as '$connectionProfileName'."
+Write-Host "Created or verified the Salesforce ID alternate keys, source fields, and account File column. Saved the connection as '$connectionProfileName'."

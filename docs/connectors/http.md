@@ -45,4 +45,12 @@ $steps = @(
 
 The source does not derive an expected count from `TotalCountPath` or by scanning the downloaded data. Set `ExpectedRecordCount` when the exact count is known. Because fetching completes before the reader starts, a very large API response can consume significant time and memory during source initialization; prefer the paged custom PowerShell source for APIs that cannot be safely fetched as one bounded dataset.
 
+| JSON API value | Type in the PowerShell mapping |
+|---|---|
+| Null, Boolean, number, string | `$null`, `Boolean`, `Int64`/`Double`, `String` |
+| Object / array | PowerShell dictionary / array |
+| GUID, decimal values encoded as strings | `System.String` |
+| ISO date/time strings | Usually `System.DateTime` after default PowerShell JSON parsing; other date formats remain strings |
+| Binary content | Not automatically downloaded as a file; API JSON values remain JSON values |
+
 See [source connectors](./sources/README.md) and [migration step configuration](../configuration.md).

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Collections;
 using CsvHelper;
 using Migration4Dataverse.Engine.Scheduling;
 using Parquet;
@@ -201,12 +202,13 @@ public static class FileBatchTargetWriter
         string targetFilePath,
         string runId,
         string stepId,
-        string targetType,
-        string optionsJson)
+        string formatType,
+        string optionsJson,
+        string? binaryStagingRoot = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(targetFilePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(targetType);
+        ArgumentException.ThrowIfNullOrWhiteSpace(formatType);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
 
         var batchDirectory = Path.Combine(
@@ -216,40 +218,133 @@ public static class FileBatchTargetWriter
             ? Directory.GetFiles(batchDirectory, "*.jsonl").OrderBy(path => path, StringComparer.Ordinal).ToArray()
             : Array.Empty<string>();
 
-        switch (targetType.Trim().ToLowerInvariant())
+        RecordFileFormatRegistry.GetRequired(formatType).FinalizeTarget(
+            targetFilePath,
+            batchFiles,
+            stepId,
+            optionsJson,
+            binaryStagingRoot);
+    }
+
+    public static IEnumerable<JsonElement> ReadSingleFileTargetRecords(
+        string targetFilePath,
+        string runId,
+        string stepId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetFilePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
+        var batchDirectory = Path.Combine(
+            GetSingleFileBatchDirectory(targetFilePath, stepId),
+            GetSingleFileRunDirectoryName(runId));
+        var batchFiles = Directory.Exists(batchDirectory)
+            ? Directory.GetFiles(batchDirectory, "*.jsonl").OrderBy(path => path, StringComparer.Ordinal).ToArray()
+            : Array.Empty<string>();
+        return ReadSingleFileTargetRecords(batchFiles, stepId);
+    }
+
+    public static IEnumerable<IReadOnlyList<JsonElement>> ReadSingleFileTargetBatches(
+        string targetFilePath,
+        string runId,
+        string stepId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetFilePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
+        var batchDirectory = Path.Combine(
+            GetSingleFileBatchDirectory(targetFilePath, stepId),
+            GetSingleFileRunDirectoryName(runId));
+        if (!Directory.Exists(batchDirectory))
         {
-            case "jsonl":
-                StreamingSourceFileConverter.WriteAtomically(targetFilePath, output =>
-                {
-                    foreach (var batchFile in batchFiles)
-                    {
-                        using var input = new FileStream(
-                            batchFile,
-                            FileMode.Open,
-                            FileAccess.Read,
-                            FileShare.Read,
-                            bufferSize: 1024 * 1024,
-                            FileOptions.SequentialScan);
-                        input.CopyTo(output);
-                    }
-                });
-                break;
-            case "csv":
-                FinalizeCsvTarget(targetFilePath, batchFiles, stepId, optionsJson);
-                break;
-            case "parquet":
-                FinalizeParquetTarget(targetFilePath, batchFiles, stepId, optionsJson);
-                break;
-            default:
-                throw new ArgumentException($"File target type '{targetType}' is not supported.");
+            yield break;
+        }
+
+        foreach (var batchFile in Directory.GetFiles(batchDirectory, "*.jsonl")
+                     .OrderBy(path => path, StringComparer.Ordinal))
+        {
+            yield return ReadSingleBatch(batchFile);
         }
     }
 
-    private static void FinalizeCsvTarget(
+    internal static void FinalizeBinaryTarget(
         string targetFilePath,
         IReadOnlyList<string> batchFiles,
         string stepId,
-        string optionsJson)
+        string optionsJson,
+        string? binaryStagingRoot)
+    {
+        if (string.IsNullOrWhiteSpace(binaryStagingRoot))
+        {
+            throw new ArgumentException(
+                $"Binary file target '{stepId}' requires a binary staging directory.",
+                nameof(binaryStagingRoot));
+        }
+        var options = DeserializeOptions<BinaryFileTargetOptions>(optionsJson, "binary file");
+        options.Validate(stepId);
+        StreamingSourceFileConverter.WriteAtomically(targetFilePath, output =>
+        {
+            using var records = ReadSingleFileTargetRecords(batchFiles, stepId).GetEnumerator();
+            if (!records.MoveNext())
+            {
+                throw new InvalidDataException(
+                    $"Binary file target '{stepId}' requires exactly one record.");
+            }
+            var value = MigrationBinaryValue.RestoreFromTransport(
+                records.Current,
+                binaryStagingRoot);
+            if (value is not IDictionary fields ||
+                !fields.Contains(options.ContentColumn) ||
+                fields[options.ContentColumn] is not MigrationBinaryValue binaryValue)
+            {
+                throw new InvalidDataException(
+                    $"Binary file target '{stepId}' requires a MigrationBinaryValue in field '{options.ContentColumn}'.");
+            }
+            if (records.MoveNext())
+            {
+                throw new InvalidDataException(
+                    $"Binary file target '{stepId}' accepts exactly one record; received more than one.");
+            }
+
+            using var source = binaryValue.OpenRead();
+            source.CopyTo(output);
+        });
+    }
+
+    internal static void FinalizeJsonLinesTarget(
+        string targetFilePath,
+        IReadOnlyList<string> batchFiles,
+        string stepId,
+        string optionsJson,
+        string? binaryStagingRoot)
+    {
+        _ = BinaryFileReferenceSupport.GetConfiguredBinaryColumns(optionsJson, stepId);
+        StreamingSourceFileConverter.WriteAtomically(targetFilePath, output =>
+        {
+            using var writer = new StreamWriter(
+                output,
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                bufferSize: 1024 * 1024,
+                leaveOpen: true);
+            foreach (var record in ReadSingleFileTargetRecords(batchFiles, stepId))
+            {
+                var outputRecord = MaterializeSidecarReferences(
+                    record,
+                    targetFilePath,
+                    stepId,
+                    optionsJson,
+                    binaryStagingRoot);
+                writer.WriteLine(outputRecord.GetRawText());
+            }
+            writer.Flush();
+        });
+    }
+
+    internal static void FinalizeCsvTarget(
+        string targetFilePath,
+        IReadOnlyList<string> batchFiles,
+        string stepId,
+        string optionsJson,
+        string? binaryStagingRoot)
     {
         var options = DeserializeOptions<CsvConnectorOptions>(optionsJson, "CSV");
         options.Validate();
@@ -260,6 +355,14 @@ public static class FileBatchTargetWriter
         {
             throw new InvalidOperationException(
                 $"CSV target options must declare ColumnsByStep.{stepId}.");
+        }
+        foreach (var binaryColumn in BinaryFileReferenceSupport.GetConfiguredBinaryColumns(optionsJson, stepId))
+        {
+            if (!columns.Contains(binaryColumn, StringComparer.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"CSV target step '{stepId}' must include every Options.BinaryColumns entry in ColumnsByStep.{stepId}.");
+            }
         }
 
         var configuration = options.CreateConfiguration();
@@ -283,9 +386,16 @@ public static class FileBatchTargetWriter
 
             foreach (var record in ReadSingleFileTargetRecords(batchFiles, stepId))
             {
+                var outputRecord = MaterializeSidecarReferences(
+                    record,
+                    targetFilePath,
+                    stepId,
+                    optionsJson,
+                    binaryStagingRoot,
+                    outputColumns: new HashSet<string>(columns, StringComparer.Ordinal));
                 foreach (var column in columns)
                 {
-                    if (!record.TryGetProperty(column, out var value))
+                    if (!outputRecord.TryGetProperty(column, out var value))
                     {
                         throw new InvalidDataException(
                             $"CSV target record for step '{stepId}' is missing configured column '{column}'.");
@@ -299,15 +409,26 @@ public static class FileBatchTargetWriter
         });
     }
 
-    private static void FinalizeParquetTarget(
+    internal static void FinalizeParquetTarget(
         string targetFilePath,
         IReadOnlyList<string> batchFiles,
         string stepId,
-        string optionsJson)
+        string optionsJson,
+        string? binaryStagingRoot)
     {
         var options = DeserializeOptions<ParquetConnectorOptions>(optionsJson, "Parquet");
         options.Validate();
         var schema = options.GetSchema(stepId).ToArray();
+        var schemaByName = schema.ToDictionary(field => field.Name, StringComparer.OrdinalIgnoreCase);
+        foreach (var binaryColumn in BinaryFileReferenceSupport.GetConfiguredBinaryColumns(optionsJson, stepId))
+        {
+            if (!schemaByName.TryGetValue(binaryColumn, out var fieldSchema) ||
+                fieldSchema.Type.Trim().ToLowerInvariant() is not ("string" or "json"))
+            {
+                throw new InvalidDataException(
+                    $"Parquet binary reference column '{binaryColumn}' for target step '{stepId}' must be present in SchemaByStep.{stepId} with a string or json type.");
+            }
+        }
         if (batchFiles.Count == 0)
         {
             var parquetSchema = new ParquetSchema(schema.Select(ParquetConnectorOptions.CreateDataField));
@@ -342,17 +463,26 @@ public static class FileBatchTargetWriter
                        bufferSize: 1024 * 1024,
                        FileOptions.SequentialScan))
             {
+                using var writer = new StreamWriter(
+                    merged,
+                    new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+                    bufferSize: 1024 * 1024,
+                    leaveOpen: true);
                 foreach (var batchFile in batchFiles)
                 {
-                    using var input = new FileStream(
-                        batchFile,
-                        FileMode.Open,
-                        FileAccess.Read,
-                        FileShare.Read,
-                        bufferSize: 1024 * 1024,
-                        FileOptions.SequentialScan);
-                    input.CopyTo(merged);
+                    foreach (var record in ReadSingleFileTargetRecords([batchFile], stepId))
+                    {
+                        var outputRecord = MaterializeSidecarReferences(
+                            record,
+                            targetFilePath,
+                            stepId,
+                            optionsJson,
+                            binaryStagingRoot,
+                            schemaByName);
+                        writer.WriteLine(JsonSerializer.Serialize(outputRecord, JsonOptions));
+                    }
                 }
+                writer.Flush();
             }
 
             var sourceOptions = new ParquetConnectorOptions
@@ -386,6 +516,114 @@ public static class FileBatchTargetWriter
         }
     }
 
+    private static JsonElement MaterializeSidecarReferences(
+        JsonElement record,
+        string targetFilePath,
+        string stepId,
+        string optionsJson,
+        string? binaryStagingRoot,
+        IReadOnlyDictionary<string, ParquetFieldSchema>? parquetSchema = null,
+        IReadOnlySet<string>? outputColumns = null)
+    {
+        var binaryColumns = BinaryFileReferenceSupport.GetConfiguredBinaryColumns(optionsJson, stepId);
+        var configuredColumns = new HashSet<string>(binaryColumns, StringComparer.OrdinalIgnoreCase);
+        var fields = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var property in record.EnumerateObject())
+        {
+            if (!BinaryFileReferenceSupport.TryReadTransportReference(
+                    property.Value,
+                    out var referencePath,
+                    out var transportedBinaryValue))
+            {
+                fields.Add(property.Name, property.Value.Clone());
+                continue;
+            }
+
+            if (binaryColumns.Length > 0 && !configuredColumns.Contains(property.Name))
+            {
+                throw new InvalidDataException(
+                    $"Target step '{stepId}' contains a binary sidecar in column '{property.Name}' that is not listed in Options.BinaryColumns.");
+            }
+            if (outputColumns is not null && !outputColumns.Contains(property.Name))
+            {
+                throw new InvalidDataException(
+                    $"CSV target step '{stepId}' cannot externalize binary column '{property.Name}' because it is not included in ColumnsByStep.{stepId}.");
+            }
+            if (parquetSchema is not null &&
+                (!parquetSchema.TryGetValue(property.Name, out var fieldSchema) ||
+                 fieldSchema.Type.Trim().ToLowerInvariant() is not ("string" or "json")))
+            {
+                throw new InvalidDataException(
+                    $"Parquet binary sidecar column '{property.Name}' for target step '{stepId}' must use a string or json schema type.");
+            }
+            if (string.IsNullOrWhiteSpace(binaryStagingRoot))
+            {
+                throw new InvalidDataException(
+                    $"Target step '{stepId}' requires a binary staging directory to write attachment sidecars.");
+            }
+
+            var binaryValue = MigrationBinaryValue.RestoreFromTransport(
+                transportedBinaryValue,
+                binaryStagingRoot) as MigrationBinaryValue
+                ?? throw new InvalidDataException(
+                    $"Binary sidecar in target column '{property.Name}' for step '{stepId}' has no binary content.");
+            var relativeReference = WriteSidecarFile(
+                targetFilePath,
+                referencePath,
+                binaryValue);
+            fields.Add(property.Name, relativeReference);
+        }
+        return JsonSerializer.SerializeToElement(fields, JsonOptions);
+    }
+
+    private static string WriteSidecarFile(
+        string targetFilePath,
+        string relativePath,
+        MigrationBinaryValue binaryValue)
+    {
+        var sidecarRoot = Path.GetFullPath(targetFilePath) + ".attachments";
+        var outputPath = BinaryFileReferenceSupport.ResolveSidecarPath(sidecarRoot, relativePath);
+        var outputDirectory = Path.GetDirectoryName(outputPath)
+            ?? throw new InvalidOperationException($"Attachment path '{outputPath}' has no parent directory.");
+        Directory.CreateDirectory(outputDirectory);
+
+        if (File.Exists(outputPath))
+        {
+            var existing = new FileInfo(outputPath);
+            if (existing.Length != binaryValue.Length)
+            {
+                throw new IOException(
+                    $"Attachment sidecar '{outputPath}' already exists with different content.");
+            }
+            using var existingStream = new FileStream(
+                outputPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 1024 * 1024,
+                FileOptions.SequentialScan);
+            var existingHash = Convert.ToHexString(SHA256.HashData(existingStream));
+            if (!string.Equals(existingHash, binaryValue.Sha256, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException(
+                    $"Attachment sidecar '{outputPath}' already exists with different content.");
+            }
+        }
+        else
+        {
+            StreamingSourceFileConverter.WriteAtomically(outputPath, output =>
+            {
+                using var source = binaryValue.OpenRead();
+                source.CopyTo(output);
+            });
+        }
+
+        var targetDirectory = Path.GetDirectoryName(Path.GetFullPath(targetFilePath))
+            ?? throw new InvalidOperationException(
+                $"Target file '{targetFilePath}' has no parent directory.");
+        return Path.GetRelativePath(targetDirectory, outputPath).Replace('\\', '/');
+    }
+
     private static IEnumerable<JsonElement> ReadSingleFileTargetRecords(
         IReadOnlyList<string> batchFiles,
         string stepId)
@@ -417,6 +655,37 @@ public static class FileBatchTargetWriter
                 yield return document.RootElement.Clone();
             }
         }
+    }
+
+    private static IReadOnlyList<JsonElement> ReadSingleBatch(string batchFile)
+    {
+        var records = new List<JsonElement>();
+        using var stream = new FileStream(
+            batchFile,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 1024 * 1024,
+            FileOptions.SequentialScan);
+        using var reader = new StreamReader(
+            stream,
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true),
+            detectEncodingFromByteOrderMarks: true,
+            bufferSize: 1024 * 1024);
+        long recordNumber = 0;
+        while (reader.ReadLine() is { } line)
+        {
+            recordNumber++;
+            using var document = JsonDocument.Parse(line);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException(
+                    $"Staged file target batch '{batchFile}' contains a non-object record at line {recordNumber}.");
+            }
+            records.Add(document.RootElement.Clone());
+        }
+
+        return records;
     }
 
     private static string GetSingleFileBatchDirectory(string targetFilePath, string stepId)

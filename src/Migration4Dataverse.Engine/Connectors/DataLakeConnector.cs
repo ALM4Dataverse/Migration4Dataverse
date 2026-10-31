@@ -45,6 +45,8 @@ internal static class DataLakeConnectionSupport
     public static async Task<IReadOnlyList<ObjectStorageItem>> ListItemsAsync(
         DataLakeFileSystemClient fileSystem,
         ObjectStorageSourceOptions options,
+        string formatType,
+        IReadOnlyList<string> formatExtensions,
         string? prefix,
         CancellationToken cancellationToken)
     {
@@ -58,8 +60,9 @@ internal static class DataLakeConnectionSupport
             if (path.IsDirectory == true ||
                 !ObjectStorageConnectorSupport.MatchesFormat(
                     path.Name,
-                    options.Format,
-                    options.IncludeAllExtensions))
+                    formatType,
+                    options.IncludeAllExtensions,
+                    formatExtensions))
             {
                 continue;
             }
@@ -71,7 +74,14 @@ internal static class DataLakeConnectionSupport
                     var response = await file.ReadAsync(token).ConfigureAwait(false);
                     await using var local = File.Create(localPath);
                     await response.Value.Content.CopyToAsync(local, token).ConfigureAwait(false);
-                }));
+                })
+            {
+                DownloadToStreamAsync = async (stream, token) =>
+                {
+                    var response = await file.ReadAsync(token).ConfigureAwait(false);
+                    await response.Value.Content.CopyToAsync(stream, token).ConfigureAwait(false);
+                }
+            });
         }
         items.Sort((left, right) => string.Compare(left.Key, right.Key, StringComparison.Ordinal));
         return items;

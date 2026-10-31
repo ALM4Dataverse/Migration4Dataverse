@@ -39,4 +39,13 @@ Invoke-Migration -DatabasePath './migration.sqlite3' `
 
 The engine opens and closes its owned connection while reading. Because a source streams from an active reader, its `ConnectionId` must not be reused by another source, transform, or target step; use separate IDs for each database path.
 
+| DuckDB result value | Type in the PowerShell mapping |
+|---|---|
+| `BOOLEAN`, integer widths, `FLOAT`/`DOUBLE`, `DECIMAL` | `Boolean`, `Int64`, `Double` |
+| `VARCHAR` / `TEXT` | `System.String` |
+| `BLOB` | Base64 `System.String` after JSON transport |
+| `DATE`, timestamps | `System.DateTime` for ISO-formatted values after default PowerShell JSON parsing |
+| `UUID` | `System.String` |
+| JSON stored as text | `System.String`; parse explicitly when a nested object is needed |
+
 See [target connector](../targets/duckdb.md) and [migration step configuration](../../configuration.md).

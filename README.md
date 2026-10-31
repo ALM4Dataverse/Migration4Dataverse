@@ -11,7 +11,7 @@
 
 Migration4Dataverse lets you describe a migration as PowerShell steps and run it with `Invoke-Migration`. Source and target connections are supplied separately from the step definitions. The engine handles batching, dependencies, local run history, and recovery.
 
-Supported connectors include CSV, JSON Lines, Parquet, Excel, SQLite, DuckDB, SQL Server, PostgreSQL, MySQL, Oracle, Azure Blob, Amazon S3, Azure Data Lake Storage Gen2, Google Cloud Storage, HTTP/OData, Salesforce Sales Cloud, SharePoint lists, HubSpot, Zendesk, ServiceNow, MongoDB, Dataverse, and custom PowerShell callbacks. A local dashboard can show run progress, outcomes, and optional captured-row lineage.
+Supported connectors include local files (CSV, JSON Lines, Parquet, Excel, binary, and custom formats), Azure Blob, Amazon S3, Azure Data Lake Storage Gen2, Google Cloud Storage, SQLite, DuckDB, SQL Server, PostgreSQL, MySQL, Oracle, HTTP/OData, Salesforce Sales Cloud, SharePoint, HubSpot, Zendesk, ServiceNow, MongoDB, Dataverse, and custom PowerShell callbacks. A local dashboard can show run progress, outcomes, and optional captured-row lineage.
 
 ## Why Migration4Dataverse?
 
@@ -24,20 +24,29 @@ The project is also intended to run locally without SSIS, a separate SQL Server,
 > [!NOTE]
 > This is a single-machine migration tool, not a distributed scale-out platform.
 
+## Features
+
+- Process records incrementally with bounded queues and parallel workers; stream large files through disk-backed staging instead of buffering whole values in memory.
+- Choose from file, object-storage, database, API, SaaS, SharePoint, Dataverse, and custom connectors, with file formats selected independently of local or object storage.
+- Define mappings, filters, keyed joins, and callbacks as PowerShell steps that can be reviewed and adapted to each migration.
+- Extend the engine with custom PowerShell connectors and streaming file-format readers and writers.
+- Move binary attachments through file-backed values, sidecars, and Dataverse File/Image or document connectors; mappings can pass values through or apply Base64, JSON-stream, and MIME-type transformations.
+
 ## Quick start
 
-You need PowerShell 7.6 or later, the .NET 10 SDK, and Node.js/npm to build the dashboard assets. From the repository root, build the module's engine and run the CSV example:
+You need PowerShell 7.6 or later, the .NET 10 SDK, and Node.js/npm to build the dashboard assets. Build the module, install the Dataverse connector module, and run the Dataverse example from the repository root:
 
 ```powershell
 dotnet build Migration4Dataverse.slnx --configuration Release
-pwsh ./examples/csv/Setup-Example.ps1
-pwsh ./examples/csv/example.ps1
+Install-Module Rnwood.Dataverse.Data.PowerShell -MinimumVersion 3.3.0 -Scope CurrentUser
+pwsh ./examples/dataverse/Setup-Example.ps1
+pwsh ./examples/dataverse/example.ps1
 ```
 
 > [!NOTE]
 > The examples import the PowerShell module from this checkout. Build the solution in Release configuration before running them.
 
-The setup script prepares the sample input; the example reads it, transforms each row, and publishes one complete CSV output file after the run succeeds. For a different connector, use the examples below as a template and see the connector guides for its connection objects and options.
+The setup script downloads the sample dataset, creates a JSONL sidecar reference and a generated text attachment, and prepares the Dataverse connection and File column. The migration maps the attachment to that account and streams it to Dataverse.
 
 ## Define a migration
 
@@ -59,7 +68,8 @@ $steps = @(
         Type = 'source'
         Inputs = @()
         Source = @{
-            Type = 'csv'
+            Type = 'file'
+            Format = @{ Type = 'csv' }
             ConnectionId = 'files'
             Path = 'account.csv'
             Key = 'id'
@@ -108,29 +118,23 @@ Start with the [migration basics](./docs/concepts/migration-basics.md) for a pla
 
 ## Example migrations
 
-Each target folder contains its own `Setup-Example.ps1` and `example.ps1`. The Dataverse example uses the full [Sample Sales CRM Data](https://www.kaggle.com/datasets/sushicatsan/sample-sales-crm-data) dataset; the other examples use small generated or handcrafted datasets, and the dashboard demo uses synthetic customer records.
+The Dataverse examples use the full [Sample Sales CRM Data](https://www.kaggle.com/datasets/sushicatsan/sample-sales-crm-data) dataset. Setup also generates a roughly 1 MB text attachment beside a JSONL reference, keeping the file bytes out of the structured record.
 
 | Target | Example | Setup | Demonstrates |
 |---|---|---|---|
-| Dataverse | [example.ps1](./examples/dataverse/example.ps1) | [Setup-Example.ps1](./examples/dataverse/Setup-Example.ps1) | Imports a multi-table dataset with keyed joins to parent records. |
-| Dataverse (sequential) | [example-sequential.ps1](./examples/dataverse/example-sequential.ps1) | [Setup-Example.ps1](./examples/dataverse/Setup-Example.ps1) | Uses completion dependencies and alternate keys for lookups. |
-| JSON Lines | [example.ps1](./examples/jsonl/example.ps1) | [Setup-Example.ps1](./examples/jsonl/Setup-Example.ps1) | Uses a `FileInfo` output connection to publish one complete JSON Lines file. |
-| CSV | [example.ps1](./examples/csv/example.ps1) | [Setup-Example.ps1](./examples/csv/Setup-Example.ps1) | Reads and writes CSV with explicit column and type settings; outputs one complete file. |
-| Parquet | [example.ps1](./examples/parquet/example.ps1) | [Setup-Example.ps1](./examples/parquet/Setup-Example.ps1) | Writes one complete Parquet file using an explicit output schema. |
-| SQLite | [example.ps1](./examples/sqlite/example.ps1) | [Setup-Example.ps1](./examples/sqlite/Setup-Example.ps1) | File-path connections, parameterized queries, upfront SQL, per-batch and whole-dataset transforms with managed staging, schema/index validation, and keyed upserts. |
-| DuckDB | [example.ps1](./examples/duckdb/example.ps1) | [Setup-Example.ps1](./examples/duckdb/Setup-Example.ps1) | File-path connections and upfront SQL with per-row, per-batch, and whole-dataset transforms. |
-| Custom PowerShell | [example.ps1](./examples/custom/example.ps1) | [Setup-Example.ps1](./examples/custom/Setup-Example.ps1) | Writes a batch with a custom PowerShell callback. |
+| Dataverse | [example.ps1](./examples/dataverse/example.ps1) | [Setup-Example.ps1](./examples/dataverse/Setup-Example.ps1) | Imports a multi-table dataset with keyed joins; resolves a JSONL sidecar into a file-backed value, detects its MIME type, and uploads a streamed replacement to a Dataverse File column. |
+| Dataverse (sequential) | [example-sequential.ps1](./examples/dataverse/example-sequential.ps1) | [Setup-Example.ps1](./examples/dataverse/Setup-Example.ps1) | Uses completion dependencies and alternate keys, then passes the same sidecar-backed value unchanged to a Dataverse File column. |
 
-Run setup and migration from the repository root. For example:
+Run setup and migration from the repository root:
 
 ```powershell
-pwsh ./examples/jsonl/Setup-Example.ps1
-pwsh ./examples/jsonl/example.ps1
+pwsh ./examples/dataverse/Setup-Example.ps1
+pwsh ./examples/dataverse/example.ps1
 ```
 
 ## Dataverse example
 
-The Dataverse setup downloads the pinned sample dataset and stores a device-code-authenticated connection profile named `Migration4DataverseExample`. The migration imports nine CSV files and writes records to the configured organization. It also creates or customizes Dataverse tables and alternate keys, so use a test organization and review the setup script before running it.
+The Dataverse setup downloads the pinned sample dataset and stores a device-code-authenticated connection profile named `Migration4DataverseExample`. The migration imports nine CSV files and writes records to the configured organization. It also creates or customizes Dataverse tables, alternate keys, and an account File column, so use a test organization and review the setup script before running it. The generated attachment is a separate file referenced from JSONL; the primary example streams it through a mapping that detects MIME type, while the sequential example passes it through unchanged.
 
 Install the required PowerShell module (version 3.3.0 or later), then set up and run the sample:
 
@@ -147,16 +151,11 @@ Set `$env:M4D_RUN_ID` to resume the primary example with its existing run ID. Th
 > [!IMPORTANT]
 > The sample uses a custom table for synthetic Salesforce users; Dataverse assigns imported records to the signed-in user. Source owner IDs are retained as data, not used to set Dataverse ownership. Monetary values have no source currency and use the active price list's currency.
 
-## Dashboard demo
+## Dashboard
 
-The dashboard is a local view of run history and progress. Try the Dataverse-free synthetic demo:
+The Dataverse examples start a local dashboard so you can inspect run history, migration progress, and captured row lineage.
 
-```powershell
-pwsh ./examples/dashboard/Setup-Example.ps1
-pwsh ./examples/dashboard/example.ps1
-```
-
-Open the printed `http://127.0.0.1:5180` URL while the sample runs. See the [dashboard guide](./docs/cmdlets/migration-dashboard.md) for configuration previews, row inspection, data retention, and local-access limitations.
+Open the printed `http://127.0.0.1:5180` URL while a migration runs. See the [dashboard guide](./docs/cmdlets/migration-dashboard.md) for configuration previews, row inspection, data retention, and local-access limitations.
 
 ![Migration4Dataverse dashboard showing the dependency graph, captured rows, and selected-row lineage](./docs/assets/migration-dashboard-running.png)
 
@@ -167,7 +166,8 @@ Open the printed `http://127.0.0.1:5180` URL while the sample runs. See the [das
 - [Step configuration](./docs/configuration.md) — graph shape, connections, callbacks, and step behavior.
 - [Connectors](./docs/connectors/sources/README.md) — source and target connector guides.
 - [Migration basics](./docs/concepts/migration-basics.md) — sources, transforms, filters, targets, and connections in plain language.
-- [Concepts](./docs/concepts/README.md) — dependencies, batching, recovery, and connections.
+- [Binary values and sidecar files](./docs/concepts/binary-values-and-sidecars.md) — streaming file values, connector types, and attachment round-tripping.
+- [Concepts](./docs/concepts/README.md) — dependencies, batching, recovery, binary values, and connections.
 
 ## For contributors
 

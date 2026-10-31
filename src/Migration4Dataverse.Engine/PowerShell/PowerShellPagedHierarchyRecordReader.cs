@@ -6,10 +6,11 @@ namespace Migration4Dataverse.Engine.PowerShell;
 public sealed class PowerShellPagedHierarchyRecordReader : IHierarchyRecordReader
 {
     private const string ReadPageScript = """
-        param($ScriptText, $Connection, $Cursor, $PageSize, $StepId, $Path)
+        param($ScriptText, $Connection, $Cursor, $PageSize, $StepId, $Path, $BinaryStagingRoot)
         $ErrorActionPreference = 'Stop'
         $callback = [scriptblock]::Create([string]$ScriptText)
-        $callbackOutput = @(& $callback $Connection $Cursor $PageSize $StepId $Path)
+        $binaryContext = [pscustomobject]@{ StagingRoot = $BinaryStagingRoot }
+        $callbackOutput = @(& $callback $Connection $Cursor $PageSize $StepId $Path $binaryContext)
         if ($callbackOutput.Count -ne 1) {
             throw "A custom source callback must return exactly one page object; it returned $($callbackOutput.Count) output object(s)."
         }
@@ -39,8 +40,22 @@ public sealed class PowerShellPagedHierarchyRecordReader : IHierarchyRecordReade
         if ($done -isnot [bool]) {
             throw 'A custom source page Done property must be a Boolean.'
         }
+        $recordArray = @($records)
+        $recordsForTransport = [object[]]::new($recordArray.Count)
+        for ($index = 0; $index -lt $recordArray.Count; $index++) {
+            $record = $recordArray[$index]
+            if ([Migration4Dataverse.Engine.Connectors.MigrationBinaryValue]::ContainsBinaryValues($record)) {
+                if ([string]::IsNullOrWhiteSpace([string]$BinaryStagingRoot)) {
+                    throw "Custom source '$StepId' returned binary content without a staging directory."
+                }
+                $record = [Migration4Dataverse.Engine.Connectors.MigrationBinaryValue]::PrepareForTransport(
+                    $record,
+                    [string]$BinaryStagingRoot)
+            }
+            $recordsForTransport[$index] = $record
+        }
         $json = ConvertTo-Json -InputObject ([ordered]@{
-            Records = @($records)
+            Records = $recordsForTransport
             NextCursor = if ($null -eq $nextCursor) { $null } else { [string]$nextCursor }
             Done = $done
         }) -Depth 100 -Compress -ErrorAction Stop
@@ -134,7 +149,8 @@ public sealed class PowerShellPagedHierarchyRecordReader : IHierarchyRecordReade
                     _cursor,
                     _pageSize,
                     _level.StepId,
-                    _level.Path ?? string.Empty
+                    _level.Path ?? string.Empty,
+                    _level.BinaryStagingRoot
                 },
                 cancellationToken)
             .ConfigureAwait(false);

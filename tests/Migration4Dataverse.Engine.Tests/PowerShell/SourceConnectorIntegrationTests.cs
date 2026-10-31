@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Management.Automation;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Migration4Dataverse.Engine.PowerShell;
@@ -54,6 +55,128 @@ public sealed class SourceConnectorIntegrationTests
     }
 
     [Fact]
+    public void CustomFileFormatsStreamRecordsAndPreserveTargetStateAcrossBatches()
+    {
+        using var directory = new TemporaryDirectory();
+        var sourcePath = directory.GetPath("input.records");
+        var outputDirectory = directory.CreateDirectory("output");
+        File.WriteAllLines(sourcePath, ["1|One", "2|Two"]);
+        var steps = new Hashtable[]
+        {
+            new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Id"] = "Source",
+                ["Type"] = "source",
+                ["Inputs"] = Array.Empty<string>(),
+                ["Source"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["Type"] = "file",
+                    ["Format"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["Type"] = "custom",
+                        ["Identity"] = "test-records-v1",
+                        ["Extensions"] = new[] { ".records" },
+                        ["Options"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["Delimiter"] = "|"
+                        },
+                        ["Read"] = ScriptBlock.Create("""
+                            param($Stream, $Context)
+                            $reader = [System.IO.StreamReader]::new(
+                                $Stream,
+                                [System.Text.Encoding]::UTF8,
+                                $true,
+                                1024,
+                                $true)
+                            while ($null -ne ($line = $reader.ReadLine())) {
+                                $fields = $line.Split([char]$Context.Options.Delimiter)
+                                $content = [System.Text.Encoding]::UTF8.GetBytes($fields[1])
+                                $binary = [Migration4Dataverse.Engine.Connectors.MigrationBinaryValue]::FromBytes(
+                                    $content,
+                                    $Context.BinaryStagingRoot,
+                                    "$($fields[0]).txt",
+                                    'text/plain')
+                                @{ Id = $fields[0]; Name = $fields[1]; Content = $binary }
+                            }
+                            """)
+                    },
+                    ["ConnectionId"] = "source",
+                    ["Path"] = "input.records",
+                    ["Key"] = "Id"
+                }
+            },
+            new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Id"] = "Target",
+                ["Type"] = "target",
+                ["Inputs"] = new[] { "Source" },
+                ["Target"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["Type"] = "file",
+                    ["Format"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["Type"] = "custom",
+                        ["Extensions"] = new[] { ".records" },
+                        ["ContentType"] = "application/vnd.example.records",
+                        ["Write"] = ScriptBlock.Create("""
+                            param($Records, $OutputStream, $Context)
+                            $writer = [System.IO.StreamWriter]::new(
+                                $OutputStream,
+                                [System.Text.UTF8Encoding]::new($false),
+                                1024,
+                                $true)
+                            if ($Context.FirstBatch) {
+                                $Context.State['Count'] = 0
+                            }
+                            foreach ($record in $Records) {
+                                if ($record.Content -isnot [Migration4Dataverse.Engine.Connectors.MigrationBinaryValue]) {
+                                    throw 'The custom format did not receive a file-backed binary value.'
+                                }
+                                $contentStream = $record.Content.OpenRead()
+                                try {
+                                    $contentHash = [Convert]::ToHexString(
+                                        [System.Security.Cryptography.SHA256]::HashData($contentStream))
+                                }
+                                finally {
+                                    $contentStream.Dispose()
+                                }
+                                $writer.WriteLine("$($record.Id)|$($record.Name)|$contentHash")
+                                $Context.State['Count'] = [int]$Context.State['Count'] + 1
+                            }
+                            if ($Context.LastBatch) {
+                                $writer.WriteLine("count=$($Context.State['Count'])")
+                            }
+                            $writer.Flush()
+                            """)
+                    },
+                    ["ConnectionId"] = "target",
+                    ["Path"] = "output.records",
+                    ["Operation"] = "Write"
+                }
+            }
+        };
+
+        RunMigration(
+            directory.GetPath("migration.sqlite3"),
+            steps,
+            new Hashtable(StringComparer.OrdinalIgnoreCase)
+            {
+                ["source"] = new DirectoryInfo(Path.GetDirectoryName(sourcePath)!),
+                ["target"] = new DirectoryInfo(outputDirectory)
+            },
+            maxDegreeOfParallelism: 1);
+
+        Assert.Equal(
+            new[]
+            {
+                $"1|One|{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("One")))}",
+                $"2|Two|{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("Two")))}",
+                "count=2"
+            },
+            File.ReadAllLines(Path.Combine(outputDirectory, "output.records")));
+    }
+
+    [Fact]
     public void SalesforceSourceRunsThroughMigrationGraphAndCountProvider()
     {
         using var directory = new TemporaryDirectory();
@@ -98,19 +221,34 @@ public sealed class SourceConnectorIntegrationTests
 
     private static Hashtable SourceStep(string id, string type, Hashtable options)
     {
-        return new Hashtable(StringComparer.OrdinalIgnoreCase)
+        var source = new Hashtable(StringComparer.OrdinalIgnoreCase)
         {
             ["Id"] = id,
             ["Type"] = "source",
             ["Inputs"] = Array.Empty<string>(),
             ["Source"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
             {
-                ["Type"] = type,
+                ["Type"] = type == "excel" ? "file" : type,
                 ["ConnectionId"] = "source",
-                ["Key"] = type == "salesforce" ? "Id" : "id",
-                ["Options"] = options
+                ["Key"] = type == "salesforce" ? "Id" : "id"
             }
         };
+
+        var connector = (Hashtable)source["Source"]!;
+        if (type == "excel")
+        {
+            connector["Format"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Type"] = "excel",
+                ["Options"] = options
+            };
+        }
+        else
+        {
+            connector["Options"] = options;
+        }
+
+        return source;
     }
 
     private static Hashtable TargetStep(string id)
@@ -122,7 +260,8 @@ public sealed class SourceConnectorIntegrationTests
             ["Inputs"] = new[] { "Source" },
             ["Target"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
             {
-                ["Type"] = "jsonl",
+                ["Type"] = "file",
+                ["Format"] = new Hashtable { ["Type"] = "jsonl" },
                 ["ConnectionId"] = "target",
                 ["Operation"] = "Write",
                 ["Path"] = "accounts.jsonl",
@@ -134,7 +273,8 @@ public sealed class SourceConnectorIntegrationTests
     private static void RunMigration(
         string databasePath,
         Hashtable[] steps,
-        Hashtable connections)
+        Hashtable connections,
+        int maxDegreeOfParallelism = 64)
     {
         using var powershell = System.Management.Automation.PowerShell.Create();
         powershell.AddCommand("Import-Module")
@@ -148,6 +288,7 @@ public sealed class SourceConnectorIntegrationTests
             .AddParameter("RunName", "Source connector integration")
             .AddParameter("RunId", Guid.NewGuid().ToString("N"))
             .AddParameter("BatchSize", 1)
+            .AddParameter("MaxDegreeOfParallelism", maxDegreeOfParallelism)
             .AddParameter("MaxAttempts", 1)
             .AddParameter("Steps", steps)
             .AddParameter("Connections", connections)

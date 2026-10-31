@@ -28,6 +28,14 @@ The connector uses the list endpoint for unfiltered reads and the search endpoin
 
 When `FlattenProperties` is `false`, records keep the raw HubSpot shape and only top-level properties such as `id` can be used as the source key. The search count provider runs a one-record search and returns HubSpot's `total`; HubSpot may cap that value for very large result sets.
 
+| HubSpot JSON value | Type in the PowerShell mapping |
+|---|---|
+| Null, Boolean, number, string | `$null`, `Boolean`, `Int64`/`Double`, `String` |
+| `properties` after flattening, nested object / array | PowerShell dictionary / array |
+| CRM IDs | `System.String` |
+| ISO timestamps / date properties | Usually `System.DateTime` after default PowerShell JSON parsing |
+| Binary content | Not included by the CRM records API; use the document API through a custom connector if needed |
+
 ## Example
 
 ```powershell

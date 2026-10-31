@@ -26,9 +26,18 @@ The callback receives:
 
 1. The connection object from `-Connections`.
 2. The mapped records for the batch. A record has an `Id` when the source defines `Source.Id` or a Transform supplies it; whether it is required depends on the custom target.
-3. A context object with `StepId`, `TableName`, `RunId`, `BatchId`, `Sequence`, and `TargetPath`. `TargetPath` is the resolved `Target.Path`; when `Path` is omitted it is an empty string.
+3. A context object with `StepId`, `TableName`, `RunId`, `BatchId`, `Sequence`, `TargetPath`, and `BinaryStagingRoot`. `TargetPath` is the resolved `Target.Path`; when `Path` is omitted it is an empty string.
 
 It must emit exactly one Boolean `$true` after success. Exceptions, no output, extra output, `$false`, or any non-Boolean value fail the batch. Send diagnostics to non-output streams.
+
+Mapped binary fields are `MigrationBinaryValue` instances. Open them with `OpenRead()` and stream to the provider SDK; do not call `ToBase64String()` unless the destination requires a string. A callback can create a replacement with `CreateWriter()` or use `New-MigrationBinaryValue` with the supplied `BinaryStagingRoot`.
+
+| Logical mapped value | Type received by the callback |
+|---|---|
+| Null, Boolean, integer, number, text | `$null`, `Boolean`, `Int64`, `Double`, `String` |
+| GUID / ISO date-time | `System.String` / usually `System.DateTime` after JSON batch parsing |
+| Nested object / array | PowerShell dictionary / array |
+| Binary source/transform value | `MigrationBinaryValue` |
 
 ## Options
 

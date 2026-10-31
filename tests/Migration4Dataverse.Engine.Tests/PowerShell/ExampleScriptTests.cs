@@ -7,18 +7,7 @@ public sealed class ExampleScriptTests
     [Theory]
     [InlineData("examples/dataverse/Setup-Example.ps1")]
     [InlineData("examples/dataverse/example.ps1")]
-    [InlineData("examples/jsonl/Setup-Example.ps1")]
-    [InlineData("examples/jsonl/example.ps1")]
-    [InlineData("examples/csv/Setup-Example.ps1")]
-    [InlineData("examples/csv/example.ps1")]
-    [InlineData("examples/parquet/Setup-Example.ps1")]
-    [InlineData("examples/parquet/example.ps1")]
-    [InlineData("examples/sqlite/Setup-Example.ps1")]
-    [InlineData("examples/sqlite/example.ps1")]
-    [InlineData("examples/duckdb/Setup-Example.ps1")]
-    [InlineData("examples/duckdb/example.ps1")]
-    [InlineData("examples/custom/Setup-Example.ps1")]
-    [InlineData("examples/custom/example.ps1")]
+    [InlineData("examples/dataverse/example-sequential.ps1")]
     [InlineData("src/Migration4Dataverse.PowerShell/Migration4Dataverse.PowerShell.psm1")]
     [InlineData("src/Migration4Dataverse.PowerShell/Migration4Dataverse.PowerShell.psd1")]
     public void PowerShellFilesHaveNoParseErrorsOrScriptParameters(string relativePath)
@@ -37,26 +26,21 @@ public sealed class ExampleScriptTests
     }
 
     [Fact]
-    public void EachTargetExampleIsSelfContainedAndUsesItsOwnConnectorType()
+    public void DataverseExamplesAreSelfContainedAndTargetDataverse()
     {
         var repositoryRoot = FindRepositoryRoot();
-        var examples = new Dictionary<string, string>(StringComparer.Ordinal)
+        var examples = new[]
         {
-            ["dataverse"] = "dataverse",
-            ["jsonl"] = "jsonl",
-            ["csv"] = "csv",
-            ["parquet"] = "parquet",
-            ["custom"] = "custom",
-            ["sqlite"] = "sqlite",
-            ["duckdb"] = "duckdb"
+            "examples/dataverse/example.ps1",
+            "examples/dataverse/example-sequential.ps1"
         };
 
-        foreach (var (folder, targetType) in examples)
+        foreach (var relativePath in examples)
         {
-            var scriptPath = Path.Combine(repositoryRoot, "examples", folder, "example.ps1");
+            var scriptPath = Path.Combine(repositoryRoot, relativePath);
             var script = File.ReadAllText(scriptPath);
 
-            Assert.Contains($"Type = '{targetType}'", script, StringComparison.Ordinal);
+            Assert.Contains("Type = 'dataverse'", script, StringComparison.Ordinal);
             Assert.DoesNotContain("ExampleMigration.ps1", script, StringComparison.Ordinal);
             Assert.DoesNotContain("ExampleConnectionOptions.ps1", script, StringComparison.Ordinal);
             Assert.DoesNotContain("$PSBoundParameters", script, StringComparison.Ordinal);
@@ -64,18 +48,30 @@ public sealed class ExampleScriptTests
     }
 
     [Theory]
-    [InlineData("sqlite")]
-    [InlineData("duckdb")]
-    public void DatabaseExamplesUsePathConnections(string folder)
+    [InlineData("examples/dataverse/example.ps1")]
+    [InlineData("examples/dataverse/example-sequential.ps1")]
+    public void DataverseExamplesShowSidecarBackedFileUploads(string relativePath)
     {
-        var exampleDirectory = Path.Combine(FindRepositoryRoot(), "examples", folder);
-        var migrationScript = File.ReadAllText(Path.Combine(exampleDirectory, "example.ps1"));
-        Assert.Contains("System.IO.FileInfo", migrationScript, StringComparison.Ordinal);
-        Assert.DoesNotContain("New-MigrationDatabaseConnection", migrationScript, StringComparison.Ordinal);
+        var repositoryRoot = FindRepositoryRoot();
+        var migrationScript = File.ReadAllText(Path.Combine(repositoryRoot, relativePath));
+        var setupScript = File.ReadAllText(Path.Combine(repositoryRoot, "examples/dataverse/Setup-Example.ps1"));
 
-        var setupScript = File.ReadAllText(Path.Combine(exampleDirectory, "Setup-Example.ps1"));
-        Assert.Contains("MigrationDatabaseConnectionFactory", setupScript, StringComparison.Ordinal);
-        Assert.DoesNotContain("New-MigrationDatabaseConnection", setupScript, StringComparison.Ordinal);
+        Assert.Contains("BinaryColumns = @('Content')", migrationScript, StringComparison.Ordinal);
+        Assert.Contains("new_m4dexamplefile", migrationScript, StringComparison.Ordinal);
+        Assert.Contains("AccountAttachmentTarget", migrationScript, StringComparison.Ordinal);
+        Assert.Contains("account-attachments.jsonl", migrationScript, StringComparison.Ordinal);
+        Assert.Contains("Type = 'File'", setupScript, StringComparison.Ordinal);
+        Assert.Contains("$attachmentSidecarName/$attachmentFileName", setupScript, StringComparison.Ordinal);
+
+        if (string.Equals(relativePath, "examples/dataverse/example.ps1", StringComparison.Ordinal))
+        {
+            Assert.Contains(".CreateWriter(", migrationScript, StringComparison.Ordinal);
+            Assert.Contains(".DetectMimeType()", migrationScript, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Contains("new_m4dexamplefile = $attachment", migrationScript, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

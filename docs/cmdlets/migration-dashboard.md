@@ -89,16 +89,11 @@ The default snapshot retention is 30 days; set `-DebugCaptureRetentionDays` from
 
 Snapshots carry deterministic lineage IDs, stage names, attempt numbers, batch/step references, and parent IDs for generated dependency children and explicitly mapped merged rows. Selecting a row follows every recorded parent-child link in both directions so the dashboard can show multiple contributing rows across the pipeline. Transform and Filter steps record their outputs with input-row lineage, including expanded records. For callback-provided intermediate stages, handlers should provide `ParentRecordIndices` for reordered, merged, split, or otherwise non-positional output, and `ParentRecordReferences` when a row depends on records from multiple stored parent batches.
 
-## Demo
+## Dataverse example
 
-From the repository root, with Node.js/npm, the .NET 10 SDK, and PowerShell 7.6+ installed:
+The [Dataverse example setup](../../examples/dataverse/Setup-Example.ps1) prepares the dataset and connection profile; then run the [Dataverse migration](../../examples/dataverse/example.ps1). It starts the dashboard while the example imports the dataset and streams its sidecar-backed file attachment to Dataverse.
 
-```powershell
-pwsh ./examples/dashboard/Setup-Example.ps1
-pwsh ./examples/dashboard/example.ps1
-```
-
-The demo uses synthetic customer records and callback steps; it does not connect to Dataverse. It starts the dashboard, runs a deliberately paced 48-batch extract/transform/load graph with debug capture enabled, and keeps the server alive after completion so you can inspect the run and trace rows. It stores data under `examples/dashboard/state`.
+Open the printed `http://127.0.0.1:5180` URL while the sample runs. The dashboard remains available after completion until the example exits.
 
 ## HTTP API
 

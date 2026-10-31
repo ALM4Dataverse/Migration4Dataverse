@@ -32,6 +32,34 @@ Target = @{
 
 The adapter loads `Rnwood.Dataverse.Data.PowerShell` when a typed Dataverse target is used. The caller creates, authenticates, and owns the connection. The repository's Dataverse examples require module version 3.3.0 or later. See upstream [`Get-DataverseConnection`](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Get-DataverseConnection.md), [connections](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/core-concepts/connections.md), and [authentication](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/getting-started/authentication.md).
 
+## File columns and attachments
+
+Map a Dataverse File/Image column to a `MigrationBinaryValue`. The target first writes the ordinary row, obtains its primary-key ID, then streams the value to Dataverse in file blocks. A Base64-representation value is decoded as a stream before upload. File names and content types are preserved when supplied; `DetectMimeType()` can infer a type from a small content prefix or the file extension.
+
+```powershell
+Script = {
+    param($row, $BinaryContext)
+    @{
+        Id = $row.Id
+        new_contractfile = $row.contract
+    }
+}
+```
+
+Notes (`annotation`) and activity attachment (`activitymimeattachment`) targets accept binary values mapped to `documentbody` and `body`, respectively. The adapter converts these values to Base64 for the upstream record cmdlet because those Dataverse columns use Base64 text in the record-write contract. This API boundary materializes the encoded string; keep the surrounding migration path file-backed and use a suitably small Dataverse target `BatchSize` for large attachments.
+
+> [!WARNING]
+> A File/Image upload occurs after the row write. If the upload fails, the batch fails and may be retried; use a stable mapping and an idempotent operation so the target row and file can be safely written again. Empty File/Image content is rejected rather than silently treated as a clear operation.
+
+| Logical mapped value | Accepted value at the migration adapter |
+|---|---|
+| Text, Boolean, number | JSON-compatible `System.String`, `Boolean`, or numeric value |
+| GUID and date/time | GUID string and ISO date/time string |
+| Lookup | The identifier/reference form supported by the upstream `Set-DataverseRecord` contract |
+| File/Image or attachment content | `MigrationBinaryValue`; Notes/activity bodies are encoded to Base64 at the upstream cmdlet boundary |
+
+This is the adapter's value contract, not a catalog of Dataverse attribute types. For complete lookup and attribute rules, use the linked upstream write references.
+
 ## Connections and request balancing
 
 Use one authenticated connection or an array under the named `-Connections` slot:

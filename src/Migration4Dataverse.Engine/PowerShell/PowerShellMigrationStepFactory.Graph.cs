@@ -124,6 +124,7 @@ internal static partial class PowerShellMigrationStepFactory
 
         var graphSteps = stepObjects.ToArray();
         var objectStagingRoot = GetObjectStagingRoot(migrationDatabasePath, runId);
+        var binaryStagingRoot = GetBinaryStagingRoot(migrationDatabasePath, runId);
         var wholeDatasetStageTargetIds = GetWholeDatasetStageTargetIds(graphSteps);
         var inputs = graphSteps
             .Select(step => ParseGraphStep(
@@ -207,6 +208,7 @@ internal static partial class PowerShellMigrationStepFactory
         }
         var customSources = new Dictionary<string, PowerShellSourceCallbackDefinition>(StringComparer.Ordinal);
         var dataverseSources = new Dictionary<string, PowerShellDataverseSourceDefinition>(StringComparer.Ordinal);
+        var customFormatSources = new Dictionary<string, PowerShellCustomFormatSourceDefinition>(StringComparer.Ordinal);
         foreach (var source in inputs.Where(step => step.Type == "source" && step.SourceType == "custom"))
         {
             var custom = source.SourceCustom
@@ -230,7 +232,24 @@ internal static partial class PowerShellMigrationStepFactory
                     source.DataverseSourcePartitions));
         }
 
-        var readerFactory = new PowerShellHierarchyRecordReaderFactory(executor, customSources, dataverseSources);
+        foreach (var source in inputs.Where(step =>
+                     step.Type == "source" &&
+                     step.SourceFormat?.Type == "custom"))
+        {
+            var format = source.SourceFormat
+                ?? throw new InvalidOperationException($"Custom format source '{source.Id}' has no format definition.");
+            customFormatSources.Add(
+                source.Id,
+                new PowerShellCustomFormatSourceDefinition(
+                    format.Identity!,
+                    format.ReaderScriptText!));
+        }
+
+        var readerFactory = new PowerShellHierarchyRecordReaderFactory(
+            executor,
+            customSources,
+            dataverseSources,
+            customFormatSources);
         var semaphores = new Dictionary<string, (SemaphoreSlim Semaphore, int Capacity)>(StringComparer.Ordinal);
         var definitions = new List<MigrationStepDefinition>(inputs.Length);
         var throughputMeter = new PipelineThroughputMeter();
@@ -271,7 +290,7 @@ internal static partial class PowerShellMigrationStepFactory
                 HierarchySourceLevel? sourceLevel = null;
                 if (input.Type == "source" && input.RowDependencies.Length == 0)
                 {
-                    sourceLevel = CreateGraphSourceLevel(input);
+                    sourceLevel = CreateGraphSourceLevel(input, binaryStagingRoot);
                     sourceReader = new HierarchyBatchSource(
                         sourceLevel,
                         input.BatchSize,
@@ -280,7 +299,7 @@ internal static partial class PowerShellMigrationStepFactory
                 }
                 else if (input.Type == "source" && input.RowDependencies.Length > 0)
                 {
-                    sourceLevel = CreateGraphSourceLevel(input);
+                    sourceLevel = CreateGraphSourceLevel(input, binaryStagingRoot);
                     var parents = input.RowDependencies
                         .Select(dependency => new RowLinkedParentDependency(
                             dependency.Job,
@@ -363,7 +382,18 @@ internal static partial class PowerShellMigrationStepFactory
                     ["TargetConnectionId"] = input.TargetConnectionId ?? string.Empty,
                     ["TargetPath"] = input.TargetPath ?? string.Empty,
                     ["TargetOptionsJson"] = input.TargetOptionsJson ?? "{}",
+                    ["TargetFormatType"] = input.TargetFormat?.Type ?? string.Empty,
+                    ["TargetFormatOptionsJson"] = input.TargetFormat?.OptionsJson ?? "{}",
+                    ["TargetFormatExtensions"] = input.TargetFormat?.Extensions ?? Array.Empty<string>(),
+                    ["TargetFormatWriterText"] = input.TargetFormat?.WriterScriptText ?? string.Empty,
+                    ["TargetFormatContentType"] = input.TargetFormat?.ContentType ?? string.Empty,
                     ["TargetCallbackText"] = input.TargetCustom?.CallbackText ?? string.Empty,
+                    ["TargetBinaryReferenceText"] = input.TargetBinaryReferenceScriptText ?? string.Empty,
+                    ["SourcePath"] = input.SourcePath,
+                    ["SourceOptionsJson"] = input.SourceOptionsJson,
+                    ["SourceFormatType"] = input.SourceFormat?.Type ?? string.Empty,
+                    ["SourceFormatOptionsJson"] = input.SourceFormat?.OptionsJson ?? "{}",
+                    ["SourceBinaryResolverText"] = input.SourceBinaryResolverScriptText ?? string.Empty,
                     ["TargetSemaphore"] = targetSemaphore,
                     ["TargetController"] = targetController,
                     ["PipelineThroughputMeter"] = throughputMeter,
@@ -380,6 +410,7 @@ internal static partial class PowerShellMigrationStepFactory
                     ["JoinInputConsumers"] = joinInputConsumers,
                     ["CaptureDebugData"] = captureDebugData,
                     ["StagingRoot"] = objectStagingRoot,
+                    ["BinaryStagingRoot"] = binaryStagingRoot,
                     ["WhatIf"] = whatIf
                 };
                 var handlerWithLease = input.Type == "callback"
@@ -458,34 +489,13 @@ internal static partial class PowerShellMigrationStepFactory
                     StepCompletionCoordinator = stepCompletionCoordinator,
                     TryAcquireExecutionLease = tryAcquireExecutionLease,
                     ExecuteBatchWithExecutionLeaseAsync = handlerWithLease,
-                    CompleteAsync = !whatIf && input.Type == "target"
-                        ? input.TargetType is "jsonl" or "csv" or "parquet"
-                            ? cancellationToken =>
-                            {
-                                cancellationToken.ThrowIfCancellationRequested();
-                                FileBatchTargetWriter.FinalizeSingleFileTarget(
-                                    input.TargetPath!,
-                                    runId ?? throw new InvalidOperationException(
-                                        $"File target '{input.Id}' requires a run ID for finalization."),
-                                    input.Id,
-                                    input.TargetType!,
-                                    input.TargetOptionsJson ?? "{}");
-                                return Task.CompletedTask;
-                            }
-                            : input.TargetType is "azureblob" or "s3" or "adlsgen2" or "gcs"
-                                ? cancellationToken =>
-                                    ObjectStorageTargetWriter.FinalizeAsync(
-                                        input.TargetConnection!,
-                                        input.TargetType!,
-                                        input.TargetPath!,
-                                        input.Id,
-                                        runId ?? throw new InvalidOperationException(
-                                            $"Object storage target '{input.Id}' requires a run ID for finalization."),
-                                        input.TargetOptionsJson ?? "{}",
-                                        objectStagingRoot,
-                                        cancellationToken)
-                                : null
-                        : null,
+                    CompleteAsync = CreateTargetFinalizer(
+                        input,
+                        executor,
+                        whatIf,
+                        runId,
+                        objectStagingRoot,
+                        binaryStagingRoot),
                     DispatchWeight = dispatchWeights[input.Id]
                 });
             }
@@ -819,13 +829,18 @@ internal static partial class PowerShellMigrationStepFactory
         return Path.Combine(Path.GetTempPath(), "migration4dataverse-staging", runDirectory);
     }
 
+    private static string GetBinaryStagingRoot(string? migrationDatabasePath, string? runId)
+    {
+        return MigrationBinaryValue.GetRunStagingRoot(migrationDatabasePath, runId);
+    }
+
     private static void ValidateFileTargetPaths(IReadOnlyList<GraphStepInput> inputs)
     {
         var pathComparer = OperatingSystem.IsWindows()
             ? StringComparer.OrdinalIgnoreCase
             : StringComparer.Ordinal;
         var duplicatePath = inputs
-            .Where(input => input.Type == "target" && input.TargetType is "jsonl" or "csv" or "parquet")
+            .Where(input => input.Type == "target" && input.TargetType == "file")
             .GroupBy(input => Path.GetFullPath(input.TargetPath!), pathComparer)
             .FirstOrDefault(group => group.Count() > 1);
         if (duplicatePath is not null)
@@ -1057,9 +1072,11 @@ internal static partial class PowerShellMigrationStepFactory
 
         var sourceType = string.Empty;
         var sourcePath = string.Empty;
+        GraphFileFormatInput? sourceFormat = null;
         var sourceKey = string.Empty;
         var idProperty = string.Empty;
         var sourceOptionsJson = "{}";
+        string? sourceBinaryResolverScriptText = null;
         long expectedRecordCount = 0;
         string? sourceConnectionId = null;
         object? sourceConnection = null;
@@ -1075,15 +1092,29 @@ internal static partial class PowerShellMigrationStepFactory
         {
             var source = GetMap(GetProperty(step, "Source"), $"Source for step '{id}'")!;
             sourceType = GetRequiredString(source, "Type").ToLowerInvariant();
-            if (sourceType is not ("jsonl" or "csv" or "parquet" or "excel" or "custom" or "dataverse" or
+            if (sourceType is not ("file" or "custom" or "dataverse" or
                 "sqlite" or "duckdb" or "sqlserver" or "postgresql" or "mysql" or "oracle" or
                 "azureblob" or "s3" or "adlsgen2" or "gcs" or "http" or "odata" or "mongodb" or
                 "salesforce" or "sharepoint" or "hubspot" or "zendesk" or "servicenow"))
             {
                 throw new ArgumentException($"Source connector type '{sourceType}' for step '{id}' is not supported.");
             }
+            if (IsFileOrObjectStorageType(sourceType))
+            {
+                sourceFormat = ParseFileFormat(GetProperty(source, "Format"), id, "source");
+            }
+            else if (GetProperty(source, "Format") is not null)
+            {
+                throw new ArgumentException(
+                    $"Source step '{id}' can configure Format only for file and object-storage sources.");
+            }
             sourceConnectionId = GetRequiredString(source, "ConnectionId");
             sourceConnection = ResolveConnection(connections, sourceConnectionId, id, "source");
+            if (sourceType == "file" && sourceConnection is not (FileInfo or DirectoryInfo))
+            {
+                throw new ArgumentException(
+                    $"File source step '{id}' requires a FileInfo or DirectoryInfo in -Connections.");
+            }
             if (sourceType == "dataverse")
             {
                 sourceConnection = NormalizeDataverseConnectionSlot(
@@ -1146,7 +1177,7 @@ internal static partial class PowerShellMigrationStepFactory
                 source,
                 "Path",
                 required: sourceConnection is DirectoryInfo &&
-                          sourceType is "jsonl" or "csv" or "parquet" or "excel" or "sqlite" or "duckdb");
+                          (sourceType is "file" or "sqlite" or "duckdb"));
             sourcePath = ResolveConnectorPath(
                 sourceConnection,
                 configuredSourcePath ?? string.Empty,
@@ -1189,10 +1220,51 @@ internal static partial class PowerShellMigrationStepFactory
             }
             sourceKey = GetRequiredString(source, "Key");
             idProperty = GetString(source, "Id", required: false) ?? string.Empty;
-            sourceOptionsJson = SerializeJson(GetProperty(source, "Options"));
-            if (sourceType == "excel")
+            if (sourceType == "dataverse" &&
+                GetProperty(dataverseSourceOptions, "FileColumns") is not null &&
+                string.IsNullOrWhiteSpace(idProperty))
             {
-                ExcelSourceOptions.FromJson(sourceOptionsJson, id).Validate(id);
+                throw new ArgumentException(
+                    $"Dataverse source step '{id}' must configure Source.Id when Options.FileColumns is used.");
+            }
+            var sourceOptions = GetMap(
+                GetProperty(source, "Options"),
+                $"Options for source step '{id}'",
+                required: false);
+            if (sourceType == "file" && sourceOptions is { Count: > 0 })
+            {
+                throw new ArgumentException(
+                    $"File source step '{id}' has no storage Options; put format settings in Format.Options.");
+            }
+            sourceOptionsJson = SerializeJson(sourceOptions);
+            var sourceFormatOptionsJson = sourceFormat?.OptionsJson ?? "{}";
+            var sourceBinaryColumns = BinaryFileReferenceSupport.GetConfiguredBinaryColumns(
+                sourceFormatOptionsJson,
+                id);
+            if (sourceBinaryColumns.Length > 0 &&
+                (sourceType != "file" || sourceFormat!.Type is not ("csv" or "jsonl" or "parquet")))
+            {
+                throw new ArgumentException(
+                    $"Source step '{id}' can configure Format.Options.BinaryColumns only for CSV, JSON Lines, or Parquet file sources.");
+            }
+            if (GetProperty(source, "ResolveBinaryReference") is not null)
+            {
+                if (sourceType != "file" || sourceFormat!.Type is not ("csv" or "jsonl" or "parquet"))
+                {
+                    throw new ArgumentException(
+                        $"Source step '{id}' can configure ResolveBinaryReference only for CSV, JSON Lines, or Parquet file formats.");
+                }
+                if (sourceBinaryColumns.Length == 0)
+                {
+                    throw new ArgumentException(
+                        $"Source step '{id}' must configure Format.Options.BinaryColumns when ResolveBinaryReference is provided.");
+                }
+                sourceBinaryResolverScriptText = NormalizeScriptText(
+                    GetScriptBlock(source, "ResolveBinaryReference", required: true));
+            }
+            if (sourceFormat?.Type == "excel")
+            {
+                ExcelSourceOptions.FromJson(sourceFormatOptionsJson, id).Validate(id);
             }
             else if (sourceType == "salesforce")
             {
@@ -1239,7 +1311,9 @@ internal static partial class PowerShellMigrationStepFactory
         string? targetOperation = null;
         string? tableName = null;
         string? targetPath = null;
+        GraphFileFormatInput? targetFormat = null;
         string? targetOptionsJson = null;
+        string? targetBinaryReferenceScriptText = null;
         string? targetConnectionId = null;
         object? targetConnection = null;
         var targetMaxConcurrency = maxTargetConcurrency;
@@ -1249,11 +1323,20 @@ internal static partial class PowerShellMigrationStepFactory
         {
             var target = GetMap(GetProperty(step, "Target"), $"Target for step '{id}'")!;
             targetType = GetRequiredString(target, "Type").ToLowerInvariant();
-            if (targetType is not ("dataverse" or "jsonl" or "csv" or "parquet" or "custom" or
+            if (targetType is not ("dataverse" or "file" or "custom" or
                 "sqlite" or "duckdb" or "sqlserver" or "postgresql" or "mysql" or "oracle" or
-                "azureblob" or "s3" or "adlsgen2" or "gcs" or "mongodb"))
+                "azureblob" or "s3" or "adlsgen2" or "gcs" or "mongodb" or "sharepoint"))
             {
                 throw new ArgumentException($"Target connector type '{targetType}' for step '{id}' is not supported.");
+            }
+            if (IsFileOrObjectStorageType(targetType))
+            {
+                targetFormat = ParseFileFormat(GetProperty(target, "Format"), id, "target");
+            }
+            else if (GetProperty(target, "Format") is not null)
+            {
+                throw new ArgumentException(
+                    $"Target step '{id}' can configure Format only for file and object-storage targets.");
             }
             if (targetType == "dataverse")
             {
@@ -1293,6 +1376,11 @@ internal static partial class PowerShellMigrationStepFactory
                 targetConnection = ResolveConnection(connections, targetConnectionId, id, "target")
                     ?? throw new ArgumentException(
                         $"Target connection '{targetConnectionId}' for step '{id}' resolved to null.");
+                if (targetType == "file" && targetConnection is not (FileInfo or DirectoryInfo))
+                {
+                    throw new ArgumentException(
+                        $"File target step '{id}' requires a FileInfo or DirectoryInfo in -Connections.");
+                }
                 if (targetType == "dataverse")
                 {
                     targetConnection = NormalizeDataverseConnectionSlot(
@@ -1342,12 +1430,16 @@ internal static partial class PowerShellMigrationStepFactory
                     targetConnection,
                     $"target '{id}'");
             }
+            if (targetType == "sharepoint")
+            {
+                RestJsonConnectorSupport.GetHttpClient(targetConnection, "SharePoint", $"target '{id}'");
+            }
             var configuredTargetPath = GetString(
                 target,
                 "Path",
                 required: !managedStageTarget &&
                           targetConnection is DirectoryInfo &&
-                          targetType is "jsonl" or "csv" or "parquet" or "sqlite" or "duckdb");
+                          (targetType is "file" or "sqlite" or "duckdb"));
             targetPath = managedStageTarget
                 ? string.Empty
                 : ResolveConnectorPath(
@@ -1359,12 +1451,37 @@ internal static partial class PowerShellMigrationStepFactory
                 GetProperty(target, "Options"),
                 $"Options for target step '{id}'",
                 required: false);
+            if (targetType == "file" && targetOptions is { Count: > 0 })
+            {
+                throw new ArgumentException(
+                    $"File target step '{id}' has no storage Options; put format settings in Format.Options.");
+            }
             if (GetProperty(targetOptions, "RecordIdKeys") is not null)
             {
                 throw new ArgumentException(
                     $"Target step '{id}' must not configure RecordIdKeys; parent records are captured automatically for Join relationships from MatchOn.");
             }
             targetOptionsJson = SerializeJson(targetOptions);
+            var targetFormatOptionsJson = targetFormat?.OptionsJson ?? "{}";
+            var targetBinaryColumns = BinaryFileReferenceSupport.GetConfiguredBinaryColumns(
+                targetFormatOptionsJson,
+                id);
+            if (targetBinaryColumns.Length > 0 &&
+                (targetType != "file" || targetFormat!.Type is not ("csv" or "jsonl" or "parquet")))
+            {
+                throw new ArgumentException(
+                    $"Target step '{id}' can configure Format.Options.BinaryColumns only for CSV, JSON Lines, or Parquet file formats.");
+            }
+            if (GetProperty(target, "CreateBinaryReference") is not null)
+            {
+                if (targetType != "file" || targetFormat!.Type is not ("csv" or "jsonl" or "parquet"))
+                {
+                    throw new ArgumentException(
+                        $"Target step '{id}' can configure CreateBinaryReference only for CSV, JSON Lines, or Parquet file formats.");
+                }
+                targetBinaryReferenceScriptText = NormalizeScriptText(
+                    GetScriptBlock(target, "CreateBinaryReference", required: true));
+            }
             targetMatchOnGroups = ParseStringGroups(GetProperty(targetOptions, "MatchOn"));
             tableName = targetType == "dataverse"
                 ? GetRequiredString(target, "Table")
@@ -1669,9 +1786,11 @@ internal static partial class PowerShellMigrationStepFactory
             batchSize,
             sourceType,
             sourcePath,
+            sourceFormat,
             sourceKey,
             idProperty,
             sourceOptionsJson,
+            sourceBinaryResolverScriptText,
             expectedRecordCount,
             sourceConnectionId,
             sourceConnection,
@@ -1683,7 +1802,9 @@ internal static partial class PowerShellMigrationStepFactory
             targetOperation,
             tableName,
             targetPath,
+            targetFormat,
             targetOptionsJson,
+            targetBinaryReferenceScriptText,
             targetConnectionId,
             targetConnection,
             targetMaxConcurrency,
@@ -1789,6 +1910,136 @@ internal static partial class PowerShellMigrationStepFactory
             .Select(group => GetStrings(group))
             .Where(columns => columns.Length > 0)
             .ToArray();
+    }
+
+    private static bool IsFileOrObjectStorageType(string connectorType)
+    {
+        return connectorType == "file" ||
+            connectorType is "azureblob" or "s3" or "adlsgen2" or "gcs";
+    }
+
+    private static GraphFileFormatInput ParseFileFormat(
+        object? value,
+        string stepId,
+        string role)
+    {
+        var format = GetMap(value, $"Format for {role} step '{stepId}'", required: true)!;
+        var formatType = GetRequiredString(format, "Type").Trim().ToLowerInvariant();
+        var options = GetMap(
+            GetProperty(format, "Options"),
+            $"Format.Options for {role} step '{stepId}'",
+            required: false);
+        var optionsJson = SerializeJson(options);
+        var extensions = ParseFormatExtensions(GetProperty(format, "Extensions"), stepId, role);
+        var contentType = GetString(format, "ContentType", required: false);
+        string? identity = null;
+        string? readerScriptText = null;
+        string? writerScriptText = null;
+
+        if (formatType == "custom")
+        {
+            if (role == "source")
+            {
+                readerScriptText = NormalizeScriptText(GetScriptBlock(format, "Read", required: true));
+                identity = GetRequiredString(format, "Identity");
+                if (GetProperty(format, "Write") is not null)
+                {
+                    throw new ArgumentException(
+                        $"Custom source format for step '{stepId}' must not configure Write.");
+                }
+            }
+            else
+            {
+                writerScriptText = NormalizeScriptText(GetScriptBlock(format, "Write", required: true));
+                if (GetProperty(format, "Read") is not null)
+                {
+                    throw new ArgumentException(
+                        $"Custom target format for step '{stepId}' must not configure Read.");
+                }
+            }
+
+            if (contentType is not null &&
+                (!contentType.Contains('/', StringComparison.Ordinal) ||
+                 contentType.Any(char.IsWhiteSpace)))
+            {
+                throw new ArgumentException(
+                    $"Format.ContentType for custom format on step '{stepId}' must be a MIME type.");
+            }
+        }
+        else
+        {
+            if (formatType is not ("jsonl" or "csv" or "parquet" or "excel" or "binary"))
+            {
+                throw new ArgumentException(
+                    $"File format '{formatType}' for {role} step '{stepId}' is not supported.");
+            }
+
+            var handler = RecordFileFormatRegistry.GetRequired(formatType);
+            if (role == "source" && !handler.SupportsSource)
+            {
+                throw new ArgumentException(
+                    $"File format '{formatType}' does not support sources.");
+            }
+            if (role == "target" && !handler.SupportsTarget)
+            {
+                throw new ArgumentException(
+                    $"File format '{formatType}' does not support targets.");
+            }
+            if (extensions.Length > 0 || contentType is not null ||
+                GetProperty(format, "Read") is not null ||
+                GetProperty(format, "Write") is not null ||
+                GetProperty(format, "Identity") is not null)
+            {
+                throw new ArgumentException(
+                    $"Format.Extensions, Format.ContentType, Format.Identity, Read, and Write are only supported by custom formats on step '{stepId}'.");
+            }
+        }
+
+        return new GraphFileFormatInput(
+            formatType,
+            optionsJson,
+            extensions,
+            contentType,
+            identity,
+            readerScriptText,
+            writerScriptText);
+    }
+
+    private static string[] ParseFormatExtensions(object? value, string stepId, string role)
+    {
+        if (value is null)
+        {
+            return Array.Empty<string>();
+        }
+
+        if (value is string)
+        {
+            throw new ArgumentException(
+                $"Format.Extensions for {role} step '{stepId}' must be an array of extensions.");
+        }
+
+        var items = LanguagePrimitives.GetEnumerable(value)?.Cast<object?>().ToArray()
+            ?? throw new ArgumentException(
+                $"Format.Extensions for {role} step '{stepId}' must be an array of extensions.");
+        var extensions = items.Select(item =>
+        {
+            var extension = Unwrap(item) as string;
+            if (string.IsNullOrWhiteSpace(extension) ||
+                extension[0] != '.' ||
+                extension.Contains('/') ||
+                extension.Contains('\\'))
+            {
+                throw new ArgumentException(
+                    $"Format.Extensions for {role} step '{stepId}' must contain simple extensions beginning with '.'.");
+            }
+            return extension.Trim();
+        }).ToArray();
+        if (extensions.Distinct(StringComparer.OrdinalIgnoreCase).Count() != extensions.Length)
+        {
+            throw new ArgumentException(
+                $"Format.Extensions for {role} step '{stepId}' must be unique.");
+        }
+        return extensions;
     }
 
     private static void ValidateGraph(IReadOnlyList<GraphStepInput> steps)
@@ -2047,7 +2298,9 @@ internal static partial class PowerShellMigrationStepFactory
         }
     }
 
-    private static HierarchySourceLevel CreateGraphSourceLevel(GraphStepInput input)
+    private static HierarchySourceLevel CreateGraphSourceLevel(
+        GraphStepInput input,
+        string binaryStagingRoot)
     {
         return new HierarchySourceLevel(
             input.Id,
@@ -2060,9 +2313,14 @@ internal static partial class PowerShellMigrationStepFactory
             children: null,
             optionsJson: input.SourceOptionsJson,
             connectionId: input.SourceConnectionId,
-            identity: input.SourceCustom?.Identity,
+            identity: input.SourceCustom?.Identity ?? input.SourceFormat?.Identity,
             databaseConnection: input.SourceConnection as DbConnection,
-            connectorConnection: input.SourceConnection);
+            connectorConnection: input.SourceConnection,
+            binaryStagingRoot: binaryStagingRoot,
+            idProperty: input.IdProperty,
+            formatType: input.SourceFormat?.Type,
+            formatOptionsJson: input.SourceFormat?.OptionsJson,
+            formatExtensions: input.SourceFormat?.Extensions);
     }
 
     private static HierarchySourceLevel CreateGraphWholeDatasetTransformSourceLevel(GraphStepInput input)
@@ -2083,6 +2341,131 @@ internal static partial class PowerShellMigrationStepFactory
             databaseConnection: input.TransformConnection as DbConnection);
     }
 
+    private static Func<CancellationToken, Task>? CreateTargetFinalizer(
+        GraphStepInput input,
+        PowerShellScriptExecutor executor,
+        bool whatIf,
+        string? runId,
+        string objectStagingRoot,
+        string binaryStagingRoot)
+    {
+        if (whatIf || input.Type != "target")
+        {
+            return null;
+        }
+
+        if (input.TargetType == "file")
+        {
+            var format = input.TargetFormat
+                ?? throw new InvalidOperationException($"File target '{input.Id}' has no format definition.");
+            var targetRunId = runId
+                ?? throw new InvalidOperationException($"File target '{input.Id}' requires a run ID for finalization.");
+            if (format.Type == "custom")
+            {
+                return cancellationToken =>
+                {
+                    PowerShellCustomFormatTargetWriter.FinalizeSingleFileTarget(
+                        executor,
+                        input.TargetPath!,
+                        targetRunId,
+                        input.Id,
+                        format.WriterScriptText!,
+                        format.OptionsJson,
+                        binaryStagingRoot,
+                        objectKey: null,
+                        cancellationToken);
+                    return Task.CompletedTask;
+                };
+            }
+
+            return cancellationToken =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                FileBatchTargetWriter.FinalizeSingleFileTarget(
+                    input.TargetPath!,
+                    targetRunId,
+                    input.Id,
+                    format.Type,
+                    format.OptionsJson,
+                    binaryStagingRoot);
+                return Task.CompletedTask;
+            };
+        }
+
+        if (input.TargetType is "azureblob" or "s3" or "adlsgen2" or "gcs")
+        {
+            var format = input.TargetFormat
+                ?? throw new InvalidOperationException(
+                    $"Object storage target '{input.Id}' has no format definition.");
+            var targetRunId = runId
+                ?? throw new InvalidOperationException(
+                    $"Object storage target '{input.Id}' requires a run ID for finalization.");
+            if (format.Type == "custom")
+            {
+                return async cancellationToken =>
+                {
+                    var stagingPath = ObjectStorageTargetWriter.GetStagingPath(
+                        objectStagingRoot,
+                        targetRunId,
+                        input.Id,
+                        format.Type,
+                        format.Extensions);
+                    PowerShellCustomFormatTargetWriter.FinalizeSingleFileTarget(
+                        executor,
+                        stagingPath,
+                        targetRunId,
+                        input.Id,
+                        format.WriterScriptText!,
+                        format.OptionsJson,
+                        binaryStagingRoot,
+                        input.TargetPath,
+                        cancellationToken);
+                    await ObjectStorageTargetWriter.UploadFinalizedFileAsync(
+                            input.TargetConnection!,
+                            input.TargetType,
+                            input.TargetPath!,
+                            input.Id,
+                            stagingPath,
+                            input.TargetOptionsJson ?? "{}",
+                            format.ContentType,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                };
+            }
+
+            return cancellationToken => ObjectStorageTargetWriter.FinalizeAsync(
+                input.TargetConnection!,
+                input.TargetType,
+                input.TargetPath!,
+                input.Id,
+                targetRunId,
+                input.TargetOptionsJson ?? "{}",
+                format.Type,
+                format.Extensions,
+                format.OptionsJson,
+                format.ContentType,
+                objectStagingRoot,
+                binaryStagingRoot,
+                cancellationToken);
+        }
+
+        if (input.TargetType == "sharepoint")
+        {
+            return cancellationToken =>
+                SharePointTargetWriter.FinalizeAsync(
+                    (HttpClient)input.TargetConnection!,
+                    input.Id,
+                    runId ?? throw new InvalidOperationException(
+                        $"SharePoint target '{input.Id}' requires a run ID for finalization."),
+                    input.TargetOptionsJson ?? "{}",
+                    objectStagingRoot,
+                    binaryStagingRoot,
+                    cancellationToken);
+        }
+
+        return null;
+    }
+
     private static Func<CancellationToken, Task<long>>? CreateExpectedRecordCountResolver(
         GraphStepInput input,
         PowerShellScriptExecutor executor,
@@ -2097,14 +2480,14 @@ internal static partial class PowerShellMigrationStepFactory
         }
 
         Func<CancellationToken, Task<long>>? resolver = null;
-        if (input.SourceType == "parquet")
+        if (input.SourceType == "file" && input.SourceFormat?.Type == "parquet")
         {
             resolver = cancellationToken =>
                 HierarchyRecordReaderFactory.GetMetadataRecordCountAsync(sourceLevel, cancellationToken);
         }
-        else if (input.SourceType == "excel")
+        else if (input.SourceType == "file" && input.SourceFormat?.Type == "excel")
         {
-            var options = ExcelSourceOptions.FromJson(input.SourceOptionsJson, input.Id);
+            var options = ExcelSourceOptions.FromJson(input.SourceFormat.OptionsJson, input.Id);
             resolver = cancellationToken =>
                 ExcelHierarchyRecordReader.CountRecordsAsync(
                     sourceLevel,
@@ -2455,9 +2838,11 @@ internal static partial class PowerShellMigrationStepFactory
         int BatchSize,
         string SourceType,
         string SourcePath,
+        GraphFileFormatInput? SourceFormat,
         string SourceKey,
         string IdProperty,
         string SourceOptionsJson,
+        string? SourceBinaryResolverScriptText,
         long ExpectedRecordCount,
         string? SourceConnectionId,
         object? SourceConnection,
@@ -2469,7 +2854,9 @@ internal static partial class PowerShellMigrationStepFactory
         string? TargetOperation,
         string? TableName,
         string? TargetPath,
+        GraphFileFormatInput? TargetFormat,
         string? TargetOptionsJson,
+        string? TargetBinaryReferenceScriptText,
         string? TargetConnectionId,
         object? TargetConnection,
         int TargetMaxConcurrency,
@@ -2490,6 +2877,15 @@ internal static partial class PowerShellMigrationStepFactory
         string? ReadBatchesScriptText,
         object? CallbackSourceConnection,
         object? CallbackTargetConnection);
+
+    private sealed record GraphFileFormatInput(
+        string Type,
+        string OptionsJson,
+        string[] Extensions,
+        string? ContentType,
+        string? Identity,
+        string? ReaderScriptText,
+        string? WriterScriptText);
 
     private sealed record GraphInputDefinition(
         string Job,

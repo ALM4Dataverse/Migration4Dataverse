@@ -7,7 +7,7 @@ namespace Migration4Dataverse.Engine.PowerShell;
 public sealed class PowerShellDataverseHierarchyRecordReader : IHierarchyRecordReader
 {
     private const string ReadRecordsScript = """
-        param($QueryType, $Options, $Connection, $KeyProperty, $ParentKeyProperty, $CountOnly, $RecordWriter)
+        param($QueryType, $Options, $Connection, $KeyProperty, $ParentKeyProperty, $IdProperty, $CountOnly, $BinaryStagingRoot, $RecordWriter)
         Set-StrictMode -Version Latest
         $ErrorActionPreference = 'Stop'
 
@@ -19,6 +19,15 @@ public sealed class PowerShellDataverseHierarchyRecordReader : IHierarchyRecordR
                 }
             }
             return $null
+        }
+
+        function Get-DataverseFileColumnNames {
+            $value = Get-QueryOption -Name 'FileColumns'
+            if ($null -eq $value) {
+                return @()
+            }
+            return @($value | ForEach-Object { [string]$_ } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         }
 
         function Add-QueryOptions {
@@ -34,13 +43,177 @@ public sealed class PowerShellDataverseHierarchyRecordReader : IHierarchyRecordR
             }
         }
 
+        function Read-DataverseFileColumn {
+            param($Record, [string]$ColumnName)
+
+            if ([string]::IsNullOrWhiteSpace([string]$BinaryStagingRoot)) {
+                throw "Dataverse source step requires a binary staging directory to read file column '$ColumnName'."
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$IdProperty)) {
+                throw "Dataverse source step requires Source.Id to read file column '$ColumnName'."
+            }
+            $idValue = if ($Record -is [System.Collections.IDictionary]) {
+                $Record[$IdProperty]
+            }
+            else {
+                $property = $Record.PSObject.Properties[$IdProperty]
+                if ($null -eq $property) { $null } else { $property.Value }
+            }
+            if ($null -eq $idValue -or [string]::IsNullOrWhiteSpace([string]$idValue)) {
+                throw "Dataverse source row is missing record ID property '$IdProperty' required for file column '$ColumnName'."
+            }
+            $recordId = [guid]$idValue
+            if ($recordId -eq [guid]::Empty) {
+                throw "Dataverse source row has an empty record ID in property '$IdProperty'."
+            }
+
+            $tableName = [string](Get-QueryOption -Name 'TableName')
+            $initialize = [Microsoft.Crm.Sdk.Messages.InitializeFileBlocksDownloadRequest]::new()
+            $initialize.Target = [Microsoft.Xrm.Sdk.EntityReference]::new($tableName, $recordId)
+            $initialize.FileAttributeName = $ColumnName
+            $fileInfo = $Connection.Execute($initialize)
+            $fileSize = [long]$fileInfo.FileSizeInBytes
+            if ($fileSize -eq 0) {
+                return $null
+            }
+
+            $blockLength = if ($fileInfo.IsChunkingSupported) {
+                [long][Math]::Min(4MB, $fileSize)
+            }
+            else {
+                if ($fileSize -gt [int]::MaxValue) {
+                    throw "Dataverse file column '$ColumnName' on record '$recordId' does not support chunked downloads and exceeds the maximum block size."
+                }
+                $fileSize
+            }
+            $writer = [Migration4Dataverse.Engine.Connectors.MigrationBinaryValue]::CreateWriter(
+                [string]$BinaryStagingRoot,
+                [string]$fileInfo.FileName)
+            try {
+                $offset = [long]0
+                while ($offset -lt $fileSize) {
+                    $currentBlockLength = [long][Math]::Min($blockLength, $fileSize - $offset)
+                    $request = [Microsoft.Xrm.Sdk.OrganizationRequest]::new('DownloadBlock')
+                    $request.Parameters['FileContinuationToken'] = $fileInfo.FileContinuationToken
+                    $request.Parameters['Offset'] = $offset
+                    $request.Parameters['BlockLength'] = $currentBlockLength
+                    $response = $Connection.Execute($request)
+                    $data = $response.Results['Data'] -as [byte[]]
+                    if ($null -eq $data -or $data.Length -eq 0) {
+                        throw "Dataverse returned no data while downloading file column '$ColumnName' on record '$recordId' at offset $offset."
+                    }
+                    if ($data.Length -gt $currentBlockLength) {
+                        throw "Dataverse returned an oversized block while downloading file column '$ColumnName' on record '$recordId'."
+                    }
+                    $writer.Stream.Write($data, 0, $data.Length)
+                    $offset += $data.Length
+                }
+                if ($offset -ne $fileSize) {
+                    throw "Dataverse returned $offset of $fileSize bytes for file column '$ColumnName' on record '$recordId'."
+                }
+                $writer.Complete()
+            }
+            finally {
+                $writer.Dispose()
+            }
+        }
+
+        function Add-DataverseFileColumns {
+            param($Record)
+            $fileColumns = @(Get-DataverseFileColumnNames)
+            foreach ($columnName in $fileColumns) {
+                $binaryValue = Read-DataverseFileColumn -Record $Record -ColumnName ([string]$columnName)
+                if ($Record -is [System.Collections.IDictionary]) {
+                    $Record[[string]$columnName] = $binaryValue
+                }
+                else {
+                    $Record | Add-Member -NotePropertyName ([string]$columnName) `
+                        -NotePropertyValue $binaryValue -Force
+                }
+            }
+            return $Record
+        }
+
+        function Get-DataverseRecordValue {
+            param($Record, [string]$Name)
+            if ($Record -is [System.Collections.IDictionary]) {
+                foreach ($key in $Record.Keys) {
+                    if ([string]::Equals(
+                        [string]$key,
+                        $Name,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                        return $Record[$key]
+                    }
+                }
+                return $null
+            }
+            $property = $Record.PSObject.Properties[$Name]
+            if ($null -eq $property) { return $null }
+            return $property.Value
+        }
+
+        function Add-DataverseAttachmentContent {
+            param($Record)
+            $tableName = [string](Get-QueryOption -Name 'TableName')
+            $contentColumn = switch ($tableName.ToLowerInvariant()) {
+                'annotation' { 'documentbody' }
+                'activitymimeattachment' { 'body' }
+                default { return $Record }
+            }
+            $content = Get-DataverseRecordValue -Record $Record -Name $contentColumn
+            if ($content -isnot [string] -or [string]::IsNullOrWhiteSpace($content)) {
+                return $Record
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$BinaryStagingRoot)) {
+                throw "Dataverse source step requires a binary staging directory to read attachment content from '$contentColumn'."
+            }
+            $fileName = [string](Get-DataverseRecordValue -Record $Record -Name 'filename')
+            $contentType = [string](Get-DataverseRecordValue -Record $Record -Name 'mimetype')
+            $binaryValue = [Migration4Dataverse.Engine.Connectors.MigrationBinaryValue]::FromBase64(
+                $content,
+                [string]$BinaryStagingRoot,
+                $fileName,
+                $contentType)
+            if ($Record -is [System.Collections.IDictionary]) {
+                foreach ($key in $Record.Keys) {
+                    if ([string]::Equals(
+                        [string]$key,
+                        $contentColumn,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $Record[$key] = $binaryValue
+                        break
+                    }
+                }
+            }
+            else {
+                $Record | Add-Member -NotePropertyName $contentColumn -NotePropertyValue $binaryValue -Force
+            }
+            return $Record
+        }
+
         function Write-QueryRecords {
             process {
                 if ($CountOnly) {
                     $RecordWriter.Invoke([System.Management.Automation.PSObject]::AsPSObject($_))
                 }
                 else {
-                    $json = ConvertTo-Json -InputObject $_ -Depth 100 -Compress -ErrorAction Stop
+                    $record = $_
+                    if ($QueryType -eq 'simple') {
+                        $fileColumns = @(Get-DataverseFileColumnNames)
+                        if ($fileColumns.Count -gt 0) {
+                            $record = Add-DataverseFileColumns -Record $record
+                        }
+                        $record = Add-DataverseAttachmentContent -Record $record
+                    }
+                    if ([Migration4Dataverse.Engine.Connectors.MigrationBinaryValue]::ContainsBinaryValues($record)) {
+                        if ([string]::IsNullOrWhiteSpace([string]$BinaryStagingRoot)) {
+                            throw "Dataverse source step returned binary content without a staging directory."
+                        }
+                        $record = [Migration4Dataverse.Engine.Connectors.MigrationBinaryValue]::PrepareForTransport(
+                            $record,
+                            [string]$BinaryStagingRoot)
+                    }
+                    $json = ConvertTo-Json -InputObject $record -Depth 100 -Compress -ErrorAction Stop
                     $RecordWriter.Invoke([System.Management.Automation.PSObject]::AsPSObject($json))
                 }
             }
@@ -158,7 +331,9 @@ public sealed class PowerShellDataverseHierarchyRecordReader : IHierarchyRecordR
                 definition.Connection,
                 level.KeyProperty,
                 level.ParentKeyProperty,
-                false
+                level.IdProperty,
+                false,
+                level.BinaryStagingRoot
             ]);
     }
 
@@ -189,7 +364,9 @@ public sealed class PowerShellDataverseHierarchyRecordReader : IHierarchyRecordR
                                    definition.Connection,
                                    keyProperty,
                                    null,
-                                   true
+                                   null,
+                                   true,
+                                   null
                                ],
                                cancellationToken).ConfigureAwait(false))
             {

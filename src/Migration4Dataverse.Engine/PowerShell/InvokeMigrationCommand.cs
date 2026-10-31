@@ -208,6 +208,22 @@ public sealed class InvokeMigrationCommand : PSCmdlet
             }
 
             var result = execution.GetAwaiter().GetResult();
+            if (!WhatIf.IsPresent)
+            {
+                try
+                {
+                    Migration4Dataverse.Engine.Connectors.MigrationBinaryValue.DeleteRunStagingRoot(
+                        DatabasePath,
+                        effectiveRunId);
+                }
+                catch (Exception exception) when (
+                    exception is IOException or UnauthorizedAccessException)
+                {
+                    WriteWarning(
+                        $"Binary staging files for completed run '{effectiveRunId}' could not be removed: " +
+                        $"{exception.Message}");
+                }
+            }
             foreach (var controller in stepSet.TargetControllers)
             {
                 WriteVerbose(controller.GetSummary());

@@ -13,6 +13,7 @@ public sealed class CsvHierarchyRecordReader : IHierarchyRecordReader
     private readonly CsvReader _csv;
     private readonly HashSet<string> _nullValues;
     private readonly Dictionary<string, string> _columnTypes;
+    private readonly HashSet<string> _binaryColumns;
     private string[]? _columnNames;
     private int[]? _columnIndexes;
     private JsonElement? _lookahead;
@@ -23,9 +24,9 @@ public sealed class CsvHierarchyRecordReader : IHierarchyRecordReader
     {
         ArgumentNullException.ThrowIfNull(level);
         ArgumentNullException.ThrowIfNull(options);
-        if (level.Type != "csv")
+        if (level.FormatType != "csv")
         {
-            throw new ArgumentException("A CSV reader requires a source level with type 'csv'.", nameof(level));
+            throw new ArgumentException("A CSV reader requires the CSV format.", nameof(level));
         }
 
         _level = level;
@@ -33,6 +34,9 @@ public sealed class CsvHierarchyRecordReader : IHierarchyRecordReader
         _options.Validate(requireSourceHeaders: true);
         _nullValues = new HashSet<string>(_options.NullValues, StringComparer.Ordinal);
         _columnTypes = new Dictionary<string, string>(_options.ColumnTypes, StringComparer.OrdinalIgnoreCase);
+        _binaryColumns = new HashSet<string>(
+            _options.BinaryColumns ?? Array.Empty<string>(),
+            StringComparer.OrdinalIgnoreCase);
 
         var configuration = options.CreateConfiguration();
         configuration.NewLine = DetectNewLine(
@@ -142,6 +146,12 @@ public sealed class CsvHierarchyRecordReader : IHierarchyRecordReader
         var selectedColumns = _options.Columns is { Length: > 0 }
             ? _options.Columns
             : headers;
+        if (_binaryColumns.Any(column =>
+                !selectedColumns.Contains(column, StringComparer.OrdinalIgnoreCase)))
+        {
+            throw new InvalidDataException(
+                $"CSV source '{_level.Path}' must include every Options.BinaryColumns entry in Options.Columns.");
+        }
         _columnIndexes = new int[selectedColumns.Length];
         _columnNames = new string[selectedColumns.Length];
         for (var index = 0; index < selectedColumns.Length; index++)
@@ -167,6 +177,10 @@ public sealed class CsvHierarchyRecordReader : IHierarchyRecordReader
             _nullValues.Contains(value))
         {
             return null;
+        }
+        if (_binaryColumns.Contains(columnName))
+        {
+            return value;
         }
         if (!_columnTypes.TryGetValue(columnName, out var type) ||
             string.IsNullOrWhiteSpace(type) ||

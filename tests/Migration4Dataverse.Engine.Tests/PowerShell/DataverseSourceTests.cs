@@ -2,6 +2,7 @@ using System.Collections;
 using System.Management.Automation;
 using System.Reflection;
 using System.Text.Json;
+using Migration4Dataverse.Engine.Connectors;
 using Migration4Dataverse.Engine.PowerShell;
 using Migration4Dataverse.Engine.Scheduling;
 using Migration4Dataverse.Engine.Storage;
@@ -150,6 +151,60 @@ public sealed class DataverseSourceTests
         var records = payload.RootElement.GetProperty("Records").EnumerateArray().ToArray();
         Assert.Single(records);
         Assert.Equal("002", records[0].GetProperty("Source").GetProperty("accountid").GetString());
+    }
+
+    [Fact]
+    public async Task DataverseNotesSourceStagesBase64DocumentBodyAsBinaryValue()
+    {
+        using var directory = new TemporaryDirectory();
+        var stagingRoot = System.IO.Path.Combine(directory.Path, "binary-staging");
+        var modulePath = directory.WriteDataverseModule();
+        using var executor = new PowerShellScriptExecutor(modulesToImport: [modulePath]);
+        var options = new Hashtable(StringComparer.OrdinalIgnoreCase)
+        {
+            ["QueryType"] = "simple",
+            ["TableName"] = "annotation"
+        };
+        var definition = new PowerShellDataverseSourceDefinition(
+            "mock-connection",
+            options,
+            "simple");
+        var readerFactory = new PowerShellHierarchyRecordReaderFactory(
+            executor,
+            new Dictionary<string, PowerShellSourceCallbackDefinition>(),
+            new Dictionary<string, PowerShellDataverseSourceDefinition>
+            {
+                ["Notes"] = definition
+            });
+        var level = new HierarchySourceLevel(
+            "Notes",
+            "dataverse",
+            path: null,
+            keyProperty: "annotationid",
+            parentKeyProperty: null,
+            rowsPerParent: 0,
+            expectedRecordCount: 1,
+            binaryStagingRoot: stagingRoot,
+            idProperty: "annotationid");
+        var source = new HierarchyBatchSource(level, batchSize: 1, readerFactory.CreateDelegate());
+
+        var batches = await ReadAllAsync(
+            source.CreateReader()(new MigrationStepCheckpoint("notes-run", "Notes", -1, null, null), CancellationToken.None));
+
+        using var payload = JsonDocument.Parse(Assert.Single(batches).PayloadJson);
+        var descriptor = payload.RootElement.GetProperty("Records")[0]
+            .GetProperty("Source")
+            .GetProperty("documentbody");
+        Assert.True(descriptor.TryGetProperty("__migration4dataverse_binary_v1", out _));
+        var restored = Assert.IsType<Hashtable>(
+            MigrationBinaryValue.RestoreFromTransport(payload.RootElement, stagingRoot));
+        var records = Assert.IsType<object[]>(restored["Records"]);
+        var sourceRecord = Assert.IsType<Hashtable>(Assert.IsType<Hashtable>(records[0])["Source"]);
+        var binary = Assert.IsType<MigrationBinaryValue>(sourceRecord["documentbody"]);
+        Assert.Equal("notes.txt", binary.FileName);
+        Assert.Equal("text/plain", binary.ContentType);
+        using var reader = binary.OpenTextReader();
+        Assert.Equal("attachment", reader.ReadToEnd());
     }
 
     [Fact]
@@ -423,6 +478,11 @@ public sealed class DataverseSourceTests
                                 throw 'Row-linked source ordering was not applied.'
                             }
                         }
+                        elseif ($TableName -eq 'annotation') {
+                            if ($OrderBy.Count -ne 1 -or $OrderBy[0] -ne 'annotationid') {
+                                throw 'Annotation key ordering was not applied.'
+                            }
+                        }
                         else { throw 'TableName was not passed.' }
                     }
 
@@ -435,6 +495,14 @@ public sealed class DataverseSourceTests
                         [pscustomobject]@{ accountid = '001'; contactid = '101' }
                         [pscustomobject]@{ accountid = '001'; contactid = '102' }
                         [pscustomobject]@{ accountid = '002'; contactid = '201' }
+                    }
+                    elseif ($TableName -eq 'annotation') {
+                        [pscustomobject]@{
+                            annotationid = '11111111-2222-3333-4444-555555555555'
+                            documentbody = 'YXR0YWNobWVudA=='
+                            filename = 'notes.txt'
+                            mimetype = 'text/plain'
+                        }
                     }
                     else {
                         [pscustomobject]@{ accountid = '001'; name = 'Contoso' }

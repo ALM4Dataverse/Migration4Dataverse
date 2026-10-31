@@ -42,4 +42,11 @@ Invoke-Migration -DatabasePath './migration.sqlite3' `
 
 SQLite's `query_only` mode is enabled while the source query runs and restored to its previous setting afterward. The engine opens and closes its owned connection while reading. Because a source streams from an active reader, its `ConnectionId` must not be reused by another source, transform, or target step; use separate IDs for each database path.
 
+| SQLite result value | Type in the PowerShell mapping |
+|---|---|
+| SQL `NULL`, `INTEGER`, `REAL`, `TEXT` | `$null`, `Int64`, `Double`, `String` |
+| `BLOB` | Base64 `System.String` after JSON transport |
+| `DATE`, timestamps, GUID-like text | `System.DateTime` for ISO date/time values; GUID-like text remains `System.String` |
+| JSON stored as text | `System.String`; parse explicitly when a nested object is needed |
+
 See [target connector](../targets/sqlite.md) and [migration step configuration](../../configuration.md).

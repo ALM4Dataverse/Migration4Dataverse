@@ -1,4 +1,5 @@
 using System.Net;
+using System.Collections;
 using System.Text;
 using System.Text.Json;
 using Migration4Dataverse.Engine.Connectors;
@@ -136,6 +137,64 @@ public sealed class SourceApiConnectorTests
         Assert.Equal(2, requests.Count);
         Assert.Contains("sites/site/lists/list/items", requests[0], StringComparison.Ordinal);
         Assert.Contains("%24expand=fields", requests[0], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SharePointCanStageDocumentContentWithoutBufferingTheResponse()
+    {
+        using var files = new TemporaryDirectory();
+        var content = Encoding.ASCII.GetBytes("%PDF-1.7\nfile content");
+        var requests = new List<string>();
+        using var client = new HttpClient(new StubHandler(request =>
+        {
+            requests.Add(request.RequestUri!.AbsoluteUri);
+            return request.RequestUri.AbsolutePath.EndsWith(
+                    "/items/drive-item-1/content",
+                    StringComparison.Ordinal)
+                ? new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new ByteArrayContent(content)
+                }
+                : JsonResponse(
+                    """{"value":[{"id":"item-1","fields":{"Title":"Report"},"driveItem":{"id":"drive-item-1","name":"report.pdf","parentReference":{"driveId":"drive-1"},"file":{"mimeType":"application/pdf"}}}]}""");
+        }))
+        {
+            BaseAddress = new Uri("https://graph.microsoft.com/v1.0/")
+        };
+        var level = new HierarchySourceLevel(
+            "SharePoint",
+            "sharepoint",
+            path: null,
+            "id",
+            parentKeyProperty: null,
+            rowsPerParent: 0,
+            expectedRecordCount: 0,
+            connectorConnection: client,
+            binaryStagingRoot: files.Root);
+        await using var reader = new SharePointHierarchyRecordReader(
+            level,
+            new SharePointSourceOptions
+            {
+                SiteId = "site",
+                ListId = "list",
+                IncludeDocumentContent = true
+            });
+
+        var record = await reader.PeekAsync(CancellationToken.None)
+            ?? throw new InvalidDataException("SharePoint returned no document row.");
+        var fields = Assert.IsAssignableFrom<IDictionary>(
+            MigrationBinaryValue.RestoreFromTransport(record, files.Root));
+        var value = Assert.IsType<MigrationBinaryValue>(fields["Content"]);
+        await using var stream = value.OpenRead();
+        using var actual = new MemoryStream();
+        await stream.CopyToAsync(actual);
+
+        Assert.Equal("Report", record.GetProperty("Title").GetString());
+        Assert.Equal("report.pdf", record.GetProperty("FileName").GetString());
+        Assert.Equal("application/pdf", record.GetProperty("ContentType").GetString());
+        Assert.Equal(content, actual.ToArray());
+        Assert.Equal(2, requests.Count);
+        Assert.Contains("driveItem", requests[0], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -330,6 +389,25 @@ public sealed class SourceApiConnectorTests
             CancellationToken cancellationToken)
         {
             return Task.FromResult(handler(request));
+        }
+    }
+
+    private sealed class TemporaryDirectory : IDisposable
+    {
+        public TemporaryDirectory()
+        {
+            Root = Path.Combine(Path.GetTempPath(), $"migration4dataverse-sharepoint-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(Root);
+        }
+
+        public string Root { get; }
+
+        public void Dispose()
+        {
+            if (Directory.Exists(Root))
+            {
+                Directory.Delete(Root, recursive: true);
+            }
         }
     }
 }

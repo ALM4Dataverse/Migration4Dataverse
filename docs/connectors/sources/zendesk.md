@@ -26,6 +26,14 @@ The `zendesk` source reads Zendesk Support resources or search results. It is so
 
 The connector follows a next-page URL when present. If a cursor endpoint reports `meta.has_more = true` and provides `meta.after_cursor`, it adds or replaces `page[after]` and requests the next page. Records are sorted by the configured key before the migration reader starts.
 
+| Zendesk JSON value | Type in the PowerShell mapping |
+|---|---|
+| Null, Boolean, number, string | `$null`, `Boolean`, `Int64`/`Double`, `String` |
+| Nested objects / arrays | PowerShell dictionary / array |
+| IDs | `System.String` unless the API returns a JSON number |
+| ISO timestamps / custom date fields | Usually `System.DateTime` after default PowerShell JSON parsing |
+| Binary content | Not included in records by this connector |
+
 ## Example
 
 ```powershell

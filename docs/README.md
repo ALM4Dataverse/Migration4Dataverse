@@ -9,15 +9,17 @@ Start with the [repository README](../README.md) to build the module and run an 
 ### Define a migration
 
 - [Migration basics](./concepts/migration-basics.md) — what sources, transforms, filters, targets, and connections mean.
-- [Step configuration](./configuration.md) — supported step types, common properties, connections, and callback shapes.
+- [Step configuration](./configuration.md) — supported step types, storage connectors and independent file formats, common properties, connections, and callback shapes.
 - [Dependencies](./concepts/dependencies.md) — row flow, keyed source relationships, joins, and completion barriers.
 - [Recovery and replay](./concepts/recovery-and-replay.md) — run IDs, checkpoints, retries, and side-effect safety.
 - [Connections and callbacks](./concepts/connections-and-callbacks.md) — connection ownership and PowerShell callback rules.
+- [Binary values and sidecar files](./concepts/binary-values-and-sidecars.md) — streaming binary values, connector type conventions, and structured-file attachment round-tripping.
 
 ### Choose connectors
 
-- [Source connectors](./connectors/sources/README.md) — file, SQL database, object storage, HTTP/OData, Salesforce, SharePoint, HubSpot, Zendesk, ServiceNow, MongoDB, Dataverse, and custom readers.
-- [Target connectors](./connectors/targets/README.md) — file, SQL database, object storage, MongoDB, Dataverse, and custom writers.
+- [File formats](./connectors/file-formats.md) — select serialization independently from local file or object-storage access, including custom streaming formats.
+- [Source connectors](./connectors/sources/README.md) — file and binary content, SQL database, object storage, HTTP/OData, Salesforce, SharePoint, HubSpot, Zendesk, ServiceNow, MongoDB, Dataverse, and custom readers.
+- [Target connectors](./connectors/targets/README.md) — file and binary content, SQL database, object storage, SharePoint, MongoDB, Dataverse, and custom writers.
 - [Dataverse source](./connectors/sources/dataverse.md) and [Dataverse target](./connectors/targets/dataverse.md) — Migration4Dataverse-specific behavior and links to the upstream command references.
 
 ### Run and monitor

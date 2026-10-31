@@ -39,4 +39,11 @@ Writes and a per-batch replay marker are committed in one transaction. An identi
 
 Database connections are serialized while in use. Each database connection is opened and disposed by the engine.
 
+| DuckDB column type | Accepted PowerShell/JSON value |
+|---|---|
+| `BOOLEAN`, integers, `FLOAT`/`REAL`/`DOUBLE`, `DECIMAL` | Boolean or JSON number convertible to the declared type |
+| `VARCHAR` / `TEXT` | String; object/array values are stored as JSON text |
+| `BLOB` | Base64 `System.String`, decoded to bytes |
+| `DATE`, timestamps, `UUID` | ISO date/time string or GUID string |
+
 See [DuckDB source](../sources/duckdb.md) and [migration step configuration](../../configuration.md).

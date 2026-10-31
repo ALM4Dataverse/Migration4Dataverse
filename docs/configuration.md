@@ -14,7 +14,8 @@ $steps = @(
         Type = 'source'
         Inputs = @()
         Source = @{
-            Type = 'csv'
+            Type = 'file'
+            Format = @{ Type = 'csv' }
             ConnectionId = 'files'
             Path = 'accounts.csv'
             Key = 'SourceId'
@@ -104,13 +105,15 @@ Every source has a `Source` hashtable. See the [source connector index](./connec
 
 | Property | Required | Description |
 |---|---:|---|
-| `Type` | Yes | `jsonl`, `csv`, `parquet`, `excel`, `sqlite`, `duckdb`, `sqlserver`, `postgresql`, `mysql`, `oracle`, `azureblob`, `s3`, `adlsgen2`, `gcs`, `http`, `odata`, `salesforce`, `sharepoint`, `hubspot`, `zendesk`, `servicenow`, `mongodb`, `dataverse`, or `custom`. |
-| `ConnectionId` | Yes | Key in `-Connections`. File, Excel, and SQLite/DuckDB sources expect a `DirectoryInfo` or `FileInfo`; SQL Server, PostgreSQL, MySQL, and Oracle expect a matching ADO.NET `DbConnection`; object-storage sources expect the provider client; HTTP sources expect a `Uri`, absolute URL string, or `HttpClient`; Salesforce, SharePoint, HubSpot, Zendesk, and ServiceNow sources expect an authenticated `HttpClient`; MongoDB sources expect an `IMongoClient` or `IMongoDatabase`. |
-| `Path` | File, Excel, object-storage, and HTTP sources | File and Excel sources use an exact filename relative to the source directory; object-storage sources use an object prefix; HTTP sources use a URL or relative path. Omit it for a `FileInfo`, SQL database, API source, MongoDB, or Dataverse source. An optional custom-source path is passed to the callback; omitted means an empty string. |
+| `Type` | Yes | `file`, `sqlite`, `duckdb`, `sqlserver`, `postgresql`, `mysql`, `oracle`, `azureblob`, `s3`, `adlsgen2`, `gcs`, `http`, `odata`, `salesforce`, `sharepoint`, `hubspot`, `zendesk`, `servicenow`, `mongodb`, `dataverse`, or `custom`. |
+| `Format` | File and object-storage sources | Required descriptor with `Type` (`jsonl`, `csv`, `parquet`, `excel`, `binary`, or `custom`) and optional format `Options`. Custom formats can also declare `Extensions`, source `Identity`, and a `Read` scriptblock; see [object storage and custom formats](./connectors/object-storage.md#custom-formats). |
+| `ConnectionId` | Yes | Key in `-Connections`. File and SQLite/DuckDB sources expect a `DirectoryInfo` or `FileInfo`; SQL Server, PostgreSQL, MySQL, and Oracle expect a matching ADO.NET `DbConnection`; object-storage sources expect the provider client; HTTP sources expect a `Uri`, absolute URL string, or `HttpClient`; Salesforce, SharePoint, HubSpot, Zendesk, and ServiceNow sources expect an authenticated `HttpClient`; MongoDB sources expect an `IMongoClient` or `IMongoDatabase`. |
+| `Path` | File, object-storage, and HTTP sources | File sources use an exact filename relative to the source directory; object-storage sources use an object prefix; HTTP sources use a URL or relative path. Omit it for a `FileInfo`, SQL database, API source, MongoDB, or Dataverse source. An optional custom-source path is passed to the callback; omitted means an empty string. |
 | `Key` | Yes | Stable field used to order and checkpoint source rows. Root source keys must be non-empty, unique, and strictly increasing. Dataverse uses case-insensitive ordinal order. |
 | `Id` | No | Source field copied to the row's `Id`, commonly the target record GUID. |
 | `ExpectedRecordCount` | No | Positive expected row count. It takes precedence over a connector's count provider and is checked when reading completes. |
-| `Options` | No | Connector-specific options. See the linked source guide. |
+| `Options` | No | Connector/provider-specific options. Format settings belong in `Format.Options`; file sources do not accept storage `Options`. See the linked source guide. |
+| `ResolveBinaryReference` | CSV, JSON Lines, or Parquet | Optional scriptblock to resolve a field declared in `Format.Options.BinaryColumns`; see [binary values and sidecar files](./concepts/binary-values-and-sidecars.md). |
 | `Partitions` | Dataverse root source | Explicit parallel query partitions; each partition has a stable `Id` and optional `Options` overrides. See the [Dataverse source guide](./connectors/sources/dataverse.md#parallel-source-partitions). |
 | `Custom` | Custom source | Callback definition; see [custom sources](./connectors/sources/custom.md). |
 
@@ -122,14 +125,16 @@ Every target has a `Target` hashtable. See the [target connector index](./connec
 
 | Property | Required | Description |
 |---|---:|---|
-| `Type` | Yes | `dataverse`, `jsonl`, `csv`, `parquet`, `sqlite`, `duckdb`, `sqlserver`, `postgresql`, `mysql`, `oracle`, `azureblob`, `s3`, `adlsgen2`, `gcs`, `mongodb`, or `custom`. |
-| `ConnectionId` | Yes, except managed staging targets | Key in `-Connections`. File and SQLite/DuckDB targets expect a `DirectoryInfo` or `FileInfo`; SQL Server, PostgreSQL, MySQL, and Oracle expect a matching ADO.NET `DbConnection`; object-storage targets expect the provider client; MongoDB targets expect an `IMongoClient` or `IMongoDatabase`. SQLite or DuckDB staging targets used by a whole-dataset transform omit `ConnectionId` because the engine manages their database. |
-| `Path` | File and object-storage targets | Exact filename relative to the target directory, or the final object key for object-storage targets. Omit it for a `FileInfo`, SQL database, MongoDB, or Dataverse target. Whole-dataset database staging targets omit both `ConnectionId` and `Path`. An optional custom-target path is exposed as `Context.TargetPath`; omitted means an empty string. |
+| `Type` | Yes | `dataverse`, `file`, `sqlite`, `duckdb`, `sqlserver`, `postgresql`, `mysql`, `oracle`, `azureblob`, `s3`, `adlsgen2`, `gcs`, `sharepoint`, `mongodb`, or `custom`. |
+| `Format` | File and object-storage targets | Required descriptor with `Type` (`jsonl`, `csv`, `parquet`, `binary`, or `custom`) and optional format `Options`. Custom formats can also declare `Extensions`, `ContentType`, and a `Write` scriptblock; see [object storage and custom formats](./connectors/object-storage.md#custom-formats). |
+| `ConnectionId` | Yes, except managed staging targets | Key in `-Connections`. File and SQLite/DuckDB targets expect a `DirectoryInfo` or `FileInfo`; SQL Server, PostgreSQL, MySQL, and Oracle expect a matching ADO.NET `DbConnection`; object-storage targets expect the provider client; SharePoint targets expect an authenticated Graph `HttpClient`; MongoDB targets expect an `IMongoClient` or `IMongoDatabase`. SQLite or DuckDB staging targets used by a whole-dataset transform omit `ConnectionId` because the engine manages their database. |
+| `Path` | File and object-storage targets | Exact filename relative to the target directory, or the object key/prefix for object storage. Binary filesystem targets publish one file; binary object-storage targets append each record's key to the prefix. Omit it for a `FileInfo`, SQL database, MongoDB, SharePoint, or Dataverse target. Whole-dataset database staging targets omit both `ConnectionId` and `Path`. An optional custom-target path is exposed as `Context.TargetPath`; omitted means an empty string. |
 | `Table` | Dataverse, SQL database, and MongoDB targets | Dataverse logical table, SQL table, or MongoDB collection name. |
 | `Operation` | No | Defaults to `Upsert` for Dataverse and `Write` for other targets. |
 | `BatchSize` | No | Positive fixed target override. Non-Dataverse targets otherwise inherit `Invoke-Migration -BatchSize`; Dataverse targets default independently to 10 and are limited to 1,000 rows. |
 | `MaxConcurrency` | Dataverse only | Optional positive per-target concurrency cap. When omitted, the target uses its connection's recommended identity budget. |
-| `Options` | No | Connector-specific settings, such as database schema/key definitions, object-storage format/prefix/bucket, HTTP pagination, MongoDB filter/key columns, or Dataverse matching keys. See the linked connector guides. |
+| `Options` | No | Connector/provider-specific settings, such as database schema/key definitions, object-storage prefix/bucket, HTTP pagination, MongoDB filter/key columns, or Dataverse matching keys. Format settings belong in `Format.Options`; file targets do not accept storage `Options`. See the linked connector guides. |
+| `CreateBinaryReference` | CSV, JSON Lines, or Parquet | Optional scriptblock to choose a relative sidecar path for top-level binary fields; see [binary values and sidecar files](./concepts/binary-values-and-sidecars.md). |
 | `Custom` | Custom target | Callback definition; see [custom targets](./connectors/targets/custom.md). |
 
 ## Callback nodes
@@ -152,6 +157,6 @@ $connections = @{
 }
 ```
 
-The array is a per-run pool for typed Dataverse Sources and Targets; the same `ConnectionId` shares the pool across both. It is not supported for other connector types, callbacks, or Dataverse transforms. Pool members must target the same organization and use the same `MaxRetryCount`. The caller owns SQL database, object-storage, HTTP, MongoDB, custom, and Dataverse connection creation, credentials, lifetime, and disposal; the engine disposes only its temporary pool wrapper and any client it creates from a URI. File targets stage batches and atomically publish one complete file before the run is marked successful; object-storage targets stage locally and upload one complete object. SQLite and DuckDB transform connections are engine-owned and are stored under `.migration-transforms` beside the migration database.
+The array is a per-run pool for typed Dataverse Sources and Targets; the same `ConnectionId` shares the pool across both. It is not supported for other connector types, callbacks, or Dataverse transforms. Pool members must target the same organization and use the same `MaxRetryCount`. The caller owns SQL database, object-storage, HTTP, MongoDB, custom, and Dataverse connection creation, credentials, lifetime, and disposal; the engine disposes only its temporary pool wrapper and any client it creates from a URI. File targets stage batches and atomically publish output before the run is marked successful; object-storage and SharePoint binary targets stage records locally and upload files during finalization. SQLite and DuckDB transform connections are engine-owned and are stored under `.migration-transforms` beside the migration database.
 
 The store records a sanitized snapshot of the graph and safe connection properties for run history and configuration previews. Redaction is best-effort; do not put credentials or secrets in step definitions. See [`Get-MigrationRun`](./cmdlets/get-migration-run.md), the [dashboard guide](./cmdlets/migration-dashboard.md), and [connections and callbacks](./concepts/connections-and-callbacks.md).

@@ -24,6 +24,15 @@ A database source requires `Options.Query`, one read-only `SELECT` or `WITH` sta
 
 When no positive `ExpectedRecordCount` is set, the engine normally derives progress from `SELECT COUNT(*) FROM (<Query>) AS __migration_count`. SQL Server sources without an explicit `CountQuery` skip this provider; SQL Server queries with `ORDER BY` cannot be wrapped, so set `CountQuery` or `ExpectedRecordCount` when you need a total. Oracle uses an unaliased derived table because Oracle does not accept `AS` for a table alias.
 
+| SQL result value | Type in the PowerShell mapping |
+|---|---|
+| SQL `NULL`, Boolean, integer, decimal/floating number | `$null`, `Boolean`, `Int64`, `Double` |
+| Character / JSON columns | `System.String` |
+| GUID | `System.String` |
+| Date/time, interval values | `System.DateTime` for ISO-formatted date/time values; intervals are strings |
+| Binary columns (`BLOB`, `BYTEA`, `RAW`, etc.) | Base64 `System.String` after JSON transport |
+| Provider-specific structured values | Provider-returned JSON-compatible shape; see the provider and upstream driver contracts |
+
 Parameter placeholders depend on the provider:
 
 | Type | Placeholder | Example |
@@ -46,6 +55,15 @@ A database target requires `Target.Table`. `Target.Operation` is accepted for co
 | `CommandTimeoutSeconds` | `30` | ADO.NET command timeout; `0` disables the timeout. |
 
 If `Schema` is supplied, existing table columns and canonical provider types are validated before writing. When `Schema` is omitted and `CreateTable` is `true`, creation is deferred until the first non-empty batch so the engine can infer types. Existing objects are never altered or dropped.
+
+| SQL target column | Accepted PowerShell/JSON value |
+|---|---|
+| Boolean and numeric types | Boolean or JSON number convertible to the declared SQL type |
+| Character types | String; object/array values are written as JSON text |
+| GUID / UUID | GUID string |
+| Date/time types | ISO date/time string |
+| Binary types (`BLOB`, `BYTEA`, `RAW`, etc.) | Base64 `System.String`, decoded to bytes |
+| `JSON` / `JSONB` | JSON object/array/scalar or JSON text |
 
 Once the target and marker tables exist, each batch's records and its run/step/batch content-hash marker commit in one transaction. The first batch may create tables separately because MySQL and Oracle commit DDL implicitly. An identical retry is ignored; the same batch identity with different records fails. The engine reserves the internal marker table `__migration4dataverse_batches` (Oracle uppercases quoted identifiers).
 

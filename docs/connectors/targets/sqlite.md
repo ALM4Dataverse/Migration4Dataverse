@@ -49,4 +49,11 @@ Invoke-Migration -DatabasePath './migration.sqlite3' `
 
 Database connections are serialized while in use. Each database connection is opened and disposed by the engine.
 
+| SQLite column type | Accepted PowerShell/JSON value |
+|---|---|
+| `INTEGER`, `REAL`, `NUMERIC` | Boolean / JSON number convertible to the declared type |
+| `TEXT` | String; object/array values become JSON text |
+| `BLOB` | Base64 `System.String`, decoded to bytes |
+| `DATE`, timestamp, GUID stored in text/numeric columns | ISO text or supported JSON scalar representation |
+
 See [SQLite source](../sources/sqlite.md) and [migration step configuration](../../configuration.md).

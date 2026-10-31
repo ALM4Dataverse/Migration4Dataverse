@@ -38,6 +38,14 @@ Bulk API mode creates a query job, polls it until `JobComplete`, then reads CSV 
 
 When `Options.Soql` is omitted, the source count provider runs `SELECT COUNT() FROM <Object>` with the same `Where` predicate. A positive `ExpectedRecordCount` takes precedence. Custom `Soql` has no derived count.
 
+| Salesforce value | Type in the PowerShell mapping |
+|---|---|
+| REST Boolean / integer / number / string | `Boolean`, `Int64`/`Double`, `String` |
+| REST nested records / collections | PowerShell dictionary / array; the top-level `attributes` metadata field is removed |
+| REST IDs and decimal strings | `System.String` |
+| REST ISO date/time fields | Usually `System.DateTime` after default PowerShell JSON parsing |
+| Bulk API CSV field | `System.String`; empty fields become `$null` |
+
 ## Example
 
 ```powershell

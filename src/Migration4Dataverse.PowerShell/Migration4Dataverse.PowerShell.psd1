@@ -18,6 +18,7 @@
         'Get-MigrationRun'
         'Clear-MigrationTargetTuning'
         'Start-MigrationDatabaseServer'
+        'New-MigrationBinaryValue'
     )
     VariablesToExport = @()
     AliasesToExport = @()

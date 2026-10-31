@@ -20,6 +20,8 @@ $requiredFiles = @(
     'order_items.csv'
     'tasks.csv'
     'event.csv'
+    'account-attachments.jsonl'
+    'account-attachments.jsonl.attachments/migration-example-contract.txt'
 )
 foreach ($fileName in $requiredFiles) {
     $path = Join-Path $dataDirectory $fileName
@@ -47,11 +49,11 @@ $steps = @(
         Type = 'source'
         Inputs = @()
         Source = @{
-            Type = 'csv'
+            Type = 'file'
+            Format = @{ Type = 'csv'; Options = @{ EmptyFieldAsNull = $true } }
             ConnectionId = 'example-files'
             Path = 'user.csv'
             Key = 'id'
-            Options = @{ EmptyFieldAsNull = $true }
         }
     }
     @{
@@ -91,11 +93,11 @@ $steps = @(
         Type = 'source'
         Inputs = @()
         Source = @{
-            Type = 'csv'
+            Type = 'file'
+            Format = @{ Type = 'csv'; Options = @{ EmptyFieldAsNull = $true } }
             ConnectionId = 'example-files'
             Path = 'account.csv'
             Key = 'id'
-            Options = @{ EmptyFieldAsNull = $true }
         }
     }
     @{
@@ -157,16 +159,92 @@ $steps = @(
         }
     }
     @{
+        # Resolves Content from the JSONL record to its sibling sidecar file.
+        Id = 'AccountAttachmentsSource'
+        Type = 'source'
+        Inputs = @()
+        Source = @{
+            Type = 'file'
+            Format = @{
+                Type = 'jsonl'
+                Options = @{ BinaryColumns = @('Content') }
+            }
+            ConnectionId = 'example-files'
+            Path = 'account-attachments.jsonl'
+            Key = 'Id'
+        }
+    }
+    @{
+        # Builds the same account key used by the completed Dataverse account rows.
+        Id = 'AccountAttachmentsJoinKeys'
+        Type = 'transform'
+        Inputs = @('AccountAttachmentsSource')
+        Script = {
+            param($row)
+            $fields = [ordered]@{}
+            foreach ($property in $row.PSObject.Properties) {
+                $fields[$property.Name] = $property.Value
+            }
+            $fields.run2_account_id = "run2-$([string]$row.AccountSourceId)"
+            $fields
+        }
+    }
+    @{
+        # Resolves the attachment's account after AccountsTarget has completed.
+        Id = 'JoinAccountAttachments'
+        Type = 'join'
+        Inputs = @(
+            @{ Job = 'AccountAttachmentsJoinKeys'; As = 'Attachment' }
+            @{
+                Job = 'AccountsLookupSource'
+                As = 'Account'
+                Keys = @(@{ Child = 'run2_account_id'; Parent = 'new_salesforceid' })
+            }
+        )
+        JoinType = 'inner'
+    }
+    @{
+        # Passes the sidecar-backed binary value through unchanged.
+        Id = 'MapAccountAttachment'
+        Type = 'transform'
+        Inputs = @('JoinAccountAttachments')
+        Script = {
+            param($row)
+            $attachment = $row.Attachment.Content
+            if ($attachment -isnot [Migration4Dataverse.Engine.Connectors.MigrationBinaryValue]) {
+                throw 'The account attachment source did not resolve Content to a MigrationBinaryValue.'
+            }
+
+            @{
+                Id = [string]$row.Account.Id
+                new_m4dexamplefile = $attachment
+            }
+        }
+    }
+    @{
+        # Uploads the file-backed value to the account File column in Dataverse.
+        Id = 'AccountAttachmentTarget'
+        Type = 'target'
+        Inputs = @('MapAccountAttachment')
+        Target = @{
+            Type = 'dataverse'
+            ConnectionId = 'example-dataverse'
+            Table = 'account'
+            Operation = 'Update'
+            BatchSize = 1
+        }
+    }
+    @{
         # Reads lead records as an independent root stream.
         Id = 'LeadsSource'
         Type = 'source'
         Inputs = @()
         Source = @{
-            Type = 'csv'
+            Type = 'file'
+            Format = @{ Type = 'csv'; Options = @{ EmptyFieldAsNull = $true } }
             ConnectionId = 'example-files'
             Path = 'lead.csv'
             Key = 'id'
-            Options = @{ EmptyFieldAsNull = $true }
         }
     }
     @{
@@ -217,11 +295,11 @@ $steps += @(
         Inputs = @()
         DependsOn = @('AccountsTarget')
         Source = @{
-            Type = 'csv'
+            Type = 'file'
+            Format = @{ Type = 'csv'; Options = @{ EmptyFieldAsNull = $true } }
             ConnectionId = 'example-files'
             Path = 'contact.csv'
             Key = 'id'
-            Options = @{ EmptyFieldAsNull = $true }
         }
     }
     @{
@@ -275,11 +353,11 @@ $steps += @(
         Inputs = @()
         DependsOn = @('AccountsTarget', 'LeadsTarget')
         Source = @{
-            Type = 'csv'
+            Type = 'file'
+            Format = @{ Type = 'csv'; Options = @{ EmptyFieldAsNull = $true } }
             ConnectionId = 'example-files'
             Path = 'opportunity.csv'
             Key = 'id'
-            Options = @{ EmptyFieldAsNull = $true }
         }
     }
     @{
@@ -362,11 +440,11 @@ $steps += @(
         Inputs = @()
         DependsOn = @('AccountsTarget', 'OpportunitiesTarget')
         Source = @{
-            Type = 'csv'
+            Type = 'file'
+            Format = @{ Type = 'csv'; Options = @{ EmptyFieldAsNull = $true } }
             ConnectionId = 'example-files'
             Path = 'order.csv'
             Key = 'id'
-            Options = @{ EmptyFieldAsNull = $true }
         }
     }
     @{
@@ -434,11 +512,11 @@ $steps += @(
         Inputs = @()
         DependsOn = @('OrdersTarget')
         Source = @{
-            Type = 'csv'
+            Type = 'file'
+            Format = @{ Type = 'csv'; Options = @{ EmptyFieldAsNull = $true } }
             ConnectionId = 'example-files'
             Path = 'order_items.csv'
             Key = 'id'
-            Options = @{ EmptyFieldAsNull = $true }
         }
     }
     @{
@@ -489,11 +567,11 @@ $steps += @(
         Inputs = @()
         DependsOn = @('AccountsTarget', 'OpportunitiesTarget')
         Source = @{
-            Type = 'csv'
+            Type = 'file'
+            Format = @{ Type = 'csv'; Options = @{ EmptyFieldAsNull = $true } }
             ConnectionId = 'example-files'
             Path = 'tasks.csv'
             Key = 'id'
-            Options = @{ EmptyFieldAsNull = $true }
         }
     }
     @{
@@ -604,11 +682,11 @@ $steps += @(
         Inputs = @()
         DependsOn = @('AccountsTarget', 'OpportunitiesTarget')
         Source = @{
-            Type = 'csv'
+            Type = 'file'
+            Format = @{ Type = 'csv'; Options = @{ EmptyFieldAsNull = $true } }
             ConnectionId = 'example-files'
             Path = 'event.csv'
             Key = 'id'
-            Options = @{ EmptyFieldAsNull = $true }
         }
     }
     @{

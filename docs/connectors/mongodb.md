@@ -37,6 +37,14 @@ $steps = @(
 
 The source count provider uses `CountDocumentsAsync` with the same filter. A positive `ExpectedRecordCount` takes precedence.
 
+| BSON value | Type in the PowerShell mapping |
+|---|---|
+| Null, Boolean, integer, floating-point, Decimal128 | `$null`, `Boolean`, `Int64`, `Double` |
+| String, ObjectId, regular expression, JavaScript | `System.String` |
+| Date/time | `System.DateTime` for ISO-formatted values after default PowerShell JSON parsing |
+| Binary | Base64 `System.String` |
+| Embedded document / array | PowerShell dictionary / array |
+
 ## Target
 
 A MongoDB target requires `Target.Table`, which is the target collection name. Set `Options.Database` when the connection is an `IMongoClient`.
@@ -47,6 +55,13 @@ A MongoDB target requires `Target.Table`, which is the target collection name. S
 | `KeyColumns` | Empty | Fields used to match an existing document. With keys, each record is upserted with `ReplaceOne(..., IsUpsert = true)`. Without keys, records are inserted. |
 
 Each batch records a replay marker in the `_m4d_batch_ledger` collection. An identical retry is ignored; the same batch identity with different records fails. With no `KeyColumns`, a replayed batch is skipped by the marker, but a crash between document inserts and marker insertion can leave duplicate documents on the next attempt. Use `KeyColumns` for replay-safe writes.
+
+| Logical mapped value | Accepted MongoDB representation |
+|---|---|
+| Null, Boolean, number, string | Corresponding JSON scalar parsed as BSON |
+| Nested object / array | JSON object / array parsed as embedded BSON document / array |
+| GUID, date/time, ObjectId | Strings remain strings unless expressed in MongoDB Extended JSON notation |
+| Binary content | Not a file-backed binary target; Base64 text is stored as text. Use a binary-capable connector or custom target for streamed files. |
 
 ```powershell
 @{

@@ -26,6 +26,8 @@ public sealed class CsvConnectorOptions
 
     public string[]? Columns { get; init; }
 
+    public string[]? BinaryColumns { get; init; }
+
     public Dictionary<string, string> ColumnTypes { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
     public string[] NullValues { get; init; } = Array.Empty<string>();
@@ -163,6 +165,10 @@ public sealed class CsvConnectorOptions
         if (Columns is not null)
         {
             ValidateColumns(Columns, nameof(Columns));
+        }
+        if (BinaryColumns is not null)
+        {
+            ValidateColumns(BinaryColumns, nameof(BinaryColumns));
         }
         if (ColumnsByStep is not null)
         {

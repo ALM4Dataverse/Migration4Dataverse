@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Collections;
 using Migration4Dataverse.Engine.Connectors;
 using Migration4Dataverse.Engine.Scheduling;
 using Migration4Dataverse.Engine.Storage;
@@ -7,6 +8,70 @@ namespace Migration4Dataverse.Engine.Tests.Connectors;
 
 public sealed class FileConnectorTests
 {
+    [Fact]
+    public async Task BinaryFileSourceStagesContentAndEmitsARehydratableReference()
+    {
+        using var files = new TemporaryFiles();
+        var sourcePath = files.GetPath("source.bin");
+        var content = new byte[] { 0, 1, 2, 255 };
+        await File.WriteAllBytesAsync(sourcePath, content);
+        var level = new HierarchySourceLevel(
+            "Binary",
+            "binary",
+            sourcePath,
+            "Key",
+            parentKeyProperty: null,
+            rowsPerParent: 0,
+            expectedRecordCount: 1,
+            binaryStagingRoot: files.Root);
+
+        await using var reader = HierarchyRecordReaderFactory.CreateFileReader(level);
+        var record = await reader.PeekAsync(CancellationToken.None)
+            ?? throw new InvalidDataException("The binary file source returned no record.");
+        var fields = Assert.IsAssignableFrom<IDictionary>(
+            MigrationBinaryValue.RestoreFromTransport(record, files.Root));
+        var value = Assert.IsType<MigrationBinaryValue>(fields["Content"]);
+        await using var stream = value.OpenRead();
+        using var actual = new MemoryStream();
+        await stream.CopyToAsync(actual);
+
+        Assert.Equal("source.bin", record.GetProperty("FileName").GetString());
+        Assert.Equal("application/octet-stream", record.GetProperty("ContentType").GetString());
+        Assert.Equal(content, actual.ToArray());
+    }
+
+    [Fact]
+    public void BinaryFileTargetStreamsSingleMappedValueToTheDestination()
+    {
+        using var files = new TemporaryFiles();
+        var content = new byte[] { 0, 1, 2, 255 };
+        var value = MigrationBinaryValue.FromBytes(content, files.Root, "mapped.bin");
+        var record = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["Content"] = value
+        };
+        var recordsJson = JsonSerializer.Serialize(
+            MigrationBinaryValue.PrepareForTransport(new[] { record }, files.Root));
+        var targetPath = files.GetPath("target.bin");
+
+        FileBatchTargetWriter.WriteSingleFileTargetBatch(
+            targetPath,
+            "run",
+            "BinaryTarget",
+            "batch-1",
+            0,
+            recordsJson);
+        FileBatchTargetWriter.FinalizeSingleFileTarget(
+            targetPath,
+            "run",
+            "BinaryTarget",
+            "binary",
+            "{}",
+            files.Root);
+
+        Assert.Equal(content, File.ReadAllBytes(targetPath));
+    }
+
     [Fact]
     public async Task CsvHierarchyReaderStreamsAndGroupsDependentRows()
     {
@@ -283,6 +348,237 @@ public sealed class FileConnectorTests
     }
 
     [Fact]
+    public async Task JsonLinesTargetWritesBinarySidecarThatCanBeResolvedFromTheReference()
+    {
+        using var files = new TemporaryFiles();
+        var content = CreateLargeContent();
+        var value = MigrationBinaryValue.FromBytes(content, files.Root, "invoice.pdf", "application/pdf");
+        var targetPath = files.GetPath("records.jsonl");
+        FileBatchTargetWriter.WriteSingleFileTargetBatch(
+            targetPath,
+            "run",
+            "Attachments",
+            "batch-1",
+            0,
+            CreateSidecarRecordJson(value, "run"));
+
+        var optionsJson = JsonSerializer.Serialize(new { BinaryColumns = new[] { "Content" } });
+        FileBatchTargetWriter.FinalizeSingleFileTarget(
+            targetPath,
+            "run",
+            "Attachments",
+            "jsonl",
+            optionsJson,
+            files.Root);
+
+        using var record = JsonDocument.Parse(File.ReadAllText(targetPath));
+        var reference = record.RootElement.GetProperty("Content").GetString()!;
+        var binaryValue = BinaryFileReferenceSupport.FromFileReference(reference, targetPath, files.Root);
+        await using var stream = binaryValue.OpenRead();
+        using var actual = new MemoryStream();
+        await stream.CopyToAsync(actual);
+
+        Assert.EndsWith(".pdf", reference, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(content, actual.ToArray());
+    }
+
+    [Fact]
+    public async Task CsvTargetWritesBinarySidecarThatCanBeResolvedFromTheReference()
+    {
+        using var files = new TemporaryFiles();
+        var content = CreateLargeContent();
+        var value = MigrationBinaryValue.FromBytes(content, files.Root, "invoice.pdf", "application/pdf");
+        var targetPath = files.GetPath("records.csv");
+        var targetOptions = new CsvConnectorOptions
+        {
+            BinaryColumns = ["Content"],
+            ColumnsByStep = new Dictionary<string, string[]>
+            {
+                ["Attachments"] = ["Name", "Content"]
+            }
+        };
+        FileBatchTargetWriter.WriteSingleFileTargetBatch(
+            targetPath,
+            "run",
+            "Attachments",
+            "batch-1",
+            0,
+            CreateSidecarRecordJson(value, "run"));
+        FileBatchTargetWriter.FinalizeSingleFileTarget(
+            targetPath,
+            "run",
+            "Attachments",
+            "csv",
+            JsonSerializer.Serialize(targetOptions),
+            files.Root);
+
+        var sourceOptions = new CsvConnectorOptions
+        {
+            BinaryColumns = ["Content"],
+            ColumnTypes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Content"] = "binary"
+            }
+        };
+        var level = new HierarchySourceLevel(
+            "Attachments",
+            "csv",
+            targetPath,
+            "Name",
+            parentKeyProperty: null,
+            rowsPerParent: 0,
+            expectedRecordCount: 1,
+            optionsJson: JsonSerializer.Serialize(sourceOptions));
+        await using var reader = new CsvHierarchyRecordReader(level, sourceOptions);
+        var row = (await reader.PeekAsync(CancellationToken.None))!.Value;
+        var reference = row.GetProperty("Content").GetString()!;
+        var binaryValue = BinaryFileReferenceSupport.FromFileReference(reference, targetPath, files.Root);
+        await using var stream = binaryValue.OpenRead();
+        using var actual = new MemoryStream();
+        await stream.CopyToAsync(actual);
+
+        Assert.Equal(content, actual.ToArray());
+    }
+
+    [Fact]
+    public async Task ParquetTargetWritesBinarySidecarThatCanBeResolvedFromTheReference()
+    {
+        using var files = new TemporaryFiles();
+        var content = CreateLargeContent();
+        var value = MigrationBinaryValue.FromBytes(content, files.Root, "invoice.pdf", "application/pdf");
+        var targetPath = files.GetPath("records.parquet");
+        var schema = new ParquetFieldSchema[]
+        {
+            new() { Name = "Name", Type = "string", Nullable = false },
+            new() { Name = "Content", Type = "string", Nullable = false }
+        };
+        var targetOptions = new ParquetConnectorOptions
+        {
+            BinaryColumns = ["Content"],
+            SchemaByStep = new Dictionary<string, ParquetFieldSchema[]>
+            {
+                ["Attachments"] = schema
+            }
+        };
+        FileBatchTargetWriter.WriteSingleFileTargetBatch(
+            targetPath,
+            "run",
+            "Attachments",
+            "batch-1",
+            0,
+            CreateSidecarRecordJson(value, "run"));
+        FileBatchTargetWriter.FinalizeSingleFileTarget(
+            targetPath,
+            "run",
+            "Attachments",
+            "parquet",
+            JsonSerializer.Serialize(targetOptions),
+            files.Root);
+
+        var sourceOptions = new ParquetConnectorOptions
+        {
+            BinaryColumns = ["Content"]
+        };
+        var level = new HierarchySourceLevel(
+            "Attachments",
+            "parquet",
+            targetPath,
+            "Name",
+            parentKeyProperty: null,
+            rowsPerParent: 0,
+            expectedRecordCount: 1,
+            optionsJson: JsonSerializer.Serialize(sourceOptions));
+        await using var reader = new ParquetHierarchyRecordReader(level, sourceOptions);
+        var row = (await reader.PeekAsync(CancellationToken.None))!.Value;
+        var reference = row.GetProperty("Content").GetString()!;
+        var binaryValue = BinaryFileReferenceSupport.FromFileReference(reference, targetPath, files.Root);
+        await using var stream = binaryValue.OpenRead();
+        using var actual = new MemoryStream();
+        await stream.CopyToAsync(actual);
+
+        Assert.Equal(content, actual.ToArray());
+    }
+
+    [Fact]
+    public void StructuredTargetRejectsConflictingSidecarPathReuse()
+    {
+        using var files = new TemporaryFiles();
+        var targetPath = files.GetPath("records.jsonl");
+        var first = MigrationBinaryValue.FromBytes(
+            System.Text.Encoding.UTF8.GetBytes("first"),
+            files.Root,
+            "same.bin");
+        var second = MigrationBinaryValue.FromBytes(
+            System.Text.Encoding.UTF8.GetBytes("second"),
+            files.Root,
+            "same.bin");
+        FileBatchTargetWriter.WriteSingleFileTargetBatch(
+            targetPath,
+            "run",
+            "Attachments",
+            "batch-1",
+            0,
+            CreateSidecarRecordJson(first, "run"));
+        FileBatchTargetWriter.WriteSingleFileTargetBatch(
+            targetPath,
+            "run",
+            "Attachments",
+            "batch-2",
+            1,
+            CreateSidecarRecordJson(second, "run"));
+
+        var optionsJson = JsonSerializer.Serialize(new { BinaryColumns = new[] { "Content" } });
+        Assert.Throws<IOException>(() => FileBatchTargetWriter.FinalizeSingleFileTarget(
+            targetPath,
+            "run",
+            "Attachments",
+            "jsonl",
+            optionsJson,
+            files.Root));
+    }
+
+    [Fact]
+    public void StructuredTargetPreservesNullBinaryFieldsWithoutWritingSidecars()
+    {
+        using var files = new TemporaryFiles();
+        var targetPath = files.GetPath("records.jsonl");
+        FileBatchTargetWriter.WriteSingleFileTargetBatch(
+            targetPath,
+            "run",
+            "Attachments",
+            "batch-1",
+            0,
+            JsonSerializer.Serialize(new[]
+            {
+                new { Name = "Empty", Content = (string?)null }
+            }));
+
+        FileBatchTargetWriter.FinalizeSingleFileTarget(
+            targetPath,
+            "run",
+            "Attachments",
+            "jsonl",
+            JsonSerializer.Serialize(new { BinaryColumns = new[] { "Content" } }));
+
+        using var record = JsonDocument.Parse(File.ReadAllText(targetPath));
+        Assert.Equal(JsonValueKind.Null, record.RootElement.GetProperty("Content").ValueKind);
+        Assert.False(Directory.Exists(targetPath + ".attachments"));
+    }
+
+    [Theory]
+    [InlineData("../outside.bin")]
+    [InlineData("/absolute.bin")]
+    [InlineData("folder/../outside.bin")]
+    public void SidecarReferencesMustBeRelativeAndContained(string path)
+    {
+        using var files = new TemporaryFiles();
+        var value = MigrationBinaryValue.FromBytes([1], files.Root, "file.bin");
+
+        Assert.Throws<ArgumentException>(() =>
+            BinaryFileReferenceSupport.CreateTransportReference(value, "run", path));
+    }
+
+    [Fact]
     public async Task ParquetSourceConverterWritesBoundedRowGroupsThatCanBeReadBack()
     {
         using var files = new TemporaryFiles();
@@ -427,6 +723,34 @@ public sealed class FileConnectorTests
         }
 
         return batches;
+    }
+
+    private static byte[] CreateLargeContent()
+    {
+        return Enumerable.Range(0, 1024 * 1024)
+            .Select(index => (byte)(index % 251))
+            .ToArray();
+    }
+
+    private static string CreateSidecarRecordJson(
+        MigrationBinaryValue value,
+        string runId,
+        string? relativePath = null)
+    {
+        relativePath ??= BinaryFileReferenceSupport.GetDefaultRelativePath(
+            sequence: 0,
+            recordIndex: 0,
+            columnName: "Content",
+            value: value);
+        var record = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["Name"] = "Invoice",
+            ["Content"] = BinaryFileReferenceSupport.CreateTransportReference(value, runId, relativePath)
+        };
+        var transport = MigrationBinaryValue.PrepareForTransport(
+            new[] { record },
+            value.StagingRoot);
+        return JsonSerializer.Serialize(transport);
     }
 
     private sealed class TemporaryFiles : IDisposable

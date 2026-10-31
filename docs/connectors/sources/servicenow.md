@@ -26,6 +26,14 @@ The `servicenow` source reads records from the ServiceNow Table API. It is sourc
 
 The connector reads `result` arrays and advances `sysparm_offset` by `PageSize` until a page contains fewer records. `DisplayValue = 'all'` returns display-value objects in fields; flatten or transform those values before using them as Dataverse columns. Reference fields may remain link objects unless `ExcludeReferenceLink` is enabled.
 
+| ServiceNow JSON value | Type in the PowerShell mapping |
+|---|---|
+| Null, Boolean, number, string | `$null`, `Boolean`, `Int64`/`Double`, `String` |
+| Reference or `DisplayValue = 'all'` object | PowerShell dictionary |
+| IDs, numeric values returned as strings | `System.String`; convert explicitly when a typed value is needed |
+| ISO dates / timestamps | Usually `System.DateTime` after default PowerShell JSON parsing |
+| Binary content | Not included in Table API records by this connector |
+
 ## Example
 
 ```powershell

@@ -15,6 +15,8 @@ internal sealed class SharePointSourceOptions
 
     public string? Expand { get; init; }
 
+    public bool IncludeDocumentContent { get; init; }
+
     public int PageSize { get; init; } = 100;
 
     public bool FlattenFields { get; init; } = true;
@@ -89,9 +91,18 @@ internal sealed class SharePointHierarchyRecordReader : BufferedJsonHierarchyRec
                 level.StepId);
             foreach (var record in pageRecords.EnumerateArray())
             {
-                records.Add(options.FlattenFields
+                var flattened = options.FlattenFields
                     ? RestJsonConnectorSupport.FlattenObject(record, "fields", preserveTopLevel: true)
-                    : record.Clone());
+                    : record.Clone();
+                records.Add(options.IncludeDocumentContent
+                    ? await AddDocumentContentAsync(
+                        client,
+                        level,
+                        options,
+                        record,
+                        flattened,
+                        timeout.Token).ConfigureAwait(false)
+                    : flattened);
             }
             var nextLink = RestJsonConnectorSupport.GetString(root, "@odata.nextLink");
             if (string.IsNullOrWhiteSpace(nextLink))
@@ -101,6 +112,84 @@ internal sealed class SharePointHierarchyRecordReader : BufferedJsonHierarchyRec
             requestUri = RestJsonConnectorSupport.ResolveNextLink(requestUri, nextLink);
         }
         return records;
+    }
+
+    private static async Task<JsonElement> AddDocumentContentAsync(
+        HttpClient client,
+        HierarchySourceLevel level,
+        SharePointSourceOptions options,
+        JsonElement listItem,
+        JsonElement flattened,
+        CancellationToken cancellationToken)
+    {
+        var stagingRoot = level.BinaryStagingRoot
+            ?? throw new InvalidOperationException(
+                $"SharePoint source '{level.StepId}' requires a binary staging directory to download document content.");
+        if (!listItem.TryGetProperty("driveItem", out var driveItem) ||
+            driveItem.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException(
+                $"SharePoint source '{level.StepId}' requested document content for a list item without a driveItem.");
+        }
+
+        var itemId = RestJsonConnectorSupport.GetString(driveItem, "id");
+        var parentReference = driveItem.TryGetProperty("parentReference", out var parent)
+            ? parent
+            : default;
+        var driveId = parentReference.ValueKind == JsonValueKind.Object
+            ? RestJsonConnectorSupport.GetString(parentReference, "driveId")
+            : null;
+        if (string.IsNullOrWhiteSpace(itemId) || string.IsNullOrWhiteSpace(driveId))
+        {
+            throw new InvalidDataException(
+                $"SharePoint source '{level.StepId}' received a driveItem without its ID or parent drive ID.");
+        }
+        var fileName = RestJsonConnectorSupport.GetString(driveItem, "name");
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            throw new InvalidDataException(
+                $"SharePoint source '{level.StepId}' received a driveItem without a file name.");
+        }
+        string? contentType = null;
+        if (driveItem.TryGetProperty("file", out var file) &&
+            file.ValueKind == JsonValueKind.Object)
+        {
+            contentType = RestJsonConnectorSupport.GetString(file, "mimeType");
+        }
+
+        var escapedItemId = Uri.EscapeDataString(itemId);
+        var contentUri = RestJsonConnectorSupport.BuildUri(
+            client,
+            $"drives/{Uri.EscapeDataString(driveId)}/items/{escapedItemId}/content");
+        using var request = new HttpRequestMessage(HttpMethod.Get, contentUri);
+        using var response = await client.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        contentType ??= response.Content.Headers.ContentType?.MediaType;
+        using var writer = MigrationBinaryValue.CreateWriter(stagingRoot, fileName, contentType);
+        await using (var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
+        {
+            await stream.CopyToAsync(writer.Stream, cancellationToken).ConfigureAwait(false);
+        }
+        var value = writer.Complete();
+        contentType ??= value.DetectMimeType();
+
+        var fields = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var property in flattened.EnumerateObject())
+        {
+            if (!string.Equals(property.Name, "driveItem", StringComparison.Ordinal))
+            {
+                fields[property.Name] = property.Value.Clone();
+            }
+        }
+        fields["FileName"] = fileName;
+        fields["ContentType"] = contentType;
+        fields["Length"] = value.Length;
+        fields["Content"] = value;
+        return JsonSerializer.SerializeToElement(
+            MigrationBinaryValue.PrepareForTransport(fields, stagingRoot));
     }
 
     private static Uri BuildFirstRequest(HttpClient client, SharePointSourceOptions options)
@@ -123,6 +212,11 @@ internal sealed class SharePointHierarchyRecordReader : BufferedJsonHierarchyRec
         if (string.IsNullOrWhiteSpace(expand))
         {
             expand = "fields";
+        }
+        if (options.IncludeDocumentContent &&
+            !expand.Contains("driveItem", StringComparison.OrdinalIgnoreCase))
+        {
+            expand += ",driveItem";
         }
         uri = RestJsonConnectorSupport.AddQueryParameter(uri, "$expand", expand);
         if (!string.IsNullOrWhiteSpace(options.Filter))

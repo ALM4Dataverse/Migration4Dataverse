@@ -244,7 +244,8 @@ public sealed class DataverseTargetOperationsTests
             Inputs = Array.Empty<string>(),
             Source = new
             {
-                Type = "jsonl",
+                Type = "file",
+                Format = new { Type = "jsonl" },
                 ConnectionId = "files",
                 Path = fileName,
                 Key = "code"

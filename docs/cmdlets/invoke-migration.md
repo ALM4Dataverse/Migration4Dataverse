@@ -2,7 +2,7 @@
 
 Runs a PowerShell-defined migration graph. Use [step configuration](../configuration.md) for the graph shape and the [connector guides](../connectors/sources/README.md) for connector-specific options.
 
-SQLite and DuckDB Sources and Targets use a `FileInfo` naming the database file or a `DirectoryInfo` plus a step `Path`; the engine creates their database connections and loads the providers automatically. SQL Server, PostgreSQL, MySQL, and Oracle Sources and Targets use caller-supplied ADO.NET connections. Object-storage Sources and Targets use caller-supplied provider clients, HTTP/OData Sources use a URI or `HttpClient`, and MongoDB uses an `IMongoClient` or `IMongoDatabase`. SQLite and DuckDB Transforms use separate engine-managed, run-and-step-specific databases; do not provide a `ConnectionId` for these transforms. `Transform.InitializeSql` runs before record or batch processing. Both providers support per-batch SQL and whole-dataset SQL after an explicit matching staging Target completes. File targets publish one complete JSONL, CSV, or Parquet file only after all batches succeed. SQLite Targets validate declared schemas and keys by default; set `CreateTable = $true` only when the run should create missing target objects. See the [transform guide](../dev/transformations/transform.md#database-backed-migration-graph-transforms) and [SQLite target guide](../connectors/targets/sqlite.md).
+SQLite and DuckDB Sources and Targets use a `FileInfo` naming the database file or a `DirectoryInfo` plus a step `Path`; the engine creates their database connections and loads the providers automatically. SQL Server, PostgreSQL, MySQL, and Oracle Sources and Targets use caller-supplied ADO.NET connections. Object-storage Sources and Targets use caller-supplied provider clients, HTTP/OData Sources use a URI or `HttpClient`, and MongoDB uses an `IMongoClient` or `IMongoDatabase`. File and object-storage steps select their serialization with a top-level `Format` descriptor, independently of the storage-provider `Type`; format-specific settings belong under `Format.Options`. SQLite and DuckDB Transforms use separate engine-managed, run-and-step-specific databases; do not provide a `ConnectionId` for these transforms. `Transform.InitializeSql` runs before record or batch processing. Both providers support per-batch SQL and whole-dataset SQL after an explicit matching staging Target completes. File targets publish one complete formatted file only after all batches succeed. SQLite Targets validate declared schemas and keys by default; set `CreateTable = $true` only when the run should create missing target objects. See the [transform guide](../dev/transformations/transform.md#database-backed-migration-graph-transforms) and [SQLite target guide](../connectors/targets/sqlite.md).
 
 > [!NOTE]
 > Dataverse source and target steps load `Rnwood.Dataverse.Data.PowerShell` automatically. You create and own the connection object. For its complete authentication, connection, query, and write options, see the upstream [module documentation](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell), including [connections](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/core-concepts/connections.md) and [authentication](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/getting-started/authentication.md).
@@ -42,7 +42,8 @@ $steps = @(
         Type = 'source'
         Inputs = @()
         Source = @{
-            Type = 'jsonl'
+            Type = 'file'
+            Format = @{ Type = 'jsonl' }
             ConnectionId = 'input'
             Path = 'customers.jsonl'
             Key = 'SourceId'

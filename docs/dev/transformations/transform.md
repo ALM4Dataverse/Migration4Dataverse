@@ -111,6 +111,6 @@ ORDER BY Id
 }
 ```
 
-For per-batch and whole-dataset DuckDB SQL, `Transform.Parameters` is an ordered hashtable whose values bind to positional `?` placeholders. The per-batch temporary input table contains the current batch and its `__migration_parent_index`. Per-row DuckDB SQL instead maps those ordered parameters to input row fields. See the [DuckDB example](../../../examples/duckdb/example.ps1) for all three modes and setup SQL.
+For per-batch and whole-dataset DuckDB SQL, `Transform.Parameters` is an ordered hashtable whose values bind to positional `?` placeholders. The per-batch temporary input table contains the current batch and its `__migration_parent_index`. Per-row DuckDB SQL instead maps those ordered parameters to input row fields.
 
 SQLite source queries and whole-dataset transform queries are restricted to one read-only `SELECT` or `WITH` statement. SQLite `query_only` mode also guards query execution and is restored when reading completes. The connector guides describe source [parameter and ordering requirements](../../connectors/sources/sqlite.md) and target [schema, key, and index management](../../connectors/targets/sqlite.md). The complete migration-step contract is in [configuration](../../configuration.md#transform-and-filter-semantics).

@@ -1,29 +1,32 @@
 # Parquet target
 
-The `parquet` target writes the complete step output to one file and requires an explicit `SchemaByStep` entry for each target step. Batches are staged separately and assembled into ordered Parquet row groups during the scheduler's completion phase. Replacement is atomic per destination; multiple file targets are not a cross-file transaction. A row group's target size is controlled by `TargetRowGroupSize`.
+The `file` target with `Format.Type = 'parquet'` writes the complete step output to one file and requires an explicit `Format.Options.SchemaByStep` entry for each target step. Batches are staged separately and assembled into ordered Parquet row groups during the scheduler's completion phase. Replacement is atomic per destination; multiple file targets are not a cross-file transaction. A row group's target size is controlled by `Format.Options.TargetRowGroupSize`.
 
 ## Configuration example
 
 ```powershell
 Target = @{
-    Type = 'parquet'
+    Type = 'file'
+    Format = @{
+        Type = 'parquet'
+        Options = @{
+            SchemaByStep = @{
+                Customers = @(
+                    @{ Name = 'Id'; Type = 'guid'; Nullable = $false }
+                    @{ Name = 'name'; Type = 'string'; Nullable = $true }
+                    @{ Name = 'createdon'; Type = 'datetime'; DateTimeUnit = 'Micros' }
+                )
+            }
+            CompressionMethod = 'Snappy'
+        }
+    }
     ConnectionId = 'output-files'
     Path = 'customers.parquet'
     Operation = 'Write'
-    Options = @{
-        SchemaByStep = @{
-            Customers = @(
-                @{ Name = 'Id'; Type = 'guid'; Nullable = $false }
-                @{ Name = 'name'; Type = 'string'; Nullable = $true }
-                @{ Name = 'createdon'; Type = 'datetime'; DateTimeUnit = 'Micros' }
-            )
-        }
-        CompressionMethod = 'Snappy'
-    }
 }
 ```
 
-## Connector options
+## Format options
 
 Options are case-insensitive when deserialized.
 
@@ -39,10 +42,11 @@ Options are case-insensitive when deserialized.
 | `TreatBigIntegersAsDates` | `false` | Parquet.Net large-integer interpretation. |
 | `UseDateOnlyTypeForDates` | `true` | Use Parquet.Net `DateOnly` behavior for dates. |
 | `Columns` | `null` | Source projection; not a target schema. |
+| `BinaryColumns` | `[]` (auto-detect) | When set, restrict sidecar output to these top-level binary fields; schema fields must be `string` or `json`. |
 | `SchemaByStep` | `null` | Required output schemas keyed by step ID. |
 | `SourceSchemaByStep` | `null` | Fixture-conversion helper; not used by runtime target writing. |
 
-`ConnectionId` must resolve to a `DirectoryInfo` or `FileInfo`. With a directory, `Path` names the exact output file relative to that directory; with a `FileInfo`, omit `Path`. Each `SchemaByStep` field has these properties:
+`ConnectionId` must resolve to a `DirectoryInfo` or `FileInfo`. With a directory, `Path` names the exact output file relative to that directory; with a `FileInfo`, omit `Path`. Each `Format.Options.SchemaByStep` field has these properties:
 
 | Property | Default | Description |
 |---|---|---|
@@ -56,3 +60,13 @@ Options are case-insensitive when deserialized.
 | `IsAdjustedToUtc` | `true` | UTC adjustment metadata for `datetime`. |
 
 JSON date values must be ISO date/time strings for `date` and `datetime`; `binary` values must be base64 strings. `json` fields are serialized to text. Unsupported types, invalid schema properties, and values that cannot be converted fail instead of being silently coerced.
+
+| Parquet field type | Accepted PowerShell/JSON value |
+|---|---|
+| `string`, `json` | String; object/array values for `json` are serialized as JSON text |
+| `bool`, integer, floating-point, `decimal` | Boolean or JSON number convertible to the declared type |
+| `guid`, `date`, `datetime` | String in GUID, ISO date, or ISO date/time form |
+| `binary` | Base64 `System.String`, decoded to Parquet bytes |
+| Sidecar reference (`BinaryColumns`) | `MigrationBinaryValue`, `byte[]`, or readable `Stream`; emits a path in a `string`/`json` field |
+
+See [binary values and sidecar files](../../concepts/binary-values-and-sidecars.md) for rehydrating sidecars from Parquet sources.

@@ -209,7 +209,8 @@ public sealed class DataverseTargetConcurrencyTests
                 Inputs = Array.Empty<string>(),
                 Source = new
                 {
-                    Type = "jsonl",
+                    Type = "file",
+                    Format = new { Type = "jsonl" },
                     ConnectionId = "files",
                     Path = "source.jsonl",
                     Key = "id"

@@ -30,9 +30,9 @@ public sealed class ParquetHierarchyRecordReader : IHierarchyRecordReader
     {
         ArgumentNullException.ThrowIfNull(level);
         ArgumentNullException.ThrowIfNull(options);
-        if (level.Type != "parquet")
+        if (level.FormatType != "parquet")
         {
-            throw new ArgumentException("A Parquet reader requires a source level with type 'parquet'.", nameof(level));
+            throw new ArgumentException("A Parquet reader requires the Parquet format.", nameof(level));
         }
 
         _level = level;
@@ -204,6 +204,25 @@ public sealed class ParquetHierarchyRecordReader : IHierarchyRecordReader
             return values.Cast<object?>().ToArray();
         }
 
+        if (field.ClrType == typeof(ReadOnlyMemory<char>))
+        {
+            if (field.IsNullable)
+            {
+                var values = new ReadOnlyMemory<char>?[rowCount];
+                await rowGroup.ReadAsync(field, values.AsMemory(), null, cancellationToken).ConfigureAwait(false);
+                return values.Select(value => value?.ToString()).Cast<object?>().ToArray();
+            }
+
+            var nonNullableValues = new ReadOnlyMemory<char>[rowCount];
+            await rowGroup.ReadAsync(
+                    field,
+                    nonNullableValues.AsMemory(),
+                    null,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return nonNullableValues.Select(value => value.ToString()).Cast<object?>().ToArray();
+        }
+
         if (!field.ClrType.IsValueType)
         {
             throw new InvalidDataException(
@@ -273,6 +292,23 @@ public sealed class ParquetHierarchyRecordReader : IHierarchyRecordReader
         if (selectedFields.Select(field => field.Name).Distinct(StringComparer.Ordinal).Count() != selectedFields.Length)
         {
             throw new InvalidDataException($"Parquet source '{_level.Path}' contains duplicate data field names.");
+        }
+
+        foreach (var binaryColumn in _options.BinaryColumns ?? Array.Empty<string>())
+        {
+            var field = selectedFields.FirstOrDefault(candidate =>
+                string.Equals(candidate.Name, binaryColumn, StringComparison.OrdinalIgnoreCase));
+            if (field is null)
+            {
+                throw new InvalidDataException(
+                    $"Parquet source '{_level.Path}' must include every Options.BinaryColumns entry in Options.Columns.");
+            }
+            if (field.ClrType != typeof(string) &&
+                field.ClrType != typeof(ReadOnlyMemory<char>))
+            {
+                throw new InvalidDataException(
+                    $"Parquet binary reference column '{binaryColumn}' in source '{_level.Path}' must use a string schema, not '{field.ClrType.FullName}'.");
+            }
         }
 
         return selectedFields;

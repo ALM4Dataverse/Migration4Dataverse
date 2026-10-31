@@ -111,9 +111,9 @@ public class HierarchyBatchSource
     public static IHierarchyRecordReader CreateJsonLinesReader(HierarchySourceLevel level)
     {
         ArgumentNullException.ThrowIfNull(level);
-        if (level.Type != "jsonl")
+        if (level.FormatType != "jsonl")
         {
-            throw new ArgumentException("A JSON Lines reader requires a source level with type 'jsonl'.", nameof(level));
+            throw new ArgumentException("A JSON Lines reader requires the JSON Lines format.", nameof(level));
         }
 
         return new JsonLinesReader(level);
@@ -429,10 +429,10 @@ public class HierarchyBatchSource
                     $"Source '{level.StepId}' has an invalid parent-key definition.",
                     nameof(root));
             }
-            if (level.Type is "jsonl" or "csv" or "parquet" or "excel" && !File.Exists(level.Path))
+            if (level.Type is "file" or "jsonl" or "csv" or "parquet" or "excel" && !File.Exists(level.Path))
             {
                 throw new FileNotFoundException(
-                    $"{level.Type} source for job '{level.StepId}' was not found.",
+                    $"{level.FormatType} source for job '{level.StepId}' was not found.",
                     level.Path);
             }
 

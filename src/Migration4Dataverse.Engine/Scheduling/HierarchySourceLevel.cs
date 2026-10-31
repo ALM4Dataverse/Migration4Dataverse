@@ -17,7 +17,13 @@ public sealed class HierarchySourceLevel
         string? connectionId = null,
         string? identity = null,
         DbConnection? databaseConnection = null,
-        object? connectorConnection = null)
+        object? connectorConnection = null,
+        string? binaryStagingRoot = null,
+        string? idProperty = null,
+        string? formatType = null,
+        string? formatOptionsJson = null,
+        IEnumerable<string>? formatExtensions = null,
+        string? formatObjectKey = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(jobName);
         ArgumentException.ThrowIfNullOrWhiteSpace(type);
@@ -29,7 +35,7 @@ public sealed class HierarchySourceLevel
             : parentKeyProperty;
 
         Type = type.Trim().ToLowerInvariant();
-        if (Type is not ("jsonl" or "csv" or "parquet" or "excel" or "custom" or "dataverse" or
+        if (Type is not ("file" or "jsonl" or "csv" or "parquet" or "excel" or "binary" or "custom" or "dataverse" or
             "sqlite" or "duckdb" or "sqlserver" or "postgresql" or "mysql" or "oracle" or
             "azureblob" or "s3" or "adlsgen2" or "gcs" or "http" or "odata" or "mongodb" or
             "salesforce" or "sharepoint" or "hubspot" or "zendesk" or "servicenow"))
@@ -37,9 +43,16 @@ public sealed class HierarchySourceLevel
             throw new ArgumentException($"Unsupported source type '{type}'.", nameof(type));
         }
 
-        if (Type is "jsonl" or "csv" or "parquet" or "excel" && string.IsNullOrWhiteSpace(path))
+        if (Type is "file" or "jsonl" or "csv" or "parquet" or "excel" or "binary" && string.IsNullOrWhiteSpace(path))
         {
             throw new ArgumentException("File source types require a path.", nameof(path));
+        }
+        var normalizedFormatType = string.IsNullOrWhiteSpace(formatType)
+            ? Type == "file" ? null : Type
+            : formatType.Trim().ToLowerInvariant();
+        if (Type == "file" && string.IsNullOrWhiteSpace(normalizedFormatType))
+        {
+            throw new ArgumentException("File sources require a format type.", nameof(formatType));
         }
         if (Type is "sqlite" or "duckdb" or "sqlserver" or "postgresql" or "mysql" or "oracle" &&
             databaseConnection is null)
@@ -79,10 +92,23 @@ public sealed class HierarchySourceLevel
         HasExpectedRecordCount = expectedRecordCount > 0;
         Children = (children ?? Array.Empty<HierarchySourceLevel>()).ToArray();
         OptionsJson = string.IsNullOrWhiteSpace(optionsJson) ? "{}" : optionsJson;
+        FormatType = normalizedFormatType;
+        FormatOptionsJson = string.IsNullOrWhiteSpace(formatOptionsJson)
+            ? OptionsJson
+            : formatOptionsJson;
+        FormatExtensions = (formatExtensions ?? Array.Empty<string>())
+            .Select(extension => extension.Trim())
+            .Where(extension => extension.Length > 0)
+            .ToArray();
+        FormatObjectKey = formatObjectKey;
         ConnectionId = connectionId;
         Identity = identity;
         DatabaseConnection = databaseConnection;
         ConnectorConnection = connectorConnection;
+        BinaryStagingRoot = string.IsNullOrWhiteSpace(binaryStagingRoot)
+            ? null
+            : System.IO.Path.GetFullPath(binaryStagingRoot);
+        IdProperty = string.IsNullOrWhiteSpace(idProperty) ? null : idProperty;
     }
 
     public string StepId { get; }
@@ -108,6 +134,14 @@ public sealed class HierarchySourceLevel
 
     public string OptionsJson { get; }
 
+    public string? FormatType { get; }
+
+    public string FormatOptionsJson { get; }
+
+    public IReadOnlyList<string> FormatExtensions { get; }
+
+    public string? FormatObjectKey { get; }
+
     public string? ConnectionId { get; }
 
     public string? Identity { get; }
@@ -115,4 +149,8 @@ public sealed class HierarchySourceLevel
     public DbConnection? DatabaseConnection { get; }
 
     public object? ConnectorConnection { get; }
+
+    public string? BinaryStagingRoot { get; }
+
+    public string? IdProperty { get; }
 }

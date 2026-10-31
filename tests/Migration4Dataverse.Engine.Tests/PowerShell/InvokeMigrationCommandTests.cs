@@ -51,7 +51,8 @@ public sealed class InvokeMigrationCommandTests
                     ["Inputs"] = Array.Empty<string>(),
                     ["Source"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
                     {
-                        ["Type"] = "jsonl",
+                        ["Type"] = "file",
+                        ["Format"] = new Hashtable { ["Type"] = "jsonl" },
                         ["ConnectionId"] = "source",
                         ["Path"] = "accounts.jsonl",
                         ["Key"] = "Id",
@@ -73,7 +74,8 @@ public sealed class InvokeMigrationCommandTests
                     ["Inputs"] = new[] { "NormalizeAccounts" },
                     ["Target"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
                     {
-                        ["Type"] = "jsonl",
+                        ["Type"] = "file",
+                        ["Format"] = new Hashtable { ["Type"] = "jsonl" },
                         ["ConnectionId"] = "target",
                         ["Path"] = "accounts",
                         ["Operation"] = "Write",
@@ -148,7 +150,8 @@ public sealed class InvokeMigrationCommandTests
                     ["Inputs"] = Array.Empty<string>(),
                     ["Source"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
                     {
-                        ["Type"] = "jsonl",
+                        ["Type"] = "file",
+                        ["Format"] = new Hashtable { ["Type"] = "jsonl" },
                         ["ConnectionId"] = "source",
                         ["Path"] = "accounts.jsonl",
                         ["Key"] = "Id",
@@ -183,7 +186,8 @@ public sealed class InvokeMigrationCommandTests
                     ["Inputs"] = new[] { "AccountFields" },
                     ["Target"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
                     {
-                        ["Type"] = "jsonl",
+                        ["Type"] = "file",
+                        ["Format"] = new Hashtable { ["Type"] = "jsonl" },
                         ["ConnectionId"] = "target",
                         ["Path"] = "accounts",
                         ["Operation"] = "Write",
@@ -395,7 +399,8 @@ public sealed class InvokeMigrationCommandTests
                     ["Inputs"] = Array.Empty<string>(),
                     ["Source"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
                     {
-                        ["Type"] = "jsonl",
+                        ["Type"] = "file",
+                        ["Format"] = new Hashtable { ["Type"] = "jsonl" },
                         ["ConnectionId"] = "source",
                         ["Path"] = "accounts.jsonl",
                         ["Key"] = "Id",
@@ -416,7 +421,8 @@ public sealed class InvokeMigrationCommandTests
                     ["Inputs"] = new[] { "AccountFields" },
                     ["Target"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
                     {
-                        ["Type"] = "jsonl",
+                        ["Type"] = "file",
+                        ["Format"] = new Hashtable { ["Type"] = "jsonl" },
                         ["ConnectionId"] = "target",
                         ["Path"] = "accounts",
                         ["Operation"] = "Write",
@@ -483,7 +489,8 @@ public sealed class InvokeMigrationCommandTests
                     Inputs = Array.Empty<string>(),
                     Source = new Hashtable(StringComparer.OrdinalIgnoreCase)
                     {
-                        ["Type"] = "jsonl",
+                        ["Type"] = "file",
+                        ["Format"] = new Hashtable { ["Type"] = "jsonl" },
                         ["ConnectionId"] = "source",
                         ["Key"] = "Id",
                         ["Options"] = new Hashtable()
@@ -496,7 +503,8 @@ public sealed class InvokeMigrationCommandTests
                     Inputs = new[] { "Source" },
                     Target = new Hashtable(StringComparer.OrdinalIgnoreCase)
                     {
-                        ["Type"] = "jsonl",
+                        ["Type"] = "file",
+                        ["Format"] = new Hashtable { ["Type"] = "jsonl" },
                         ["ConnectionId"] = "target",
                         ["Operation"] = "Write",
                         ["Options"] = new Hashtable()
@@ -602,7 +610,8 @@ public sealed class InvokeMigrationCommandTests
                     ["Inputs"] = new[] { "DatabaseFields" },
                     ["Target"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
                     {
-                        ["Type"] = "jsonl",
+                        ["Type"] = "file",
+                        ["Format"] = new Hashtable { ["Type"] = "jsonl" },
                         ["ConnectionId"] = "target-files",
                         ["Path"] = "records",
                         ["Operation"] = "Write",
@@ -715,7 +724,8 @@ public sealed class InvokeMigrationCommandTests
                     ["Inputs"] = new[] { "CustomFields" },
                     ["Target"] = new Hashtable(StringComparer.OrdinalIgnoreCase)
                     {
-                        ["Type"] = "jsonl",
+                        ["Type"] = "file",
+                        ["Format"] = new Hashtable { ["Type"] = "jsonl" },
                         ["ConnectionId"] = "target-files",
                         ["Path"] = "customers",
                         ["Operation"] = "Write",
@@ -910,7 +920,8 @@ public sealed class InvokeMigrationCommandTests
                 Name = "Legacy",
                 Target = new
                 {
-                    Type = "jsonl",
+                    Type = "file",
+                    Format = new { Type = "jsonl" },
                     ConnectionId = "output",
                     Path = "legacy"
                 },
@@ -960,7 +971,8 @@ public sealed class InvokeMigrationCommandTests
                             Inputs = Array.Empty<string>(),
                             Source = new
                             {
-                                Type = "jsonl",
+                                Type = "file",
+                                Format = new { Type = "jsonl" },
                                 ConnectionId = "source",
                                 Path = "source.jsonl",
                                 Key = "Id"
@@ -1221,7 +1233,8 @@ public sealed class InvokeMigrationCommandTests
                     },
                     Source = new
                     {
-                        Type = "jsonl",
+                        Type = "file",
+                        Format = new { Type = "jsonl" },
                         ConnectionId = "source",
                         Path = "children.jsonl",
                         Key = "SourceId",
@@ -1341,7 +1354,8 @@ public sealed class InvokeMigrationCommandTests
                     },
                     Source = new
                     {
-                        Type = "jsonl",
+                        Type = "file",
+                        Format = new { Type = "jsonl" },
                         ConnectionId = "source",
                         Path = "children.jsonl",
                         Key = "SourceId",
@@ -1421,7 +1435,8 @@ public sealed class InvokeMigrationCommandTests
                 DependsOn = dependsOn ?? Array.Empty<string>(),
                 Source = new
                 {
-                    Type = "jsonl",
+                    Type = "file",
+                    Format = new { Type = "jsonl" },
                     ConnectionId = "source",
                     Path = sourcePath,
                     Key = "SourceId",
@@ -1593,7 +1608,8 @@ public sealed class InvokeMigrationCommandTests
                 Inputs = new[] { input },
                 Target = new
                 {
-                    Type = "jsonl",
+                    Type = "file",
+                    Format = new { Type = "jsonl" },
                     ConnectionId = "target",
                     Operation = "Write",
                     BatchSize = 1,

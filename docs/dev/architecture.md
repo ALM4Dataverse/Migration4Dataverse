@@ -15,125 +15,182 @@ The system boundaries are four binary PowerShell cmdlets, a read-only local moni
 4. **The database owner** is hosted by the first caller that opens a database, or explicitly with `Start-MigrationDatabaseServer`. It is the only Migration4Dataverse process that opens that SQLite file; other processes use same-user named-pipe IPC. Scheduler execution, workers, live connections, and callbacks remain in each caller process. A database can serve multiple active run IDs, with per-run leases preventing duplicate schedulers for the same run.
 5. **Run history** is queryable through [`Get-MigrationRun`](../../src/Migration4Dataverse.Engine/PowerShell/GetMigrationRunCommand.cs). The dashboard can also preview caller-supplied step and connection objects without starting a migration or opening a database.
 
+### Invocation and scheduling
+
 ```mermaid
 flowchart LR
-    config["Top-level Source / operation / Target steps"]
-    connections["Caller-owned named connection objects"]
-    scriptConfig["Run-wide helper scripts and required modules"]
+    definition["Migration step definitions"]
+    connections["Caller-owned named connections"]
+    scripts["Helper scripts and required modules"]
     invoke["Invoke-Migration"]
-    sourceFeeder["Source step feeder"]
-    sourceCount["Optional source count preflight"]
-    completionGate["Step completion tracker"]
-    readerFactory["Connector record-reader factory"]
-    fileReaders["JSONL / CSV / Parquet / Excel readers"]
-    parquetCounts["Parquet footer metadata"]
-    databaseReaders["SQLite / DuckDB query readers"]
-    dataverseSource["Dataverse query reader"]
-    partitionReaders["Configured parallel Dataverse partitions"]
-    partitionMerge["Ordered key merge and per-partition cursors"]
-    customSource["Paged custom source callback"]
-    runspaces["Pooled PowerShell handlers and callbacks"]
-    previewGate{"WhatIf preview?"}
+    factory["PowerShellMigrationStepFactory"]
+    scheduler["DependencyScheduler"]
+    feeder["Source step feeder"]
+    readers["Connector readers"]
+    workers["Bounded step workers"]
+    scriptsExecutor["PowerShellScriptExecutor and runspace pool"]
+    preview{"WhatIf preview?"}
+    targets["Target connectors and callbacks"]
     previewRows["Capture planned target rows"]
-    targetType{"Target.Type"}
-    throughput["Run-wide successful target throughput"]
-    connectionController["Fixed per-connection Dataverse budget"]
-    retryMonitor["Connection retry / throttle telemetry"]
-    connectionPool["Shared per-ConnectionId Dataverse request pool"]
-    connectionMetrics["In-memory per-run pool-member counters"]
-    commands["Rnwood.Dataverse.Data.PowerShell"]
-    dataverse["Microsoft Dataverse"]
-    joinStaging["SQLite Join input rows and key indexes"]
-    joinReader["Indexed streaming Join reader"]
-    fileWriter["Replay-safe per-batch file staging"]
-    fileFinalizer["Atomic complete-file finalizers"]
-    databaseWriter["Transactional SQLite / DuckDB writers"]
-    databaseTransform["SQLite / DuckDB per-row transforms and set-based SQL"]
-    managedTransformDatabase["Run- and step-isolated transform databases"]
-    customTarget["Custom target callback"]
-    output["One complete file per target step"]
-    pipeline["Separate data-flow pipeline"]
-    caller["Internal C# host or test"]
-    dashboard["React / React Flow dashboard"]
-    browser["Local browser"]
+    completion["Step completion tracker"]
+    storeClient["MigrationStoreFactory / IMigrationStore"]
 
-    subgraph engine["Shared C# engine"]
-        scheduler["DependencyScheduler"]
-        storeClient["MigrationStoreFactory / IMigrationStore"]
-        dashboardServer["MigrationDashboardServer"]
-        connectionMetrics
-        psExecutor["PowerShellScriptExecutor"]
-    end
-    subgraph owner["Per-database SQLite owner process"]
-        rpcServer["Same-user named-pipe RPC server (bounded reusable listeners)"]
-        writeGate["Owner-process SQLite write gate"]
-        store["SqliteMigrationStore / run data / legacy tuning profiles"]
-    end
-
-    config --> invoke
+    definition --> invoke
     connections --> invoke
-    scriptConfig --> invoke
-    invoke --> scheduler
-    scheduler --> sourceCount
-    sourceCount -->|wrapped Query / optional CountQuery| databaseReaders
-    sourceCount -->|RecordCount| dataverseSource
-    sourceCount -->|row-group metadata| parquetCounts
-    sourceCount -->|CountCallback| psExecutor
-    sourceCount -->|resolved expected totals| storeClient
-    scheduler --> completionGate
-    invoke -- sanitized config and connection snapshots --> storeClient
-    sourceFeeder --> scheduler
+    scripts --> invoke
+    invoke --> factory --> scheduler
+    scheduler --> feeder
+    feeder --> readers --> scheduler
+    scheduler --> workers
+    workers --> scriptsExecutor --> preview
+    preview -->|execute| targets
+    preview -->|preview: skip target side effects| previewRows --> storeClient
+    workers --> completion --> scheduler
+    invoke -->|sanitized configuration and connection snapshots| storeClient
     scheduler --> storeClient
-    dashboardServer --> storeClient
-    connectionPool -->|routed requests and request units| connectionMetrics
-    dashboardServer -->|live throughput samples| connectionMetrics
-    storeClient -->|direct in owner process; IPC otherwise| rpcServer
-    rpcServer --> writeGate --> store
-    browser --> dashboard
-    dashboard --> dashboardServer
-    scheduler --> psExecutor
-    psExecutor --> runspaces
-    invoke --> sourceFeeder
-    invoke --> readerFactory
-    readerFactory --> fileReaders
-    readerFactory --> databaseReaders
-    readerFactory --> dataverseSource
-    readerFactory --> customSource
-    fileReaders --> sourceFeeder
-    databaseReaders --> sourceFeeder
-    dataverseSource --> partitionReaders --> runspaces --> commands
-    commands -->|records from partition readers| partitionMerge --> sourceFeeder
-    customSource --> runspaces
-    customSource --> sourceFeeder
-    runspaces --> previewGate
-    previewGate -->|execute| targetType
-    previewGate -->|preview: skip target and callback side effects| previewRows --> storeClient
-    runspaces -->|target batch outcomes| throughput
-    runspaces -->|shared execution permits| connectionController
-    connectionController -->|connection retry/throttle observations| retryMonitor
-    retryMonitor -->|diagnostic telemetry only| connectionController
-    connectionPool -->|per-identity admission and retry telemetry| connectionController
-    connectionController -->|fixed target concurrency caps| targetType
-    targetType -- dataverse --> commands
-    commands -->|single connection| dataverse
-    commands -->|pooled connection| connectionPool --> dataverse
-    runspaces --> joinStaging --> storeClient
-    commands -->|returned target IDs| runspaces
-    storeClient -->|completed input pages and key matches| joinReader --> scheduler
-    targetType -- jsonl / csv / parquet --> fileWriter --> fileFinalizer --> output
-    targetType -- sqlite / duckdb --> databaseWriter
-    runspaces --> databaseTransform --> managedTransformDatabase
-    scheduler -->|successful run completion hooks| fileFinalizer
-    targetType -- custom --> customTarget
-    caller -->|definition, sources, and node scripts| pipeline
-    pipeline --> psExecutor
+```
+
+### Source ingestion and format selection
+
+```mermaid
+flowchart LR
+    config["Source.Type and optional Format"]
+    factory["Connector record-reader factory"]
+    local["Local file reader"]
+    object["Object-storage reader"]
+    objectStage["Temporary object file"]
+    selector["Format.Type selection"]
+    builtIn["JSONL / CSV / Parquet / Excel / binary readers"]
+    customFormat["Custom PowerShell stream reader"]
+    dbApi["Database, HTTP, SaaS, SharePoint, and MongoDB readers"]
+    dataverse["Dataverse query or partition readers"]
+    customSource["Paged custom source callback"]
+    runspaces["PowerShell runspace pool"]
+    binaryReaders["Binary-producing readers"]
+    binaryStage["Run-scoped file-backed binary staging"]
+    feeder["Source step feeder"]
+    scheduler["DependencyScheduler"]
+
+    config --> factory
+    factory --> binaryReaders
+    factory --> local --> selector
+    factory --> object --> objectStage --> selector
+    selector --> builtIn
+    selector --> customFormat
+    builtIn -->|structured rows| feeder
+    customFormat -->|incremental records| feeder
+    builtIn -->|binary artifacts| binaryStage
+    dbApi --> feeder
+    dataverse --> runspaces --> feeder
+    dataverse -->|downloaded File / Image blocks| binaryStage
+    factory --> customSource --> runspaces
+    customSource --> feeder
+    binaryReaders --> binaryStage --> feeder
+    feeder --> scheduler
+```
+
+### Target writing and publication
+
+```mermaid
+flowchart LR
+    rows["Target batches"]
+    selector{"Target.Type"}
+    fileStage["Replay-safe per-batch file staging"]
+    finalize["Atomic complete-file finalizer"]
+    format{"Format.Type"}
+    fileFormat["Built-in format writer"]
+    customFormat["Custom PowerShell stream writer"]
+    output["One complete file per target step"]
+    binaryStage["Run-scoped file-backed binary staging"]
+    sidecar["Structured-file sidecar writer"]
+    sidecarOutput["Sibling .attachments directory"]
+    binaryFile["Binary file target finalizer"]
+    object["Replay-safe object-storage upload"]
+    sharepoint["SharePoint document target"]
+    dataverse["Dataverse commands"]
+    database["Transactional database writers"]
+    customTarget["Custom target callback"]
+
+    rows --> selector
+    selector -->|file| fileStage --> finalize --> format
+    format --> fileFormat --> output
+    format --> customFormat --> output
+    finalize --> sidecar
+    binaryStage -->|streamed binary fields| sidecar --> sidecarOutput
+    format --> binaryFile --> output
+    binaryStage -->|atomic stream copy| binaryFile
+    selector -->|Azure Blob / S3 / ADLS Gen2 / GCS| object
+    binaryStage -->|replay-safe streamed upload| object
+    selector -->|SharePoint| sharepoint
+    binaryStage -->|streamed Graph upload| sharepoint
+    selector -->|Dataverse| dataverse
+    binaryStage -->|streamed block upload| dataverse
+    selector -->|database| database
+    selector -->|custom| customTarget
+    binaryStage -->|open staged streams| customTarget
+```
+
+### Persistence and monitoring
+
+```mermaid
+flowchart LR
+    scheduler["Scheduler and migration workers"]
+    dashboard["MigrationDashboardServer"]
+    storeClient["MigrationStoreFactory / IMigrationStore"]
+    rpc["Same-user named-pipe RPC"]
+    writeGate["Owner-process SQLite write gate"]
+    store["SqliteMigrationStore"]
+    browser["Local browser"]
+    spa["React / React Flow dashboard"]
+    poolMetrics["In-memory Dataverse pool-member counters"]
+
+    scheduler --> storeClient
+    dashboard --> storeClient
+    storeClient -->|direct in owner process| writeGate
+    storeClient -->|other process| rpc --> writeGate
+    writeGate --> store
+    browser --> spa --> dashboard
+    dashboard -->|live throughput samples| poolMetrics
 ```
 
 ### Typed connectors and named connections
 
-Each Source or Target step declares a connector `Type` and `ConnectionId`. The caller supplies runtime objects in a map keyed by ID; secrets are not stored in step data. File, Excel, and SQLite/DuckDB database connectors accept `DirectoryInfo` plus a relative step `Path` or a `FileInfo` naming the exact file. SQL Server, PostgreSQL, MySQL, and Oracle connectors accept caller-supplied ADO.NET `DbConnection` objects. Object-storage connectors accept Azure Blob, Amazon S3, ADLS Gen2, or Google Cloud Storage clients; HTTP sources accept a `Uri`, absolute URL string, or `HttpClient`; Salesforce, SharePoint, HubSpot, Zendesk, and ServiceNow sources accept an authenticated `HttpClient`; MongoDB accepts an `IMongoClient` or `IMongoDatabase`. The engine creates and owns only SQLite/DuckDB connections and HTTP clients created from a URI, and it automatically registers the SQLite/DuckDB provider/native-library resolvers. Sources support JSONL, CSV, Parquet, Excel, SQLite/DuckDB/SQL Server/PostgreSQL/MySQL/Oracle SQL queries, Azure Blob/S3/ADLS Gen2/GCS objects, HTTP/OData, Salesforce, SharePoint lists, HubSpot, Zendesk, ServiceNow, MongoDB documents, Dataverse queries, and paged PowerShell callbacks. Database query results stream from ADO.NET readers; object-storage, HTTP, and API sources materialize their selected files, pages, or results before using the file readers. Dataverse source queries use `Get-DataverseRecord` Simple/FetchXML modes or read-only Cds4Sql queries through `Invoke-DataverseSql`; results stream through the runspace pool with bounded buffering. Targets support Dataverse, JSONL, CSV, Parquet, SQLite, DuckDB, SQL Server, PostgreSQL, MySQL, Oracle, Azure Blob, S3, ADLS Gen2, GCS, MongoDB, and PowerShell callbacks. SQLite and DuckDB Transform nodes do not take caller connections; the factory creates and owns a run-and-step-specific database file for each provider/run/step under `.migration-transforms` beside the migration database. Their optional `InitializeSql` runs before any work is scheduled. Types and connection IDs may vary by step. There is not yet a general connector registry or plug-in API.
+Each Source or Target step declares a storage/connector `Type` and `ConnectionId`. Local files use `Type = 'file'`; object-storage connectors use their provider type. Both select serialization independently through a top-level `Format` descriptor whose `Type` selects a built-in or PowerShell custom format and whose `Options` are format-specific. The caller supplies runtime objects in a map keyed by ID; secrets are not stored in step data. File and SQLite/DuckDB database connectors accept `DirectoryInfo` plus a relative step `Path` or a `FileInfo` naming the exact file. SQL Server, PostgreSQL, MySQL, and Oracle connectors accept caller-supplied ADO.NET `DbConnection` objects. Object-storage connectors accept Azure Blob, Amazon S3, ADLS Gen2, or Google Cloud Storage clients; HTTP sources and SharePoint targets accept an authenticated `HttpClient`; Salesforce, SharePoint, HubSpot, Zendesk, and ServiceNow sources also accept an authenticated `HttpClient`; MongoDB accepts an `IMongoClient` or `IMongoDatabase`. The engine creates and owns only SQLite/DuckDB connections and HTTP clients created from a URI, and it automatically registers the SQLite/DuckDB provider/native-library resolvers. Sources support JSONL, CSV, Parquet, Excel, binary and custom file formats, SQLite/DuckDB/SQL Server/PostgreSQL/MySQL/Oracle SQL queries, structured and binary Azure Blob/S3/ADLS Gen2/GCS objects, HTTP/OData, Salesforce, SharePoint list items and documents, HubSpot, Zendesk, ServiceNow, MongoDB documents, Dataverse queries, and paged PowerShell callbacks. Database query results stream from ADO.NET readers; binary file, object-storage, SharePoint, and Dataverse content streams directly into run-scoped staging. Structured object-storage sources stage each selected object to a temporary file before streaming records through the shared format reader; custom format callbacks consume that stream and emit records incrementally. Dataverse source queries use `Get-DataverseRecord` Simple/FetchXML modes or read-only Cds4Sql queries through `Invoke-DataverseSql`; results stream through the runspace pool with bounded buffering. Targets support Dataverse, file formats, SQLite, DuckDB, SQL Server, PostgreSQL, MySQL, Oracle, Azure Blob, S3, ADLS Gen2, GCS, SharePoint documents, MongoDB, and PowerShell callbacks. Custom format writers receive bounded batches and write directly to a stream, keeping whole-file buffering out of the callback contract. SQLite and DuckDB Transform nodes do not take caller connections; the factory creates and owns a run-and-step-specific database file for each provider/run/step under `.migration-transforms` beside the migration database. Their optional `InitializeSql` runs before any work is scheduled. Types and connection IDs may vary by step. There is not yet a general connector registry or plug-in API.
 
 For a typed Dataverse source or target, a named connection slot can contain one module connection or an array of `ServiceClient` objects. A multi-connection slot creates one per-run pool shared by typed sources and targets that use that `ConnectionId`; the caller still owns the original connection objects. Pool construction verifies that connections target the same organization, uses `WhoAmI` to group the same effective user identity, and requires matching `MaxRetryCount` values. The pool wraps the upstream module's injected-service `ServiceClient` proxy so individual requests can be routed without changing the module's connection contract. It forwards Web API traffic through an exposed authenticated `WebApiHttpClient`, or, when the module lazily leaves that client unset, obtains bearer tokens and custom headers from the original connection's token-provider callbacks. Tokens are not persisted. Member retries are disabled while pooled so retry attempts pass through and are accounted by the proxy; original retry settings are restored when the step set is disposed.
+
+#### Dataverse request routing
+
+```mermaid
+flowchart LR
+    steps["Typed Dataverse source and target steps"]
+    commands["Rnwood.Dataverse.Data.PowerShell commands"]
+    mode{"Connection slot"}
+    single["Single caller-owned ServiceClient"]
+    proxy["Injected-service ServiceClient proxy"]
+    pool["Per-run pool keyed by ConnectionId"]
+    controller["Per-identity admission and retry control"]
+    member["Caller-owned pool member"]
+    dataverse["Microsoft Dataverse"]
+    telemetry["Request / retry / throttle observations"]
+    dashboard["Live pool-member counters"]
+
+    steps --> commands --> mode
+    mode -->|single connection| single --> dataverse
+    mode -->|multiple connections| proxy --> pool --> controller --> member --> dataverse
+    member -->|request outcomes| telemetry --> controller
+    pool --> dashboard
+```
+
+### Binary staging and recovery
+
+Each `Invoke-Migration` run derives a binary staging directory from the migration database path and run ID. Source readers and callbacks stream content into artifacts there; queued batch JSON stores only a versioned relative-path descriptor with file name, content type, representation, length, and SHA-256 metadata. Restoring a descriptor requires the artifact to remain inside the run directory and its stored length to match. Binary values therefore do not expand persisted batches, previews, or Join staging into Base64 payloads.
+
+Mappings and custom callbacks receive a `MigrationBinaryValue` with stream readers and writers, staged Base64 encode/decode, JSON stream serialization, and MIME detection. Dataverse File/Image columns use block transfers; Notes and activity attachment bodies use the Dataverse record cmdlet's Base64 field contract at the target boundary. The source-side `FileColumns` option currently applies only to Simple queries. Filesystem binary targets accept exactly one record and publish atomically. Object-storage binary targets upload one mapped object key per record and use provider replay metadata; SharePoint document targets stream uploads and compare existing content on retry. Microsoft Graph's simple upload limits SharePoint files to 250 MiB; larger uploads require a custom callback using an upload session.
+
+CSV, JSON Lines, and Parquet targets can externalize top-level binary columns as relative paths in a sibling `<target-file>.attachments/` tree. Finalization streams staged bytes to these sidecars before atomically publishing the structured data file, so an unsuccessful finalizer can leave unreferenced sidecar files while preserving the previous data file. Sources can opt in to resolving those fields back into `MigrationBinaryValue` objects; the default resolver confines paths to the source file's parent directory. This format deliberately has no manifest, so the data file and sidecar tree must be moved together and MIME metadata is inferred when read.
+
+Staging artifacts are removed after a successful non-preview run. Failed or cancelled runs retain them so pending batches can be resumed. Since artifacts live beside the migration database, a resume must have access to the same filesystem location; moving only the SQLite database to another machine is insufficient. WhatIf preview artifacts are retained with the preview snapshots. Sidecar output directories are separate durable target files and are not removed with run staging; old run-specific directories may be cleaned up only after confirming that no structured file references them.
 
 Each identity receives a concurrency limit from its connection's `RecommendedDegreesOfParallelism` (falling back to 4). Connections reporting the same identity share that limit. The pool admits requests only for identities below their active-request limits, preferring the least-used identity in a rolling five-minute request-unit window and then the least-used connection within that identity. It waits when all identities are at capacity. The pool expands nested `ExecuteMultiple` and `ExecuteTransaction` operations, charges recognized `*Multiple` requests by target count, and counts retries as distinct attempts. It does not hard-code a universal request quota or adapt concurrency based on throughput. Retry and throttle telemetry is diagnostic only. A single-connection slot retains the direct-connection path; its Dataverse targets use the connection recommendation as their concurrency budget.
 
@@ -156,6 +213,25 @@ Database-backed migration Transform nodes can be per-row: SQLite invokes its Pow
 ### Data-flow transformations
 
 [`DataFlowPipelineDefinition`](../../src/Migration4Dataverse.Engine/Transformations/DataFlowPipelineDefinition.cs) validates a named acyclic graph, and [`DataFlowPipeline`](../../src/Migration4Dataverse.Engine/Transformations/DataFlowPipeline.cs) executes it pull-first. PowerShell consumers author configuration as hashtables and place scripts inline in each Transform or Filter node's `Script` property; the pipeline API extracts them into its internal node-ID map. Append/Union All and Merge stream records; Merge keeps one-row lookahead per side and validates the configured ordering. Transform can emit zero or more JSON objects per input row, while Filter uses script output truthiness to keep or discard the original row. Sort is stable and external: it writes bounded sorted runs and performs pairwise merge passes under the configured memory, row, record-size, and spill limits.
+
+```mermaid
+flowchart LR
+    config["Internal hashtable definition and inline scripts"]
+    definition["DataFlowPipelineDefinition"]
+    pipeline["Separate pull-first DataFlowPipeline"]
+    appendMerge["Append / Union All / Merge"]
+    scripts["Transform / Filter"]
+    executor["PowerShellScriptExecutor"]
+    sort["Stable external Sort"]
+    spill["Bounded temporary sorted runs"]
+    streams["Input and output record streams"]
+
+    config --> definition --> pipeline
+    streams --> pipeline
+    pipeline --> appendMerge --> streams
+    pipeline --> scripts --> executor --> streams
+    pipeline --> sort --> spill --> streams
+```
 
 The migration graph supports multiple consumers and Source, Append/Union All, Join, Target, Transform, Filter, and callback nodes. Stream-wide Sort and Merge belong to the separate internal data-flow pipeline; graph Join is a separate keyed row-combination step and does not redefine Merge. See the [internal transformation reference](./transformations/README.md) for its schema and operator details.
 

@@ -36,6 +36,7 @@ The lower-level store functions are listed in the [cmdlet index](./cmdlets/READM
 
 - [Source connectors](./connectors/sources/README.md)
 - [Target connectors](./connectors/targets/README.md)
+- [File formats](./connectors/file-formats.md) — built-in and custom serialization independent of local files and object storage.
 - [SQLite source SQL and parameters](./connectors/sources/sqlite.md)
 - [SQLite target schema, keys, indexes, and upsert](./connectors/targets/sqlite.md)
 - [SQL Server, PostgreSQL, MySQL, and Oracle](./connectors/sql-databases.md)
@@ -50,8 +51,19 @@ The lower-level store functions are listed in the [cmdlet index](./cmdlets/READM
 - [MongoDB source and target](./connectors/mongodb.md)
 - [Custom source callbacks](./connectors/sources/custom.md)
 - [Custom target callbacks](./connectors/targets/custom.md)
+- [`New-MigrationBinaryValue`](./cmdlets/new-migration-binary-value.md) — file-backed binary values, streaming transforms, Base64, and MIME detection.
 - [Connections and callback execution](./concepts/connections-and-callbacks.md)
 - [Database-backed SQLite and DuckDB transforms](./dev/transformations/transform.md#database-backed-migration-graph-transforms)
+
+## File content and attachments
+
+File access and serialization are separate: local files use `Type = 'file'`, object-storage connectors use the provider type, and both select a top-level `Format` such as `csv`, `jsonl`, `parquet`, `binary`, or `custom`. Format settings belong in `Format.Options`; storage settings remain in connector `Options`. See the [file format guides](./connectors/sources/README.md) and [object-storage guide](./connectors/object-storage.md).
+
+Mappings and custom callbacks can pass or modify file-backed `MigrationBinaryValue` objects without placing file bytes in persisted batch JSON. The Dataverse adapter supports File/Image source columns, Notes and activity attachment bodies, and File/Image target uploads. See the [Dataverse source](./connectors/sources/dataverse.md) and [Dataverse target](./connectors/targets/dataverse.md) guides for adapter limits.
+
+The [binary files and documents guide](./connectors/binary-files.md) covers filesystem files, binary object-storage formats, and SharePoint document content. Filesystem sources and targets handle one file per step; object-storage sources emit one row per object and targets create one object per row; SharePoint sources can stream document-library content and targets can stream document uploads. Microsoft Graph simple uploads are limited to 250 MiB; use a custom target callback with an upload session for larger files.
+
+The [binary values and sidecar files concept](./concepts/binary-values-and-sidecars.md) documents common logical and .NET value types, streaming transformations, and manifestless round-tripping of binary columns beside CSV, JSON Lines, and Parquet outputs.
 
 For Dataverse, these pages describe the Migration4Dataverse adapter only:
 

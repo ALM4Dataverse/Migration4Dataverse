@@ -33,6 +33,39 @@ For Simple queries, the adapter adds ascending ordering by `Key` when `OrderBy` 
 
 Simple and FetchXML queries can obtain a total from `Get-DataverseRecord -RecordCount` before reading rows. `Cds4Sql` does not have an automatic count provider. A positive `ExpectedRecordCount` on the source takes precedence and is checked against the rows returned.
 
+## File columns and attachments
+
+For a Simple query, set `Options.FileColumns` to one or more File/Image column logical names. `Source.Id` must name the row's GUID column, and `Options.TableName` must identify the table. The adapter downloads each requested column with Dataverse's file-block API and stages the content separately from the migration batch.
+
+```powershell
+Source = @{
+    Type = 'dataverse'
+    ConnectionId = 'crm'
+    Key = 'accountid'
+    Id = 'accountid'
+    Options = @{
+        QueryType = 'Simple'
+        TableName = 'account'
+        Columns = @('accountid', 'name')
+        FileColumns = @('new_contractfile')
+    }
+}
+```
+
+The mapped `new_contractfile` value is a `MigrationBinaryValue`, not an in-memory byte array or a Base64 string. It can pass through unchanged or be streamed through a mapping; see [`New-MigrationBinaryValue`](../../cmdlets/new-migration-binary-value.md). `FileColumns` is currently supported only for Simple queries.
+
+For Simple queries against `annotation` and `activitymimeattachment`, a non-empty `documentbody` or `body` field is recognized as Base64 attachment content and staged as a `MigrationBinaryValue`. Include the content column in the selected fields. The upstream Dataverse record cmdlet returns these bodies as Base64 strings, so decoding avoids storing Base64 in queued migration batches but the upstream row itself is materialized by that cmdlet.
+
+| Dataverse source value | Type in the PowerShell mapping |
+|---|---|
+| Text / Boolean / numeric attributes | `System.String`, `Boolean`, or numeric JSON value |
+| GUIDs | `System.String` |
+| ISO date/time attributes | Usually `System.DateTime` after default PowerShell JSON parsing |
+| Nested or provider-specific attribute values | JSON-compatible object / array; exact values follow the upstream cmdlet |
+| File/Image columns and decoded attachment body | `MigrationBinaryValue` |
+
+This table describes the migration adapter boundary, not the upstream Dataverse attribute catalog. For complete Dataverse attribute and query behavior, use the linked upstream cmdlet references.
+
 ## Simple query
 
 `QueryType = 'Simple'` invokes `Get-DataverseRecord` using the connection and `TableName` from the migration configuration. Other supported `Options` are passed to the cmdlet.

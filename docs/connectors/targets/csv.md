@@ -1,27 +1,30 @@
 # CSV target
 
-The `csv` target writes the complete step output to one CSV file. Batches are staged separately and combined in sequence after the migration succeeds, with at most one header row. Configure `ColumnsByStep` to define the output columns and their order for every CSV target step. Option names are case-insensitive when deserialized.
+The `file` target with `Format.Type = 'csv'` writes the complete step output to one CSV file. Batches are staged separately and combined in sequence after the migration succeeds, with at most one header row. Configure `Format.Options.ColumnsByStep` to define the output columns and their order for every CSV target step. Format option names are case-insensitive when deserialized.
 
 ## Configuration example
 
 ```powershell
 Target = @{
-    Type = 'csv'
+    Type = 'file'
+    Format = @{
+        Type = 'csv'
+        Options = @{
+            ColumnsByStep = @{
+                Customers = @('Id', 'name', 'category')
+            }
+            WriteHeaderRecord = $true
+            NullValue = ''
+            QuoteAllFields = $false
+        }
+    }
     ConnectionId = 'output-files'
     Path = 'customers.csv'
     Operation = 'Write'
-    Options = @{
-        ColumnsByStep = @{
-            Customers = @('Id', 'name', 'category')
-        }
-        WriteHeaderRecord = $true
-        NullValue = ''
-        QuoteAllFields = $false
-    }
 }
 ```
 
-## Options
+## Format options
 
 Defaults are shown below. The source-reader `ColumnTypes` option accepts `string` (default), `bool`/`boolean`, `byte`, `short`/`int16`, `int`/`int32`, `long`/`int64`, `float`/`single`, `double`, `decimal`, `guid`, `date`, `datetime`, `datetimeoffset`, `json`, and `binary`.
 
@@ -38,6 +41,7 @@ Defaults are shown below. The source-reader `ColumnTypes` option accepts `string
 | `Headers` | `null` | Source-reader option for inputs without a header row. |
 | `Columns` | `null` | Source projection; not a target schema. |
 | `ColumnTypes` | `{}` | Source-reader conversion map only; target output is formatted from the mapped record values. |
+| `BinaryColumns` | `[]` (auto-detect) | When set, restrict sidecar output to these top-level binary fields; each must be included in `ColumnsByStep`. |
 | `NullValues` | `[]` | Source values treated as null. |
 | `NullValue` | `""` | Text written for a null field. |
 | `EmptyFieldAsNull` | `false` | Source-reader null handling. |
@@ -52,4 +56,13 @@ Defaults are shown below. The source-reader `ColumnTypes` option accepts `string
 | `ColumnsByStep` | `null` | Required output schema: step ID maps to ordered output field names. |
 | `SourceColumnsByStep` | `null` | Fixture-conversion helper schema; not used by the runtime CSV target. |
 
-`ConnectionId` must resolve to a `DirectoryInfo` or `FileInfo`. With a directory, `Path` names the exact output file relative to that directory; with a `FileInfo`, omit `Path`. `ColumnsByStep` must contain a non-empty, unique column list for each step written by the CSV target. A missing target step entry fails finalization. The target serializes mapped records in the declared column order and atomically replaces its destination during the scheduler's completion phase; multiple file targets are not a cross-file transaction.
+`ConnectionId` must resolve to a `DirectoryInfo` or `FileInfo`. With a directory, `Path` names the exact output file relative to that directory; with a `FileInfo`, omit `Path`. `Format.Options.ColumnsByStep` must contain a non-empty, unique column list for each step written by the CSV target. A missing target step entry fails finalization. The target serializes mapped records in the declared column order and atomically replaces its destination during the scheduler's completion phase; multiple file targets are not a cross-file transaction.
+
+| Logical mapped value | CSV output behavior |
+|---|---|
+| Null | Written as `NullValue`. |
+| Boolean, integer, number, text, GUID, date/time | Written as one escaped CSV text field using the value's JSON text; GUID and date/time values are text. |
+| Object / array | Written as JSON text in one field. |
+| `MigrationBinaryValue`, `byte[]`, readable `Stream` | Written as a relative sidecar reference (not Base64) when top-level in a selected column. |
+
+See [binary values and sidecar files](../../concepts/binary-values-and-sidecars.md) for round-trip configuration.

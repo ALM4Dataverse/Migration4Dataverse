@@ -1,6 +1,6 @@
 # SharePoint list source
 
-The `sharepoint` source reads SharePoint list items through Microsoft Graph. It is source-only. The caller supplies an authenticated `HttpClient` in `-Connections` with `BaseAddress` set to `https://graph.microsoft.com/v1.0/` and a token that can read the target site and list.
+The `sharepoint` source reads SharePoint list items through Microsoft Graph. The caller supplies an authenticated `HttpClient` in `-Connections` with `BaseAddress` set to `https://graph.microsoft.com/v1.0/` and a token that can read the target site, list, and document drive when content is requested.
 
 ## Configuration
 
@@ -20,12 +20,23 @@ The `sharepoint` source reads SharePoint list items through Microsoft Graph. It 
 | `Fields` | All fields | Optional list field internal names. When set, the request uses `$expand=fields($select=...)`. |
 | `Filter` | `null` | Optional Graph `$filter` expression. Use list-field paths such as `fields/Status eq 'Open'`. |
 | `Expand` | `fields` | Overrides the `$expand` value when you need a different Graph projection. |
+| `IncludeDocumentContent` | `$false` | Expand each item's `driveItem` and stream its document content into `Content`; adds `FileName`, `ContentType`, and `Length`. |
 | `PageSize` | `100` | Graph page size, from 1 to 100. |
 | `FlattenFields` | `true` | Merge each item's `fields` object into the item's top-level properties. |
 | `TimeoutSeconds` | `100` | Overall request timeout. |
 | `MaxPages` | `100000` | Safety limit for `@odata.nextLink` paging. |
 
 The engine follows Graph `@odata.nextLink` values until paging ends. With `FlattenFields = $true`, the Graph item `id` and other item metadata are preserved unless a list field has the same name. Set `FlattenFields = $false` if you need the raw Graph item shape and a nested key path is not available to the source contract.
+
+When `IncludeDocumentContent = $true`, each returned document's `driveItem` ID and parent drive ID are used to stream its `/content` response into run-scoped staging. Rows without a file-backed `driveItem` fail explicitly. See [binary files and documents](../binary-files.md#sharepoint-documents) for mapping and target behavior.
+
+| SharePoint item value | Type in the PowerShell mapping |
+|---|---|
+| Graph null, Boolean, number, string | `$null`, `Boolean`, `Int64`/`Double`, `String` |
+| List fields / nested Graph objects | PowerShell dictionary / array |
+| IDs | `System.String` unless Graph returns a JSON number |
+| ISO timestamps / date fields | Usually `System.DateTime` after default PowerShell JSON parsing |
+| `Content` with `IncludeDocumentContent` | `MigrationBinaryValue` |
 
 ## Example
 

@@ -15,7 +15,7 @@ Source = @{
         PageSize = 500
         Modules = @('My.Source.Module')
         Callback = {
-            param($Connection, $Cursor, $PageSize, $StepId, $Path)
+            param($Connection, $Cursor, $PageSize, $StepId, $Path, $BinaryContext)
             @{
                 Records = @()
                 NextCursor = $null
@@ -30,13 +30,23 @@ Source = @{
 }
 ```
 
-`Callback` receives the runtime connection, prior cursor (`$null` on first call), configured page size, step ID, and path argument. The path is the configured `Path`, or an empty string when `Path` is omitted. It must emit exactly one page object:
+`Callback` receives the runtime connection, prior cursor (`$null` on first call), configured page size, step ID, path argument, and a binary context with `StagingRoot`. The path is the configured `Path`, or an empty string when `Path` is omitted. The sixth argument is optional for existing callbacks. It must emit exactly one page object:
 
 - `Records`: required array of record objects.
 - `Done`: required Boolean.
 - `NextCursor`: optional cursor; when `Done` is false it must be non-empty and different from the previous cursor.
 
 Every page must contain no more than `PageSize` records. Diagnostics must go to a non-output stream such as `Write-Verbose`; additional success-stream output invalidates the page.
+
+Each record may contain a `MigrationBinaryValue`, `byte[]`, or readable `Stream`. The engine stages binary content separately before it enters the persisted migration queue. Prefer a stream or `New-MigrationBinaryValue -FilePath` for large files; avoid converting a file to a byte array or Base64 string unless the source API requires it.
+
+| Callback value | Type in the migration mapping |
+|---|---|
+| Null, Boolean, integer, fractional number, text | `$null`, `Boolean`, `Int64`, `Double`, `String` |
+| GUID / ISO date-time strings | `String` / usually `DateTime` after default PowerShell JSON parsing |
+| Nested object / array | PowerShell dictionary / object and array |
+| `MigrationBinaryValue` | `MigrationBinaryValue` (file-backed transport) |
+| `byte[]` / `Stream` | Staged as a `MigrationBinaryValue` before transport |
 
 When no positive `ExpectedRecordCount` is configured, the optional `CountCallback` runs once before the migration starts and receives the runtime connection, step ID, path, and source `Options` hashtable. It must return exactly one non-negative integer, using a provider-side count operation rather than reading records. Its result supplies the source's progress total and is checked against the streamed row count; without it, the count remains unknown until the stream is consumed.
 

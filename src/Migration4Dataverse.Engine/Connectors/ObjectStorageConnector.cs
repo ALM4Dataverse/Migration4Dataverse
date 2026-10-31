@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Collections;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Azure.Storage.Blobs;
@@ -14,8 +15,6 @@ namespace Migration4Dataverse.Engine.Connectors;
 
 public sealed class ObjectStorageSourceOptions
 {
-    public string Format { get; init; } = "jsonl";
-
     public string? Prefix { get; init; }
 
     public string? Container { get; init; }
@@ -24,21 +23,11 @@ public sealed class ObjectStorageSourceOptions
 
     public string? FileSystem { get; init; }
 
-    public JsonElement? Csv { get; init; }
-
-    public JsonElement? Parquet { get; init; }
-
     public bool IncludeAllExtensions { get; init; }
 
     public void Validate(string stepId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
-        var format = Format.Trim().ToLowerInvariant();
-        if (format is not ("jsonl" or "csv" or "parquet"))
-        {
-            throw new ArgumentException(
-                $"Object storage source '{stepId}' Format must be jsonl, csv, or parquet.");
-        }
         if (Prefix is not null && string.IsNullOrWhiteSpace(Prefix))
         {
             throw new ArgumentException(
@@ -46,20 +35,11 @@ public sealed class ObjectStorageSourceOptions
         }
     }
 
-    public string GetFileOptionsJson()
-    {
-        return Format.Trim().ToLowerInvariant() switch
-        {
-            "csv" => Csv?.GetRawText() ?? "{}",
-            "parquet" => Parquet?.GetRawText() ?? "{}",
-            _ => "{}"
-        };
-    }
 }
 
 public sealed class ObjectStorageTargetOptions
 {
-    public string Format { get; init; } = "jsonl";
+    public string ObjectKeyColumn { get; init; } = "Key";
 
     public string? Container { get; init; }
 
@@ -67,45 +47,12 @@ public sealed class ObjectStorageTargetOptions
 
     public string? FileSystem { get; init; }
 
-    public JsonElement? Csv { get; init; }
-
-    public JsonElement? Parquet { get; init; }
-
     public string? ContentType { get; init; }
 
     public void Validate(string stepId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
-        var format = Format.Trim().ToLowerInvariant();
-        if (format is not ("jsonl" or "csv" or "parquet"))
-        {
-            throw new ArgumentException(
-                $"Object storage target '{stepId}' Format must be jsonl, csv, or parquet.");
-        }
-    }
-
-    public string GetFileOptionsJson()
-    {
-        return Format.Trim().ToLowerInvariant() switch
-        {
-            "csv" => Csv?.GetRawText() ?? "{}",
-            "parquet" => Parquet?.GetRawText() ?? "{}",
-            _ => "{}"
-        };
-    }
-
-    public string GetContentType()
-    {
-        if (!string.IsNullOrWhiteSpace(ContentType))
-        {
-            return ContentType;
-        }
-        return Format.Trim().ToLowerInvariant() switch
-        {
-            "csv" => "text/csv",
-            "parquet" => "application/vnd.apache.parquet",
-            _ => "application/x-ndjson"
-        };
+        ArgumentException.ThrowIfNullOrWhiteSpace(ObjectKeyColumn);
     }
 }
 
@@ -211,8 +158,8 @@ public sealed class ObjectStorageHierarchyRecordReader : IHierarchyRecordReader
 {
     private readonly HierarchySourceLevel _level;
     private readonly IReadOnlyList<ObjectStorageItem> _items;
+    private readonly Func<HierarchySourceLevel, IHierarchyRecordReader> _fileReaderFactory;
     private readonly string _format;
-    private readonly string _fileOptionsJson;
     private readonly string _temporaryDirectory;
     private int _index;
     private IHierarchyRecordReader? _current;
@@ -222,7 +169,8 @@ public sealed class ObjectStorageHierarchyRecordReader : IHierarchyRecordReader
     public ObjectStorageHierarchyRecordReader(
         HierarchySourceLevel level,
         IReadOnlyList<ObjectStorageItem> items,
-        ObjectStorageSourceOptions options)
+        ObjectStorageSourceOptions options,
+        Func<HierarchySourceLevel, IHierarchyRecordReader>? fileReaderFactory = null)
     {
         ArgumentNullException.ThrowIfNull(level);
         ArgumentNullException.ThrowIfNull(items);
@@ -230,8 +178,24 @@ public sealed class ObjectStorageHierarchyRecordReader : IHierarchyRecordReader
         options.Validate(level.StepId);
         _level = level;
         _items = items;
-        _format = options.Format.Trim().ToLowerInvariant();
-        _fileOptionsJson = options.GetFileOptionsJson();
+        _fileReaderFactory = fileReaderFactory ?? HierarchyRecordReaderFactory.CreateFileReader;
+        _format = level.FormatType
+            ?? throw new ArgumentException(
+                $"Object storage source '{level.StepId}' requires a format.",
+                nameof(level));
+        if (_format == "custom" &&
+            level.FormatExtensions.Count == 0 &&
+            !options.IncludeAllExtensions)
+        {
+            throw new ArgumentException(
+                $"Custom object-storage source '{level.StepId}' must declare Format.Extensions or set Options.IncludeAllExtensions.");
+        }
+        if (_format == "binary" && string.IsNullOrWhiteSpace(level.BinaryStagingRoot))
+        {
+            throw new ArgumentException(
+                $"Binary object source '{level.StepId}' requires a binary staging directory.",
+                nameof(level));
+        }
         _temporaryDirectory = Path.Combine(
             Path.GetTempPath(),
             "migration4dataverse-objects",
@@ -266,21 +230,60 @@ public sealed class ObjectStorageHierarchyRecordReader : IHierarchyRecordReader
             }
 
             var item = _items[_index];
-            var extension = ObjectStorageConnectorSupport.GetFileExtension(_format);
+            if (_format == "binary")
+            {
+                var stagingRoot = _level.BinaryStagingRoot
+                    ?? throw new InvalidOperationException(
+                        $"Binary object source '{_level.StepId}' has no binary staging directory.");
+                var fileName = ObjectStorageConnectorSupport.GetObjectFileName(item.Key);
+                using var writer = MigrationBinaryValue.CreateWriter(
+                    stagingRoot,
+                    fileName,
+                    item.ContentType);
+                if (item.DownloadToStreamAsync is not null)
+                {
+                    await item.DownloadToStreamAsync(writer.Stream, cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    var temporaryPath = Path.Combine(_temporaryDirectory, $"{_index:D8}.bin");
+                    await item.DownloadAsync(temporaryPath, cancellationToken).ConfigureAwait(false);
+                    await using var input = File.OpenRead(temporaryPath);
+                    await input.CopyToAsync(writer.Stream, cancellationToken).ConfigureAwait(false);
+                }
+
+                var binaryValue = writer.Complete();
+                var contentType = item.ContentType ?? binaryValue.DetectMimeType();
+                _current = new SingleJsonHierarchyRecordReader(BinaryRecordJson.Create(
+                    _level.KeyProperty,
+                    item.Key,
+                    fileName,
+                    contentType,
+                    binaryValue,
+                    stagingRoot));
+                continue;
+            }
+            var extension = ObjectStorageConnectorSupport.GetFileExtension(
+                _format,
+                _level.FormatExtensions);
             var path = Path.Combine(_temporaryDirectory, $"{_index:D8}{extension}");
             await item.DownloadAsync(path, cancellationToken).ConfigureAwait(false);
             var fileLevel = new HierarchySourceLevel(
                 _level.StepId,
-                _format,
+                "file",
                 path,
                 _level.KeyProperty,
                 _level.ParentKeyProperty,
                 _level.RowsPerParent,
                 expectedRecordCount: 0,
-                optionsJson: _fileOptionsJson,
+                optionsJson: "{}",
                 connectionId: _level.ConnectionId,
-                identity: _level.Identity);
-            _current = HierarchyRecordReaderFactory.CreateFileReader(fileLevel);
+                identity: _level.Identity,
+                formatType: _format,
+                formatOptionsJson: _level.FormatOptionsJson,
+                formatExtensions: _level.FormatExtensions,
+                formatObjectKey: item.Key);
+            _current = _fileReaderFactory(fileLevel);
         }
     }
 
@@ -321,6 +324,8 @@ public sealed class ObjectStorageHierarchyRecordReader : IHierarchyRecordReader
     public static async Task<IReadOnlyList<ObjectStorageItem>> ListAzureBlobItemsAsync(
         BlobContainerClient container,
         ObjectStorageSourceOptions options,
+        string formatType,
+        IReadOnlyList<string> formatExtensions,
         string? prefix,
         CancellationToken cancellationToken)
     {
@@ -333,15 +338,20 @@ public sealed class ObjectStorageHierarchyRecordReader : IHierarchyRecordReader
         {
             if (!ObjectStorageConnectorSupport.MatchesFormat(
                     blob.Name,
-                    options.Format,
-                    options.IncludeAllExtensions))
+                    formatType,
+                    options.IncludeAllExtensions,
+                    formatExtensions))
             {
                 continue;
             }
             var blobClient = container.GetBlobClient(blob.Name);
             items.Add(new ObjectStorageItem(
                 blob.Name,
-                (path, token) => blobClient.DownloadToAsync(path, token)));
+                (path, token) => blobClient.DownloadToAsync(path, token))
+            {
+                ContentType = blob.Properties.ContentType,
+                DownloadToStreamAsync = (stream, token) => blobClient.DownloadToAsync(stream, token)
+            });
         }
         items.Sort((left, right) => string.Compare(left.Key, right.Key, StringComparison.Ordinal));
         return items;
@@ -351,6 +361,8 @@ public sealed class ObjectStorageHierarchyRecordReader : IHierarchyRecordReader
         IAmazonS3 client,
         string bucket,
         ObjectStorageSourceOptions options,
+        string formatType,
+        IReadOnlyList<string> formatExtensions,
         string? prefix,
         CancellationToken cancellationToken)
     {
@@ -370,8 +382,9 @@ public sealed class ObjectStorageHierarchyRecordReader : IHierarchyRecordReader
             {
                 if (!ObjectStorageConnectorSupport.MatchesFormat(
                         item.Key,
-                        options.Format,
-                        options.IncludeAllExtensions))
+                        formatType,
+                        options.IncludeAllExtensions,
+                        formatExtensions))
                 {
                     continue;
                 }
@@ -389,7 +402,20 @@ public sealed class ObjectStorageHierarchyRecordReader : IHierarchyRecordReader
                             token).ConfigureAwait(false);
                         await using var file = File.Create(path);
                         await objectResponse.ResponseStream.CopyToAsync(file, token).ConfigureAwait(false);
-                    }));
+                    })
+                {
+                    DownloadToStreamAsync = async (stream, token) =>
+                    {
+                        using var objectResponse = await client.GetObjectAsync(
+                            new GetObjectRequest
+                            {
+                                BucketName = bucket,
+                                Key = key
+                            },
+                            token).ConfigureAwait(false);
+                        await objectResponse.ResponseStream.CopyToAsync(stream, token).ConfigureAwait(false);
+                    }
+                });
             }
             continuationToken = response.IsTruncated == true
                 ? response.NextContinuationToken
@@ -403,7 +429,12 @@ public sealed class ObjectStorageHierarchyRecordReader : IHierarchyRecordReader
 
 public sealed record ObjectStorageItem(
     string Key,
-    Func<string, CancellationToken, Task> DownloadAsync);
+    Func<string, CancellationToken, Task> DownloadAsync)
+{
+    public string? ContentType { get; init; }
+
+    public Func<Stream, CancellationToken, Task>? DownloadToStreamAsync { get; init; }
+}
 
 public static class ObjectStorageTargetWriter
 {
@@ -411,12 +442,15 @@ public static class ObjectStorageTargetWriter
         object connection,
         string connectorType,
         string objectKey,
+        string formatType,
+        IReadOnlyList<string> formatExtensions,
         string stepId,
         string runId,
         string batchId,
         long sequence,
         string recordsJson,
         string optionsJson,
+        string formatOptionsJson,
         string stagingRoot)
     {
         ArgumentNullException.ThrowIfNull(connection);
@@ -433,7 +467,7 @@ public static class ObjectStorageTargetWriter
         var options = DeserializeTargetOptions(optionsJson, stepId);
         options.Validate(stepId);
         FileBatchTargetWriter.WriteSingleFileTargetBatch(
-            GetStagingPath(stagingRoot, runId, stepId, options.Format),
+            GetStagingPath(stagingRoot, runId, stepId, formatType, formatExtensions),
             runId,
             stepId,
             batchId,
@@ -448,7 +482,12 @@ public static class ObjectStorageTargetWriter
         string stepId,
         string runId,
         string optionsJson,
+        string formatType,
+        IReadOnlyList<string> formatExtensions,
+        string formatOptionsJson,
+        string? formatContentType,
         string stagingRoot,
+        string binaryStagingRoot,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
@@ -456,18 +495,173 @@ public static class ObjectStorageTargetWriter
         ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(stagingRoot);
+        ArgumentException.ThrowIfNullOrWhiteSpace(binaryStagingRoot);
         var options = DeserializeTargetOptions(optionsJson, stepId);
         options.Validate(stepId);
-        var stagingPath = GetStagingPath(stagingRoot, runId, stepId, options.Format);
+        var stagingPath = GetStagingPath(stagingRoot, runId, stepId, formatType, formatExtensions);
+        if (string.Equals(formatType, "binary", StringComparison.OrdinalIgnoreCase))
+        {
+            var binaryOptions = DeserializeFormatOptions<BinaryFileTargetOptions>(formatOptionsJson, stepId);
+            binaryOptions.Validate(stepId);
+            await FinalizeBinaryAsync(
+                connection,
+                connectorType,
+                objectKey,
+                stepId,
+                runId,
+                options,
+                binaryOptions,
+                stagingPath,
+                binaryStagingRoot,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         FileBatchTargetWriter.FinalizeSingleFileTarget(
             stagingPath,
             runId,
             stepId,
-            options.Format.Trim().ToLowerInvariant(),
-            options.GetFileOptionsJson());
+            formatType.Trim().ToLowerInvariant(),
+            formatOptionsJson);
 
         var hash = await ComputeHashAsync(stagingPath, cancellationToken).ConfigureAwait(false);
-        var contentType = options.GetContentType();
+        await UploadStagedObjectAsync(
+            connection,
+            connectorType,
+            objectKey,
+            stepId,
+            stagingPath,
+            hash,
+            options.ContentType
+                ?? formatContentType
+                ?? RecordFileFormatRegistry.GetContentType(formatType),
+            options,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public static async Task UploadFinalizedFileAsync(
+        object connection,
+        string connectorType,
+        string objectKey,
+        string stepId,
+        string stagingPath,
+        string optionsJson,
+        string? formatContentType,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stagingPath);
+        var options = DeserializeTargetOptions(optionsJson, stepId);
+        options.Validate(stepId);
+        var hash = await ComputeHashAsync(stagingPath, cancellationToken).ConfigureAwait(false);
+        await UploadStagedObjectAsync(
+            connection,
+            connectorType,
+            objectKey,
+            stepId,
+            stagingPath,
+            hash,
+            options.ContentType ?? formatContentType ?? "application/octet-stream",
+            options,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task FinalizeBinaryAsync(
+        object connection,
+        string connectorType,
+        string prefix,
+        string stepId,
+        string runId,
+        ObjectStorageTargetOptions options,
+        BinaryFileTargetOptions formatOptions,
+        string stagingPath,
+        string binaryStagingRoot,
+        CancellationToken cancellationToken)
+    {
+        var records = FileBatchTargetWriter.ReadSingleFileTargetRecords(
+            stagingPath,
+            runId,
+            stepId);
+        foreach (var record in records)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var restored = MigrationBinaryValue.RestoreFromTransport(record, binaryStagingRoot);
+            if (restored is not IDictionary fields ||
+                fields[formatOptions.ContentColumn] is not MigrationBinaryValue value)
+            {
+                throw new InvalidDataException(
+                    $"Binary object-storage target '{stepId}' requires a MigrationBinaryValue in field '{formatOptions.ContentColumn}'.");
+            }
+            if (fields[options.ObjectKeyColumn] is not string key ||
+                string.IsNullOrWhiteSpace(key) ||
+                key.StartsWith("/", StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Binary object-storage target '{stepId}' requires a relative object key in field '{options.ObjectKeyColumn}'.");
+            }
+
+            var destinationKey = string.IsNullOrWhiteSpace(prefix)
+                ? key
+                : $"{prefix.TrimEnd('/')}/{key.TrimStart('/')}";
+            var rowContentType = fields["ContentType"] as string;
+            var contentType = !string.IsNullOrWhiteSpace(options.ContentType)
+                ? options.ContentType
+                : !string.IsNullOrWhiteSpace(rowContentType)
+                    ? rowContentType
+                    : !string.IsNullOrWhiteSpace(value.ContentType)
+                        ? value.ContentType
+                        : value.DetectMimeType();
+            var stagingFile = Path.Combine(
+                Path.GetDirectoryName(stagingPath)!,
+                $"binary-{Guid.NewGuid():N}.bin");
+            try
+            {
+                await using (var input = value.OpenRead())
+                await using (var output = new FileStream(
+                                 stagingFile,
+                                 FileMode.CreateNew,
+                                 FileAccess.Write,
+                                 FileShare.None,
+                                 bufferSize: 1024 * 1024,
+                                 FileOptions.Asynchronous | FileOptions.SequentialScan))
+                {
+                    await input.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
+                }
+
+                await UploadStagedObjectAsync(
+                    connection,
+                    connectorType,
+                    destinationKey,
+                    stepId,
+                    stagingFile,
+                    value.Sha256,
+                    contentType,
+                    options,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (File.Exists(stagingFile))
+                {
+                    File.Delete(stagingFile);
+                }
+            }
+        }
+    }
+
+    private static async Task UploadStagedObjectAsync(
+        object connection,
+        string connectorType,
+        string objectKey,
+        string stepId,
+        string stagingPath,
+        string hash,
+        string contentType,
+        ObjectStorageTargetOptions options,
+        CancellationToken cancellationToken)
+    {
         if (connectorType == "azureblob")
         {
             var container = ObjectStorageConnectionSupport.GetAzureBlobContainer(
@@ -731,7 +925,8 @@ public static class ObjectStorageTargetWriter
         string stagingRoot,
         string runId,
         string stepId,
-        string format)
+        string formatType,
+        IReadOnlyList<string>? formatExtensions = null)
     {
         var safeStepId = new string(stepId
             .Select(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_'
@@ -742,7 +937,7 @@ public static class ObjectStorageTargetWriter
         {
             safeStepId = "step";
         }
-        var extension = ObjectStorageConnectorSupport.GetFileExtension(format);
+        var extension = ObjectStorageConnectorSupport.GetFileExtension(formatType, formatExtensions);
         return Path.Combine(
             Path.GetFullPath(stagingRoot),
             "object-targets",
@@ -770,6 +965,24 @@ public static class ObjectStorageTargetWriter
         }
     }
 
+    private static T DeserializeFormatOptions<T>(string optionsJson, string stepId)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<T>(
+                       optionsJson,
+                       ObjectStorageConnectorSupport.JsonOptions)
+                ?? throw new InvalidDataException(
+                    $"File format options for target '{stepId}' are empty.");
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidDataException(
+                $"File format options for target '{stepId}' are invalid JSON.",
+                exception);
+        }
+    }
+
     private static async Task<string> ComputeHashAsync(
         string path,
         CancellationToken cancellationToken)
@@ -789,30 +1002,38 @@ internal static class ObjectStorageConnectorSupport
         PropertyNameCaseInsensitive = true
     };
 
-    public static bool MatchesFormat(string key, string format, bool includeAllExtensions)
+    public static bool MatchesFormat(
+        string key,
+        string formatType,
+        bool includeAllExtensions,
+        IReadOnlyList<string>? customExtensions = null)
     {
+        var normalizedFormat = formatType.Trim().ToLowerInvariant();
+        if (normalizedFormat == "binary")
+        {
+            return !key.EndsWith("/", StringComparison.Ordinal);
+        }
         if (includeAllExtensions)
         {
             return true;
         }
-        var normalizedFormat = format.Trim().ToLowerInvariant();
-        return normalizedFormat switch
-        {
-            "jsonl" => key.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase) ||
-                key.EndsWith(".ndjson", StringComparison.OrdinalIgnoreCase),
-            "csv" => key.EndsWith(".csv", StringComparison.OrdinalIgnoreCase),
-            "parquet" => key.EndsWith(".parquet", StringComparison.OrdinalIgnoreCase),
-            _ => false
-        };
+        var extensions = string.Equals(normalizedFormat, "custom", StringComparison.Ordinal)
+            ? customExtensions ?? Array.Empty<string>()
+            : RecordFileFormatRegistry.GetRequired(normalizedFormat).Extensions;
+        return extensions.Any(extension =>
+            key.EndsWith(extension, StringComparison.OrdinalIgnoreCase));
     }
 
-    public static string GetFileExtension(string format)
+    public static string GetFileExtension(
+        string formatType,
+        IReadOnlyList<string>? customExtensions = null)
     {
-        return format.Trim().ToLowerInvariant() switch
-        {
-            "csv" => ".csv",
-            "parquet" => ".parquet",
-            _ => ".jsonl"
-        };
+        return RecordFileFormatRegistry.GetFileExtension(formatType, customExtensions);
+    }
+
+    public static string GetObjectFileName(string key)
+    {
+        var separator = key.LastIndexOf('/');
+        return separator >= 0 ? key[(separator + 1)..] : key;
     }
 }

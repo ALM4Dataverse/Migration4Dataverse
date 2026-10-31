@@ -16,7 +16,8 @@ $steps = @(
         Type = 'source'
         Inputs = @()
         Source = @{
-            Type = 'jsonl'
+            Type = 'file'
+            Format = @{ Type = 'jsonl' }
             ConnectionId = 'files'
             Path = 'accounts.jsonl'
             Key = 'SourceId'
@@ -36,7 +37,8 @@ $steps = @(
         Type = 'target'
         Inputs = @('AccountsSource')
         Target = @{
-            Type = 'jsonl'
+            Type = 'file'
+            Format = @{ Type = 'jsonl' }
             ConnectionId = 'files'
             Path = 'audit'
         }
@@ -57,7 +59,8 @@ Use `DependsOn` on a source or join when it must wait for another step to finish
     Inputs = @()
     DependsOn = @('AccountsTarget')
     Source = @{
-        Type = 'csv'
+        Type = 'file'
+        Format = @{ Type = 'csv' }
         ConnectionId = 'files'
         Path = 'contacts.csv'
         Key = 'ContactId'
@@ -83,7 +86,8 @@ Use an object in a source's `Inputs` array when its rows refer to rows from pare
         }
     )
     Source = @{
-        Type = 'jsonl'
+        Type = 'file'
+        Format = @{ Type = 'jsonl' }
         ConnectionId = 'files'
         Path = 'order-lines.jsonl'
         Key = 'LineId'
