@@ -11,7 +11,7 @@ chmod +x ./Migration4Dataverse.Cli-linux-x64
 ./Migration4Dataverse.Cli-linux-x64 --help
 ```
 
-`--help` lists the exported module commands and their generated options. Each PowerShell command is exposed in kebab-case; for example, `Invoke-M4dMigration` is `invoke-m4d-migration`, and it also has the `run` alias.
+`--help` lists the exported module commands and their options. Command and parameter descriptions come from the bundled PowerShell `Get-Help` content. CLI names remove the `M4dMigration` noun prefix; for example, `Invoke-M4dMigration` is `run`, and `Get-M4dMigrationRun` is `get-run`.
 
 ## Run a migration
 
@@ -28,7 +28,7 @@ $Connections = @{
 ```
 
 ```sh
-m4d invoke-m4d-migration --script ./migration-job.ps1 \
+m4d run --script ./migration-job.ps1 \
   --database-path ./migration.sqlite3 --run-name "Nightly import"
 ```
 
@@ -42,30 +42,30 @@ All commands exported by the bundled module are available:
 
 | PowerShell command | CLI command |
 |---|---|
-| `Invoke-M4dMigration` | `invoke-m4d-migration` (`run`) |
-| `Get-M4dMigrationRun` | `get-m4d-migration-run` |
-| `Get-M4dMigrationStep` | `get-m4d-migration-step` |
-| `Get-M4dMigrationBatch` | `get-m4d-migration-batch` |
-| `Get-M4dMigrationError` | `get-m4d-migration-error` |
-| `Get-M4dMigrationRetryHistory` | `get-m4d-migration-retry-history` |
-| `Get-M4dMigrationDebugRow` | `get-m4d-migration-debug-row` |
-| `Get-M4dMigrationDebugRowBinary` | `get-m4d-migration-debug-row-binary` |
-| `Get-M4dMigrationConfigurationPreview` | `get-m4d-migration-configuration-preview` |
-| `Get-M4dMigrationProcessMetric` | `get-m4d-migration-process-metric` |
-| `Get-M4dMigrationDataverseConnectionThroughput` | `get-m4d-migration-dataverse-connection-throughput` |
-| `Invoke-M4dMigrationRecovery` | `invoke-m4d-migration-recovery` |
-| `Clear-M4dMigrationTargetTuning` | `clear-m4d-migration-target-tuning` |
-| `Start-M4dMigrationDatabaseServer` | `start-m4d-migration-database-server` |
-| `New-M4dMigrationBinaryValue` | `new-m4d-migration-binary-value` |
-| `New-M4dMigrationJobStore` | `new-m4d-migration-job-store` |
-| `Complete-M4dMigrationBatch` | `complete-m4d-migration-batch` |
-| `Set-M4dMigrationRunStatus` | `set-m4d-migration-run-status` |
-| `Start-M4dMigrationDashboard` | `start-m4d-migration-dashboard` |
-| `Stop-M4dMigrationDashboard` | `stop-m4d-migration-dashboard` |
+| `Invoke-M4dMigration` | `run` |
+| `Get-M4dMigrationRun` | `get-run` |
+| `Get-M4dMigrationStep` | `get-step` |
+| `Get-M4dMigrationBatch` | `get-batch` |
+| `Get-M4dMigrationError` | `get-error` |
+| `Get-M4dMigrationRetryHistory` | `get-retry-history` |
+| `Get-M4dMigrationDebugRow` | `get-debug-row` |
+| `Get-M4dMigrationDebugRowBinary` | `get-debug-row-binary` |
+| `Get-M4dMigrationConfigurationPreview` | `get-configuration-preview` |
+| `Get-M4dMigrationProcessMetric` | `get-process-metric` |
+| `Get-M4dMigrationDataverseConnectionThroughput` | `get-dataverse-connection-throughput` |
+| `Invoke-M4dMigrationRecovery` | `invoke-recovery` |
+| `Clear-M4dMigrationTargetTuning` | `clear-target-tuning` |
+| `Start-M4dMigrationDatabaseServer` | `start-database-server` |
+| `New-M4dMigrationBinaryValue` | `new-binary-value` |
+| `New-M4dMigrationJobStore` | `new-job-store` |
+| `Complete-M4dMigrationBatch` | `complete-batch` |
+| `Set-M4dMigrationRunStatus` | `set-run-status` |
+| `Start-M4dMigrationDashboard` | `start-dashboard` |
+| `Stop-M4dMigrationDashboard` | `stop-dashboard` |
 
 Every command accepts `--script` to run a setup script first and `--json` to emit newline-delimited JSON events. Commands that accept `DatabasePath` expose `--database-path`; lower-level functions that accept the migration store expose the same option and the CLI opens the store for them. Command-specific options follow the PowerShell parameter names in kebab-case. Run a command's `--help` for its options.
 
-`start-m4d-migration-dashboard` stays in the foreground until Ctrl+C, then stops the dashboard. A dashboard handle is process-local, so `stop-m4d-migration-dashboard` is useful when a setup script creates and retains the handle; a separate CLI process cannot stop another process's dashboard.
+`start-dashboard` stays in the foreground until Ctrl+C, then stops the dashboard. A dashboard handle is process-local, so `stop-dashboard` is useful when a setup script creates and retains the handle; a separate CLI process cannot stop another process's dashboard.
 
 ## Output and exit codes
 

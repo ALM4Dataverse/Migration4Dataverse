@@ -182,7 +182,7 @@ public sealed class PowerShellCliRuntimeTests
         var root = new CliCommandApp(runtime, CancellationToken.None).Build();
         var getRunParse = root.Parse(
         [
-            "get-m4d-migration-run",
+            "get-run",
             "--database-path", "migration.sqlite",
             "--run-id", "run-123"
         ]);
@@ -194,7 +194,7 @@ public sealed class PowerShellCliRuntimeTests
 
         var completeBatchParse = root.Parse(
         [
-            "complete-m4d-migration-batch",
+            "complete-batch",
             "--database-path", "migration.sqlite",
             "--batch-id", "batch-1",
             "--worker-id", "worker-1",
@@ -205,6 +205,17 @@ public sealed class PowerShellCliRuntimeTests
         Assert.True(
             completeBatchExitCode == ExitCodes.Success,
             $"Exit code {completeBatchExitCode}. Output: {fixture.Output} Error: {fixture.Error}");
+
+        var runCommand = root.Subcommands.Single(command => command.Name == "run");
+        Assert.Contains("Runs a test migration graph", runCommand.Description, StringComparison.Ordinal);
+        var databasePathOption = runCommand.Options.Single(option => option.Name == "--database-path");
+        Assert.Contains(
+            "SQLite migration store",
+            databasePathOption.Description,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            root.Subcommands.Select(command => command.Name),
+            name => name.Contains("m4d-migration", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -284,7 +295,7 @@ public sealed class PowerShellCliRuntimeTests
 
         var parseResult = root.Parse(
         [
-            "start-m4d-migration-dashboard",
+            "start-dashboard",
             "--steps-json", "[{\"Id\":\"Rows\",\"Type\":\"source\"}]",
             "--connections-json", "{}"
         ]);
@@ -331,6 +342,20 @@ public sealed class PowerShellCliRuntimeTests
                     "Migration4Dataverse.psm1",
                     """
                     function Invoke-M4dMigration {
+                    <#
+                    .SYNOPSIS
+                    Runs a test migration graph.
+                    .PARAMETER DatabasePath
+                    Path to the file-backed SQLite migration store.
+                    .PARAMETER RunName
+                    Human-readable test run name.
+                    .PARAMETER Steps
+                    Step definitions for the test migration.
+                    .PARAMETER Connections
+                    Connection map for the test migration.
+                    .PARAMETER Fail
+                    Intentionally fail the test migration.
+                    #>
                         [CmdletBinding()]
                         param(
                             [string]$DatabasePath,
@@ -346,18 +371,48 @@ public sealed class PowerShellCliRuntimeTests
                     }
 
                     function Get-M4dMigrationRun {
+                    <#
+                    .SYNOPSIS
+                    Lists test migration runs.
+                    .PARAMETER DatabasePath
+                    SQLite migration store to inspect.
+                    .PARAMETER RunId
+                    ID of one run to return.
+                    .PARAMETER Limit
+                    Maximum number of runs to list.
+                    #>
                         [CmdletBinding()]
                         param([string]$DatabasePath, [string]$RunId, [int]$Limit = 50)
                         [pscustomobject]@{ DatabasePath = $DatabasePath; RunId = $RunId; Limit = $Limit }
                     }
 
                     function New-M4dMigrationJobStore {
+                    <#
+                    .SYNOPSIS
+                    Opens a test migration store.
+                    .PARAMETER DatabasePath
+                    Path to the test migration store.
+                    #>
                         [CmdletBinding()]
                         param([string]$DatabasePath)
                         [pscustomobject]@{ DatabasePath = $DatabasePath }
                     }
 
                     function Complete-M4dMigrationBatch {
+                    <#
+                    .SYNOPSIS
+                    Completes a test migration batch.
+                    .PARAMETER Store
+                    Test migration store.
+                    .PARAMETER BatchId
+                    ID of the batch to complete.
+                    .PARAMETER WorkerId
+                    ID of the worker completing the batch.
+                    .PARAMETER OutcomesJson
+                    JSON batch outcomes.
+                    .PARAMETER HasErrors
+                    Whether the batch contains row errors.
+                    #>
                         [CmdletBinding()]
                         param(
                             [object]$Store,
@@ -370,6 +425,14 @@ public sealed class PowerShellCliRuntimeTests
                     }
 
                     function Start-M4dMigrationDashboard {
+                    <#
+                    .SYNOPSIS
+                    Starts a test migration dashboard.
+                    .PARAMETER Steps
+                    Step definitions to preview.
+                    .PARAMETER Connections
+                    Connections used by the preview.
+                    #>
                         [CmdletBinding()]
                         param([object[]]$Steps, [System.Collections.IDictionary]$Connections)
                         [pscustomobject]@{ StepCount = $Steps.Count; ConnectionCount = $Connections.Count }

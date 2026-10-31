@@ -75,6 +75,50 @@ internal sealed class PowerShellCliRuntime : IDisposable
         return commands;
     }
 
+    public PowerShellCommandHelp GetCommandHelp(CommandInfo commandInfo)
+    {
+        using var powerShell = PowerShell.Create();
+        powerShell.Runspace = _runspace;
+        var helpOutput = powerShell.AddCommand("Get-Help")
+            .AddParameter("Name", commandInfo.Name)
+            .AddParameter("Full", true)
+            .Invoke();
+        if (powerShell.HadErrors)
+        {
+            var errors = string.Join(
+                Environment.NewLine,
+                powerShell.Streams.Error.Select(error => error.ToString()));
+            throw new InvalidOperationException(
+                $"Could not load PowerShell help for '{commandInfo.Name}'.{Environment.NewLine}{errors}");
+        }
+
+        var help = helpOutput.FirstOrDefault();
+        var synopsis = GetHelpText(GetPropertyValue(help, "Synopsis"));
+        if (string.IsNullOrWhiteSpace(synopsis) ||
+            synopsis.StartsWith(commandInfo.Name + " ", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"PowerShell help for '{commandInfo.Name}' must include a descriptive synopsis. " +
+                $"Retrieved synopsis: '{synopsis}'.");
+        }
+
+        var parameterCollection = GetPropertyValue(
+            GetPropertyValue(help, "Parameters"),
+            "Parameter");
+        var parameterDescriptions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var parameter in EnumerateHelpItems(parameterCollection))
+        {
+            var name = GetHelpText(GetPropertyValue(parameter, "Name"));
+            var description = GetHelpText(GetPropertyValue(parameter, "Description"));
+            if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(description))
+            {
+                parameterDescriptions[name] = description;
+            }
+        }
+
+        return new PowerShellCommandHelp(synopsis, parameterDescriptions);
+    }
+
     public int Invoke(
         CommandInfo commandInfo,
         IReadOnlyDictionary<string, CliParameterValue> cliParameters,
@@ -723,6 +767,48 @@ internal sealed class PowerShellCliRuntime : IDisposable
         System.Text.RegularExpressions.Regex.Replace(value, "([a-z0-9])([A-Z])", "$1-$2")
             .ToLowerInvariant();
 
+    private static object? GetPropertyValue(object? value, string propertyName) =>
+        value is null ? null : PSObject.AsPSObject(value).Properties[propertyName]?.Value;
+
+    private static string? GetHelpText(object? value)
+    {
+        var text = GetPropertyValue(value, "Text") ?? value;
+        if (text is IEnumerable values and not string)
+        {
+            return string.Join(
+                " ",
+                values.Cast<object?>()
+                    .Select(item => Convert.ToString(item))
+                    .Where(item => !string.IsNullOrWhiteSpace(item)))
+                .Trim();
+        }
+
+        return Convert.ToString(text)?.Trim();
+    }
+
+    private static IEnumerable<object> EnumerateHelpItems(object? value)
+    {
+        if (value is null)
+        {
+            yield break;
+        }
+
+        if (value is IEnumerable items and not string and not PSObject)
+        {
+            foreach (var item in items)
+            {
+                if (item is not null)
+                {
+                    yield return item;
+                }
+            }
+
+            yield break;
+        }
+
+        yield return value;
+    }
+
     private bool HasFailedMigrationResult() =>
         _runspace.SessionStateProxy.GetVariable("__m4dCliMigrationFailed") is true;
 
@@ -797,4 +883,34 @@ internal sealed class PowerShellCliRuntime : IDisposable
     private sealed record InvocationResult(
         IReadOnlyDictionary<string, object?> Parameters,
         string? Error);
+}
+
+internal sealed record PowerShellCommandHelp(
+    string Synopsis,
+    IReadOnlyDictionary<string, string> ParameterDescriptions)
+{
+    private static readonly IReadOnlyDictionary<string, string> CommonParameterDescriptions =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Confirm"] = "Prompts you for confirmation before running the cmdlet.",
+            ["Debug"] = "Displays programmer-level detail about the operation performed by the command.",
+            ["Verbose"] = "Displays detailed information about the operation performed by the command.",
+            ["WhatIf"] = "Shows what would happen if the cmdlet runs. The cmdlet is not run."
+        };
+
+    public string GetParameterDescription(string parameterName)
+    {
+        if (ParameterDescriptions.TryGetValue(parameterName, out var description))
+        {
+            return description;
+        }
+
+        if (CommonParameterDescriptions.TryGetValue(parameterName, out description))
+        {
+            return description;
+        }
+
+        throw new InvalidDataException(
+            $"PowerShell help for parameter '{parameterName}' is missing a description.");
+    }
 }

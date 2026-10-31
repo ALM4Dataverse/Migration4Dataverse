@@ -49,8 +49,8 @@ Release assets have platform-specific filenames; rename the downloaded executabl
 
 ```sh
 m4d --help
-m4d invoke-m4d-migration --script ./migration-job.ps1 --database-path ./migration.sqlite3
-m4d get-m4d-migration-run --database-path ./migration.sqlite3 --run-id <run-id> --json
+m4d run --script ./migration-job.ps1 --database-path ./migration.sqlite3
+m4d get-run --database-path ./migration.sqlite3 --run-id <run-id> --json
 ```
 
 See the [standalone CLI guide](./docs/cli.md) for script modes, commands, JSON events, and exit codes.

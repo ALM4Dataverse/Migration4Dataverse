@@ -62,7 +62,7 @@ function Assert-JsonEvents {
 
 $noArguments = Invoke-Cli -Arguments @()
 if ($noArguments.ExitCode -ne 2 -or
-    -not $noArguments.StandardOutput.Contains('invoke-m4d-migration', [StringComparison]::OrdinalIgnoreCase)) {
+    -not $noArguments.StandardOutput.Contains('run', [StringComparison]::OrdinalIgnoreCase)) {
     throw 'The CLI did not show its command help when launched without arguments.'
 }
 
@@ -72,26 +72,26 @@ if ($help.ExitCode -ne 0) {
 }
 
 $expectedCommands = @(
-    'invoke-m4d-migration',
-    'get-m4d-migration-run',
-    'get-m4d-migration-step',
-    'get-m4d-migration-batch',
-    'get-m4d-migration-error',
-    'get-m4d-migration-retry-history',
-    'get-m4d-migration-debug-row',
-    'get-m4d-migration-debug-row-binary',
-    'get-m4d-migration-configuration-preview',
-    'get-m4d-migration-process-metric',
-    'get-m4d-migration-dataverse-connection-throughput',
-    'invoke-m4d-migration-recovery',
-    'clear-m4d-migration-target-tuning',
-    'start-m4d-migration-database-server',
-    'new-m4d-migration-binary-value',
-    'new-m4d-migration-job-store',
-    'complete-m4d-migration-batch',
-    'set-m4d-migration-run-status',
-    'start-m4d-migration-dashboard',
-    'stop-m4d-migration-dashboard'
+    'run',
+    'get-run',
+    'get-step',
+    'get-batch',
+    'get-error',
+    'get-retry-history',
+    'get-debug-row',
+    'get-debug-row-binary',
+    'get-configuration-preview',
+    'get-process-metric',
+    'get-dataverse-connection-throughput',
+    'invoke-recovery',
+    'clear-target-tuning',
+    'start-database-server',
+    'new-binary-value',
+    'new-job-store',
+    'complete-batch',
+    'set-run-status',
+    'start-dashboard',
+    'stop-dashboard'
 )
 foreach ($command in $expectedCommands) {
     if (-not $help.StandardOutput.Contains($command, [StringComparison]::OrdinalIgnoreCase)) {
@@ -101,12 +101,18 @@ foreach ($command in $expectedCommands) {
 
 $runHelp = Invoke-Cli -Arguments @('run', '--help')
 if ($runHelp.ExitCode -ne 0 -or
-    -not $runHelp.StandardOutput.Contains('invoke-m4d-migration', [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'The run alias did not resolve to invoke-m4d-migration.'
+    -not $runHelp.StandardOutput.Contains('Runs a PowerShell-defined migration graph', [StringComparison]::Ordinal)) {
+    throw 'The run command did not show the migration cmdlet help synopsis.'
+}
+
+$getRunHelp = Invoke-Cli -Arguments @('get-run', '--help')
+if ($getRunHelp.ExitCode -ne 0 -or
+    -not $getRunHelp.StandardOutput.Contains('SQLite job store used by Invoke-M4dMigration', [StringComparison]::Ordinal)) {
+    throw 'The get-run command did not show the PowerShell parameter help description.'
 }
 
 $parseFailure = Invoke-Cli -Arguments @(
-    'invoke-m4d-migration',
+    'run',
     '--batch-size', 'not-a-number',
     '--json'
 )
@@ -163,7 +169,7 @@ $Connections = @{
 
     $databasePath = Join-Path $workDirectory 'migration.sqlite3'
     $migration = Invoke-Cli -Arguments @(
-        'invoke-m4d-migration',
+        'run',
         '--script', $scriptPath,
         '--database-path', $databasePath,
         '--run-name', 'CLI package smoke test',

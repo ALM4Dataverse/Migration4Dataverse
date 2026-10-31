@@ -22,14 +22,9 @@ internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationTo
 
     private Command CreateCommand(CommandInfo commandInfo)
     {
-        var commandName = ToKebabCase(commandInfo.Name);
-        var command = new Command(commandName, commandInfo.CommandType == CommandTypes.Function
-            ? $"Run the {commandInfo.Name} function."
-            : $"Run the {commandInfo.Name} cmdlet.");
-        if (string.Equals(commandInfo.Name, "Invoke-M4dMigration", StringComparison.OrdinalIgnoreCase))
-        {
-            command.Aliases.Add("run");
-        }
+        var help = runtime.GetCommandHelp(commandInfo);
+        var commandName = ToCommandName(commandInfo.Name);
+        var command = new Command(commandName, help.Synopsis);
 
         var jsonOption = new Option<bool>("--json")
         {
@@ -55,7 +50,7 @@ internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationTo
                 continue;
             }
 
-            var binding = AddParameterOption(command, parameter);
+            var binding = AddParameterOption(command, parameter, help);
             if (binding is not null)
             {
                 options.Add(binding);
@@ -138,15 +133,20 @@ internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationTo
         return command;
     }
 
-    private static ICliOptionBinding? AddParameterOption(Command command, ParameterMetadata parameter)
+    private static ICliOptionBinding? AddParameterOption(
+        Command command,
+        ParameterMetadata parameter,
+        PowerShellCommandHelp help)
     {
         var optionName = $"--{ToKebabCase(parameter.Name)}";
         var parameterType = parameter.ParameterType;
-        var description = $"PowerShell {parameter.Name} parameter.";
 
         if (parameterType == typeof(SwitchParameter) || parameterType == typeof(bool))
         {
-            var option = new Option<bool>(optionName) { Description = description };
+            var option = new Option<bool>(optionName)
+            {
+                Description = help.GetParameterDescription(parameter.Name)
+            };
             command.Options.Add(option);
             return new CliOptionBinding<bool>(parameter.Name, parseResult =>
             {
@@ -157,26 +157,39 @@ internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationTo
 
         if (parameterType == typeof(string))
         {
-            return AddStringOption(command, optionName, description, parameter.Name);
+            return AddStringOption(
+                command,
+                optionName,
+                help.GetParameterDescription(parameter.Name),
+                parameter.Name);
         }
 
         if (parameterType == typeof(int))
         {
-            var option = new Option<int?>(optionName) { Description = description };
+            var option = new Option<int?>(optionName)
+            {
+                Description = help.GetParameterDescription(parameter.Name)
+            };
             command.Options.Add(option);
             return new CliOptionBinding<int?>(parameter.Name, parseResult => parseResult.GetValue(option));
         }
 
         if (parameterType == typeof(long))
         {
-            var option = new Option<long?>(optionName) { Description = description };
+            var option = new Option<long?>(optionName)
+            {
+                Description = help.GetParameterDescription(parameter.Name)
+            };
             command.Options.Add(option);
             return new CliOptionBinding<long?>(parameter.Name, parseResult => parseResult.GetValue(option));
         }
 
         if (parameterType == typeof(double))
         {
-            var option = new Option<double?>(optionName) { Description = description };
+            var option = new Option<double?>(optionName)
+            {
+                Description = help.GetParameterDescription(parameter.Name)
+            };
             command.Options.Add(option);
             return new CliOptionBinding<double?>(parameter.Name, parseResult => parseResult.GetValue(option));
         }
@@ -185,7 +198,7 @@ internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationTo
         {
             var option = new Option<string[]?>(optionName)
             {
-                Description = description,
+                Description = help.GetParameterDescription(parameter.Name),
                 Arity = ArgumentArity.ZeroOrMore
             };
             command.Options.Add(option);
@@ -200,7 +213,7 @@ internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationTo
         {
             var option = new Option<string?>($"{optionName}-base64")
             {
-                Description = $"Base64-encoded value for PowerShell {parameter.Name}."
+                Description = $"{help.GetParameterDescription(parameter.Name)} Supply the value as Base64."
             };
             command.Options.Add(option);
             return new CliOptionBinding<string?>(parameter.Name, parseResult => parseResult.GetValue(option))
@@ -213,7 +226,11 @@ internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationTo
             parameterType == typeof(IDictionary) ||
             typeof(IDictionary).IsAssignableFrom(parameterType))
         {
-            return AddJsonOption(command, optionName, description, parameter.Name);
+            return AddJsonOption(
+                command,
+                optionName,
+                help.GetParameterDescription(parameter.Name),
+                parameter.Name);
         }
 
         if (parameterType.IsEnum ||
@@ -221,7 +238,11 @@ internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationTo
             parameterType == typeof(DateTime) ||
             parameterType == typeof(string))
         {
-            return AddStringOption(command, optionName, description, parameter.Name);
+            return AddStringOption(
+                command,
+                optionName,
+                help.GetParameterDescription(parameter.Name),
+                parameter.Name);
         }
 
         return null;
@@ -262,6 +283,27 @@ internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationTo
 
     private static string ToKebabCase(string value) =>
         Regex.Replace(value, "([a-z0-9])([A-Z])", "$1-$2").ToLowerInvariant();
+
+    private static string ToCommandName(string powerShellName)
+    {
+        var separatorIndex = powerShellName.IndexOf('-');
+        if (separatorIndex < 0)
+        {
+            return ToKebabCase(powerShellName);
+        }
+
+        var verb = powerShellName[..separatorIndex];
+        var noun = powerShellName[(separatorIndex + 1)..];
+        const string migrationNounPrefix = "M4dMigration";
+        if (noun.StartsWith(migrationNounPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            noun = noun[migrationNounPrefix.Length..];
+        }
+
+        return noun.Length == 0 && verb.Equals("Invoke", StringComparison.OrdinalIgnoreCase)
+            ? "run"
+            : ToKebabCase($"{verb}-{noun}");
+    }
 
     private static void WriteParseError(string message, bool json)
     {

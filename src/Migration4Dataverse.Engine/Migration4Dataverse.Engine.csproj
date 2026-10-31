@@ -14,6 +14,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="en-US/Migration4Dataverse.Engine.dll-Help.xml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
     <DashboardSource Include="$(DashboardProjectDirectory)/package.json;$(DashboardProjectDirectory)/package-lock.json;$(DashboardProjectDirectory)/.npmrc;$(DashboardProjectDirectory)/index.html;$(DashboardProjectDirectory)/vite.config.ts;$(DashboardProjectDirectory)/tsconfig.json;$(DashboardProjectDirectory)/src/**/*.*;$(DashboardProjectDirectory)/public/**/*.*" />
   </ItemGroup>
 
