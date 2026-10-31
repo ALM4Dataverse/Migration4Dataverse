@@ -5,7 +5,7 @@
   "description": "Release automation for Migration4Dataverse.",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rnwood/Migration4Dataverse.git"
+    "url": "https://github.com/ALM4Dataverse/Migration4Dataverse.git"
   },
   "scripts": {
     "release": "semantic-release"
