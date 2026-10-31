@@ -76,7 +76,7 @@ internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationTo
         {
             scriptArgument = new Argument<string?>("migration-script")
             {
-                Description = "PowerShell script that invokes Invoke-M4dMigration or defines $Steps and $Connections.",
+                Description = "PowerShell script that invokes Invoke-M4dMigration or defines $Steps and $Connections. CLI options act as defaults for script invocations.",
                 Arity = ArgumentArity.ZeroOrOne
             };
             command.Arguments.Add(scriptArgument);

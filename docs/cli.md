@@ -32,7 +32,7 @@ m4d invoke-m4d-migration --script ./migration-job.ps1 \
   --database-path ./migration.sqlite3 --run-name "Nightly import"
 ```
 
-Scripts may also invoke `Invoke-M4dMigration` themselves. For that mode, pass only the script (plus `--json` if wanted); command-specific options cannot also be supplied because the script owns the invocation. This keeps options from being silently ignored.
+Scripts may also invoke `Invoke-M4dMigration` themselves. CLI options are supplied as PowerShell parameter defaults during script execution: they apply when the script omits a parameter, while explicit arguments in the script take precedence. For scripts that only define `$Steps` and `$Connections`, command options are passed directly to the CLI invocation.
 
 Complex PowerShell objects such as connections are best created in the setup script. Where a command parameter is a JSON-compatible array or dictionary, the CLI also exposes a `--<parameter>-json` option, such as `--steps-json`. A `--script` can provide live .NET, PowerShell, or connector objects that JSON cannot represent.
 

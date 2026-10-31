@@ -41,6 +41,7 @@ internal sealed class PowerShellCliRuntime : IDisposable
         {
             _runspace.Open();
             _runspace.SessionStateProxy.SetVariable("__m4dCliMigrationFailed", false);
+            _runspace.SessionStateProxy.SetVariable("__m4dCliMigrationInvoked", false);
             _runspace.SessionStateProxy.SetVariable("__m4dCliDashboardHandle", null);
             ImportBundledModules();
         }
@@ -85,9 +86,9 @@ internal sealed class PowerShellCliRuntime : IDisposable
         _hadErrors = false;
         _errorExitCode = ExitCodes.MigrationFailure;
         _runspace.SessionStateProxy.SetVariable("__m4dCliMigrationFailed", false);
+        _runspace.SessionStateProxy.SetVariable("__m4dCliMigrationInvoked", false);
         _runspace.SessionStateProxy.SetVariable("__m4dCliDashboardHandle", null);
 
-        var scriptInvokesCommand = false;
         if (!string.IsNullOrWhiteSpace(setupScriptPath))
         {
             var scriptPath = Path.GetFullPath(setupScriptPath);
@@ -107,19 +108,44 @@ internal sealed class PowerShellCliRuntime : IDisposable
                 return ExitCodes.InvalidArgumentsOrJob;
             }
 
-            scriptInvokesCommand = ScriptInvokesCommand(scriptAst, commandInfo.Name);
-            if (scriptInvokesCommand && cliParameters.Count > 0)
+            var scriptParameterDefaults = CreateScriptParameterDefaults(
+                commandInfo,
+                cliParameters,
+                out var parameterError);
+            if (parameterError is not null)
             {
-                WriteError(
-                    "A script that invokes the command itself cannot be combined with command options. " +
-                    "Define the migration job in the script and let the CLI invoke it to use CLI options.",
-                    ExitCodes.InvalidArgumentsOrJob);
+                WriteError(parameterError, ExitCodes.InvalidArgumentsOrJob);
                 return ExitCodes.InvalidArgumentsOrJob;
             }
-            _errorExitCode = scriptInvokesCommand
-                ? ExitCodes.MigrationFailure
-                : ExitCodes.InvalidArgumentsOrJob;
-            var scriptResult = InvokeScript(scriptPath, cancellationToken);
+
+            var originalParameterDefaults = _runspace.SessionStateProxy.GetVariable("PSDefaultParameterValues");
+            if (scriptParameterDefaults is not null)
+            {
+                var parameterDefaults = originalParameterDefaults is IDictionary existingDefaults
+                    ? new Hashtable(existingDefaults, StringComparer.OrdinalIgnoreCase)
+                    : new Hashtable(StringComparer.OrdinalIgnoreCase);
+                foreach (DictionaryEntry parameterDefault in scriptParameterDefaults)
+                {
+                    parameterDefaults[parameterDefault.Key] = parameterDefault.Value;
+                }
+                _runspace.SessionStateProxy.SetVariable("PSDefaultParameterValues", parameterDefaults);
+            }
+
+            _errorExitCode = ExitCodes.InvalidArgumentsOrJob;
+            int scriptResult;
+            try
+            {
+                scriptResult = InvokeScript(scriptPath, commandInfo.Name, cancellationToken);
+            }
+            finally
+            {
+                if (scriptParameterDefaults is not null)
+                {
+                    _runspace.SessionStateProxy.SetVariable(
+                        "PSDefaultParameterValues",
+                        originalParameterDefaults);
+                }
+            }
             if (cancellationToken.IsCancellationRequested)
             {
                 return ExitCodes.Cancelled;
@@ -128,7 +154,7 @@ internal sealed class PowerShellCliRuntime : IDisposable
             {
                 return _errorExitCode;
             }
-            if (scriptInvokesCommand)
+            if (HasInvokedMigration())
             {
                 return HasFailedMigrationResult()
                     ? ExitCodes.MigrationFailure
@@ -227,13 +253,24 @@ internal sealed class PowerShellCliRuntime : IDisposable
             ?.Value
         ?? throw new InvalidOperationException($"Assembly metadata '{name}' is missing.");
 
-    private int InvokeScript(string scriptPath, CancellationToken cancellationToken)
+    private int InvokeScript(string scriptPath, string commandName, CancellationToken cancellationToken)
     {
         _errorExitCode = ExitCodes.InvalidArgumentsOrJob;
-        using var powerShell = CreatePipeline(_errorExitCode);
-        powerShell.AddScript($". '{scriptPath.Replace("'", "''", StringComparison.Ordinal)}'", useLocalScope: false);
-        AddOutputObserver(powerShell);
-        return InvokePipeline(powerShell, cancellationToken);
+        var breakpoint = _runspace.Debugger.SetCommandBreakpoint(
+            commandName,
+            ScriptBlock.Create("$global:__m4dCliMigrationInvoked = $true; continue"),
+            null);
+        try
+        {
+            using var powerShell = CreatePipeline(_errorExitCode);
+            powerShell.AddScript($". '{scriptPath.Replace("'", "''", StringComparison.Ordinal)}'", useLocalScope: false);
+            AddOutputObserver(powerShell);
+            return InvokePipeline(powerShell, cancellationToken);
+        }
+        finally
+        {
+            _runspace.Debugger.RemoveBreakpoint(breakpoint);
+        }
     }
 
     private int InvokeCommandPipeline(
@@ -585,6 +622,42 @@ internal sealed class PowerShellCliRuntime : IDisposable
         }
     }
 
+    private Hashtable? CreateScriptParameterDefaults(
+        CommandInfo commandInfo,
+        IReadOnlyDictionary<string, CliParameterValue> cliParameters,
+        out string? error)
+    {
+        error = null;
+        if (cliParameters.Count == 0)
+        {
+            return null;
+        }
+
+        var defaults = new Hashtable(StringComparer.OrdinalIgnoreCase);
+        foreach (var supplied in cliParameters)
+        {
+            if (!commandInfo.Parameters.TryGetValue(supplied.Key, out var metadata))
+            {
+                error = $"The {commandInfo.Name} command has no '{supplied.Key}' parameter.";
+                return null;
+            }
+
+            try
+            {
+                defaults[$"{commandInfo.Name}:{metadata.Name}"] =
+                    ConvertParameterValue(metadata, supplied.Value);
+            }
+            catch (Exception exception) when (
+                exception is FormatException or JsonException or ArgumentException)
+            {
+                error = $"Invalid value for --{ToKebabCase(supplied.Key)}: {exception.Message}";
+                return null;
+            }
+        }
+
+        return defaults;
+    }
+
     private int WaitForDashboardToStop(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
@@ -613,13 +686,18 @@ internal sealed class PowerShellCliRuntime : IDisposable
         {
             var error = powerShell.Streams.Error[eventArgs.Index];
             _hadErrors = true;
+            var reportedExitCode = errorExitCode;
             if (IsParameterError(error))
             {
                 _errorExitCode = ExitCodes.InvalidArgumentsOrJob;
+                reportedExitCode = ExitCodes.InvalidArgumentsOrJob;
             }
-            WriteError(error.ToString(), _errorExitCode == ExitCodes.InvalidArgumentsOrJob
-                ? _errorExitCode
-                : errorExitCode);
+            else if (HasInvokedMigration())
+            {
+                _errorExitCode = ExitCodes.MigrationFailure;
+                reportedExitCode = ExitCodes.MigrationFailure;
+            }
+            WriteError(error.ToString(), reportedExitCode);
         };
         powerShell.Streams.Warning.DataAdded += (_, eventArgs) =>
             WriteMessage("warning", powerShell.Streams.Warning[eventArgs.Index].Message);
@@ -641,18 +719,15 @@ internal sealed class PowerShellCliRuntime : IDisposable
         error.FullyQualifiedErrorId.Contains("MissingMandatoryParameter", StringComparison.OrdinalIgnoreCase) ||
         error.FullyQualifiedErrorId.Contains("ParameterBinding", StringComparison.OrdinalIgnoreCase);
 
-    private static bool ScriptInvokesCommand(ScriptBlockAst scriptAst, string commandName) =>
-        scriptAst.Find(
-            node => node is CommandAst command &&
-                    string.Equals(command.GetCommandName(), commandName, StringComparison.OrdinalIgnoreCase),
-            searchNestedScriptBlocks: true) is not null;
-
     private static string ToKebabCase(string value) =>
         System.Text.RegularExpressions.Regex.Replace(value, "([a-z0-9])([A-Z])", "$1-$2")
             .ToLowerInvariant();
 
     private bool HasFailedMigrationResult() =>
         _runspace.SessionStateProxy.GetVariable("__m4dCliMigrationFailed") is true;
+
+    private bool HasInvokedMigration() =>
+        _runspace.SessionStateProxy.GetVariable("__m4dCliMigrationInvoked") is true;
 
     private void WriteProgress(ProgressRecord record)
     {

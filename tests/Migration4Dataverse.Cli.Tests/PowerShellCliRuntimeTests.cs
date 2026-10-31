@@ -30,6 +30,31 @@ public sealed class PowerShellCliRuntimeTests
     }
 
     [Fact]
+    public void DetectsMigrationCommandInvokedFromFunctionInScript()
+    {
+        using var fixture = new CliFixture();
+        using var runtime = fixture.CreateRuntime();
+        var scriptPath = fixture.WriteScript(
+            "self-invoking-function.ps1",
+            """
+            function InvokeMigrationNow {
+                Invoke-M4dMigration -DatabasePath 'run.sqlite' -RunName 'inside-function' `
+                    -Steps @(@{ Id = 'Source'; Type = 'source' }) -Connections @{}
+            }
+            InvokeMigrationNow
+            """);
+
+        var result = runtime.Invoke(
+            fixture.GetCommand(runtime, "Invoke-M4dMigration"),
+            new Dictionary<string, CliParameterValue>(),
+            scriptPath,
+            null,
+            CancellationToken.None);
+
+        Assert.Equal(ExitCodes.Success, result);
+    }
+
+    [Fact]
     public void LoadsTheModuleAndRunsAJobDefinedByTheScript()
     {
         using var fixture = new CliFixture();
@@ -51,6 +76,98 @@ public sealed class PowerShellCliRuntimeTests
             CancellationToken.None);
 
         Assert.Equal(ExitCodes.Success, result);
+    }
+
+    [Fact]
+    public void RunsJobWhenMigrationCommandAppearsOnlyInUninvokedFunction()
+    {
+        using var fixture = new CliFixture();
+        using var runtime = fixture.CreateRuntime();
+        var scriptPath = fixture.WriteScript(
+            "job-with-unused-function.ps1",
+            """
+            if ($false) {
+                Invoke-M4dMigration -Steps @(@{ Id = 'UnusedBranch'; Type = 'source' }) -Connections @{}
+            }
+            function InvokeMigrationLater {
+                Invoke-M4dMigration -Steps @(@{ Id = 'Unused'; Type = 'source' }) -Connections @{}
+            }
+            $Steps = @(@{ Id = 'Source'; Type = 'source' })
+            $Connections = @{}
+            """);
+
+        var result = runtime.Invoke(
+            fixture.GetCommand(runtime, "Invoke-M4dMigration"),
+            new Dictionary<string, CliParameterValue>
+            {
+                ["RunName"] = new("from-cli")
+            },
+            scriptPath,
+            null,
+            CancellationToken.None);
+
+        Assert.Equal(ExitCodes.Success, result);
+        Assert.Contains("RunId", fixture.Output.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.True(
+            fixture.Output.ToString().Contains("from-cli", StringComparison.Ordinal),
+            $"Expected the CLI RunName in the output. Actual output: {fixture.Output}");
+    }
+
+    [Fact]
+    public void AppliesCliParameterDefaultsToScriptInvokedMigration()
+    {
+        using var fixture = new CliFixture();
+        using var runtime = fixture.CreateRuntime();
+        var scriptPath = fixture.WriteScript(
+            "self-invoking-with-cli-defaults.ps1",
+            """
+            Invoke-M4dMigration -Steps @(@{ Id = 'Source'; Type = 'source' }) -Connections @{}
+            """);
+        var parameters = new Dictionary<string, CliParameterValue>
+        {
+            ["DatabasePath"] = new("cli.sqlite"),
+            ["RunName"] = new("from-cli")
+        };
+
+        var result = runtime.Invoke(
+            fixture.GetCommand(runtime, "Invoke-M4dMigration"),
+            parameters,
+            scriptPath,
+            null,
+            CancellationToken.None);
+
+        Assert.Equal(ExitCodes.Success, result);
+        Assert.Contains("cli.sqlite", fixture.Output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("from-cli", fixture.Output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ScriptArgumentsTakePrecedenceOverCliParameterDefaults()
+    {
+        using var fixture = new CliFixture();
+        using var runtime = fixture.CreateRuntime();
+        var scriptPath = fixture.WriteScript(
+            "self-invoking-with-explicit-arguments.ps1",
+            """
+            Invoke-M4dMigration -DatabasePath 'script.sqlite' -RunName 'from-script' `
+                -Steps @(@{ Id = 'Source'; Type = 'source' }) -Connections @{}
+            """);
+        var parameters = new Dictionary<string, CliParameterValue>
+        {
+            ["DatabasePath"] = new("cli.sqlite"),
+            ["RunName"] = new("from-cli")
+        };
+
+        var result = runtime.Invoke(
+            fixture.GetCommand(runtime, "Invoke-M4dMigration"),
+            parameters,
+            scriptPath,
+            null,
+            CancellationToken.None);
+
+        Assert.Equal(ExitCodes.Success, result);
+        Assert.Contains("DatabasePath=script.sqlite", fixture.Output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("RunId=from-script", fixture.Output.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -101,18 +218,9 @@ public sealed class PowerShellCliRuntimeTests
             """
             $Steps = @(@{ Id = 'Source'; Type = 'source' })
             """);
-        var selfInvokingJobPath = fixture.WriteScript(
-            "self-invoking-job.ps1",
-            """
-            Invoke-M4dMigration -Steps @(@{ Id = 'Source'; Type = 'source' }) -Connections @{}
-            """);
         var failedJobParameters = new Dictionary<string, CliParameterValue>
         {
             ["Fail"] = new(true)
-        };
-        var incompatibleScriptParameters = new Dictionary<string, CliParameterValue>
-        {
-            ["DatabasePath"] = new("migration.sqlite")
         };
         var migrationCommand = fixture.GetCommand(runtime, "Invoke-M4dMigration");
 
@@ -130,14 +238,6 @@ public sealed class PowerShellCliRuntimeTests
                 migrationCommand,
                 failedJobParameters,
                 failedJobPath,
-                null,
-                CancellationToken.None));
-        Assert.Equal(
-            ExitCodes.InvalidArgumentsOrJob,
-            runtime.Invoke(
-                migrationCommand,
-                incompatibleScriptParameters,
-                selfInvokingJobPath,
                 null,
                 CancellationToken.None));
     }
@@ -242,11 +342,7 @@ public sealed class PowerShellCliRuntimeTests
                         if ($Fail) {
                             throw 'Intentional test migration failure.'
                         }
-                        [pscustomobject]@{
-                            RunId = $RunName
-                            CompletedWithErrors = $false
-                            TargetRowsFailed = 0
-                        }
+                        "DatabasePath=$DatabasePath; RunId=$RunName"
                     }
 
                     function Get-M4dMigrationRun {
