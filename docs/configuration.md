@@ -1,6 +1,6 @@
 # Migration step configuration
 
-`Invoke-Migration -Steps` accepts PowerShell objects; native hashtables are the simplest way to define a migration. The definitions are not a standalone JSON or SSIS package. A migration is a directed acyclic graph whose nodes read, transform, route, or write rows.
+`Invoke-M4dMigration -Steps` accepts PowerShell objects; native hashtables are the simplest way to define a migration. The definitions are not a standalone JSON or SSIS package. A migration is a directed acyclic graph whose nodes read, transform, route, or write rows.
 
 > [!NOTE]
 > Put live connection objects in `-Connections`, not in the step definitions. This keeps credentials and runtime objects separate from the configuration used for run history and resume checks.
@@ -52,7 +52,7 @@ $connections = @{
     crm = $dataverseConnection
 }
 
-Invoke-Migration -DatabasePath './migration.sqlite3' `
+Invoke-M4dMigration -DatabasePath './migration.sqlite3' `
     -RunName 'Account import' -Steps $steps -Connections $connections
 ```
 
@@ -70,13 +70,13 @@ Each node has a unique `Id`, a `Type`, and an `Inputs` array. `Inputs` names the
 | `target` | Exactly one | `Target`. A target can feed a `join`, or a matching SQLite/DuckDB `transform` in `whole_dataset` mode as a completion barrier. |
 | `callback` | Root or one or more | Root callbacks also define `ReadBatches`; every callback defines `ExecuteBatch`. |
 
-Every referenced step ID must exist. A node may have multiple consumers. `sort` and `merge` are not supported `Invoke-Migration` step types and are rejected during configuration validation.
+Every referenced step ID must exist. A node may have multiple consumers. `sort` and `merge` are not supported `Invoke-M4dMigration` step types and are rejected during configuration validation.
 
 ## Shared step properties
 
 | Property | Required | Description |
 |---|---:|---|
-| `ErrorRateThresholdPercent` | No | Inclusive maximum cumulative failed-row percentage for this step, from `0` to `100`. It overrides `Invoke-Migration -MaxErrorRatePercent`; both default to `0`, which preserves stop-on-row-error behavior. |
+| `ErrorRateThresholdPercent` | No | Inclusive maximum cumulative failed-row percentage for this step, from `0` to `100`. It overrides `Invoke-M4dMigration -MaxErrorRatePercent`; both default to `0`, which preserves stop-on-row-error behavior. |
 
 The error rate is calculated from failed rows divided by succeeded plus failed rows across completed batches in that step. A threshold accepts row-level errors only; exhausted source-reader, handler, and infrastructure exceptions remain fatal. Downstream receives only dependency payloads explicitly emitted by the step; a handler that reports partial success must emit only the successful rows it intends downstream to process. Accepted errors remain visible and the run finishes as `CompletedWithErrors`.
 
@@ -139,7 +139,7 @@ Every target has a `Target` hashtable. See the [target connector index](./connec
 | `Path` | File and object-storage targets | Exact filename relative to the target directory, or the object key/prefix for object storage. Binary filesystem targets publish one file; binary object-storage targets append each record's key to the prefix. Omit it for a `FileInfo`, SQL database, MongoDB, SharePoint, or Dataverse target. Whole-dataset database staging targets omit both `ConnectionId` and `Path`. An optional custom-target path is exposed as `Context.TargetPath`; omitted means an empty string. |
 | `Table` | Dataverse, SQL database, and MongoDB targets | Dataverse logical table, SQL table, or MongoDB collection name. |
 | `Operation` | No | Defaults to `Upsert` for Dataverse and `Write` for other targets. |
-| `BatchSize` | No | Positive fixed target override. Non-Dataverse targets otherwise inherit `Invoke-Migration -BatchSize`; Dataverse targets default independently to 10 and are limited to 1,000 rows. |
+| `BatchSize` | No | Positive fixed target override. Non-Dataverse targets otherwise inherit `Invoke-M4dMigration -BatchSize`; Dataverse targets default independently to 10 and are limited to 1,000 rows. |
 | `MaxConcurrency` | Dataverse only | Optional positive per-target concurrency cap. When omitted, the target uses its connection's recommended identity budget. |
 | `Options` | No | Connector/provider-specific settings, such as database schema/key definitions, object-storage prefix/bucket, HTTP pagination, MongoDB filter/key columns, or Dataverse matching keys. Format settings belong in `Format.Options`; file targets do not accept storage `Options`. See the linked connector guides. |
 | `CreateBinaryReference` | CSV, JSON Lines, or Parquet | Optional scriptblock to choose a relative sidecar path for top-level binary fields; see [binary values and sidecar files](./concepts/binary-values-and-sidecars.md). |
@@ -169,4 +169,4 @@ $connections = @{
 
 The array is a per-run pool for typed Dataverse Sources and Targets; the same `ConnectionId` shares the pool across both. It is not supported for other connector types, callbacks, or Dataverse transforms. Pool members must target the same organization and use the same `MaxRetryCount`. The caller owns SQL database, object-storage, HTTP, MongoDB, custom, and Dataverse connection creation, credentials, lifetime, and disposal; the engine disposes only its temporary pool wrapper and any client it creates from a URI. File targets stage batches and atomically publish output before the run is marked successful; object-storage and SharePoint binary targets stage records locally and upload files during finalization. SQLite and DuckDB transform connections are engine-owned and are stored under `.migration-transforms` beside the migration database.
 
-The store records a sanitized snapshot of the graph and safe connection properties for run history and configuration previews. Redaction is best-effort; do not put credentials or secrets in step definitions. See [`Get-MigrationRun`](./cmdlets/get-migration-run.md), the [dashboard guide](./cmdlets/migration-dashboard.md), and [connections and callbacks](./concepts/connections-and-callbacks.md).
+The store records a sanitized snapshot of the graph and safe connection properties for run history and configuration previews. Redaction is best-effort; do not put credentials or secrets in step definitions. See [`Get-M4dMigrationRun`](./cmdlets/get-migration-run.md), the [dashboard guide](./cmdlets/migration-dashboard.md), and [connections and callbacks](./concepts/connections-and-callbacks.md).

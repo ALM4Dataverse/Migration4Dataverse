@@ -2,7 +2,7 @@
 
 The `salesforce` source reads Salesforce Sales Cloud records through the REST or Bulk API 2.0 query interfaces. It is source-only. The caller supplies an authenticated `System.Net.Http.HttpClient` in `-Connections`; its `BaseAddress` must be the Salesforce instance URL, such as `https://example.my.salesforce.com/`.
 
-The engine does not create or refresh Salesforce credentials. Configure OAuth, a connected app, or another supported authentication flow in the client before passing it to `Invoke-Migration`, and keep tokens out of step definitions.
+The engine does not create or refresh Salesforce credentials. Configure OAuth, a connected app, or another supported authentication flow in the client before passing it to `Invoke-M4dMigration`, and keep tokens out of step definitions.
 
 ## Configuration
 

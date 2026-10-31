@@ -7,7 +7,7 @@ This page indexes the supported PowerShell migration contract. Use the linked pa
 
 ## Migration graph
 
-[`Invoke-Migration`](./cmdlets/invoke-migration.md) runs a directed acyclic graph of PowerShell step definitions. The supported step types are:
+[`Invoke-M4dMigration`](./cmdlets/invoke-migration.md) runs a directed acyclic graph of PowerShell step definitions. The supported step types are:
 
 | Step type | Purpose |
 |---|---|
@@ -24,12 +24,12 @@ Start with [step configuration](./configuration.md). For keyed dependencies, joi
 ## PowerShell commands
 
 - [Cmdlets and functions](./cmdlets/README.md) — exported command index.
-- [`Invoke-Migration`](./cmdlets/invoke-migration.md) — run options, module loading, previews, and resume behavior.
-- [`Get-MigrationRun`](./cmdlets/get-migration-run.md) — list or inspect saved runs.
+- [`Invoke-M4dMigration`](./cmdlets/invoke-migration.md) — run options, module loading, previews, and resume behavior.
+- [`Get-M4dMigrationRun`](./cmdlets/get-migration-run.md) — list or inspect saved runs.
 - [Run inspection and recovery](./cmdlets/migration-inspection-and-recovery.md) — inspect steps, batches, errors, captured rows, and queue recovery actions from PowerShell.
 - [Migration dashboard](./cmdlets/migration-dashboard.md) — view run history, progress, and optional row lineage.
-- [`Start-MigrationDatabaseServer`](./cmdlets/migration-database-server.md) — keep a local database owner available to multiple PowerShell processes.
-- [`Clear-MigrationTargetTuning`](./cmdlets/clear-migration-target-tuning.md) — remove legacy Dataverse tuning profiles from older databases.
+- [`Start-M4dMigrationDatabaseServer`](./cmdlets/migration-database-server.md) — keep a local database owner available to multiple PowerShell processes.
+- [`Clear-M4dMigrationTargetTuning`](./cmdlets/clear-migration-target-tuning.md) — remove legacy Dataverse tuning profiles from older databases.
 
 The lower-level store functions are listed in the [cmdlet index](./cmdlets/README.md); ordinary migrations do not need to call them directly.
 
@@ -52,7 +52,7 @@ The lower-level store functions are listed in the [cmdlet index](./cmdlets/READM
 - [MongoDB source and target](./connectors/mongodb.md)
 - [Custom source callbacks](./connectors/sources/custom.md)
 - [Custom target callbacks](./connectors/targets/custom.md)
-- [`New-MigrationBinaryValue`](./cmdlets/new-migration-binary-value.md) — file-backed binary values, streaming transforms, Base64, and MIME detection.
+- [`New-M4dMigrationBinaryValue`](./cmdlets/new-migration-binary-value.md) — file-backed binary values, streaming transforms, Base64, and MIME detection.
 - [Connections and callback execution](./concepts/connections-and-callbacks.md)
 - [Database-backed SQLite and DuckDB transforms](./dev/transformations/transform.md#database-backed-migration-graph-transforms)
 
@@ -85,10 +85,10 @@ The complete upstream cmdlet and concept references are maintained by [`Rnwood.D
 - [Error handling and recovery](./concepts/recovery-and-replay.md) explains source-read and batch retries, persisted failures, edited-row retry, replay, and at-least-once external effects.
 - [Dashboard](./cmdlets/migration-dashboard.md) explains progress, failure inspection, exact-row editing/retry, failed-batch replay preparation, debug snapshots, lineage, and local access.
 
-`Invoke-Migration -WhatIf` reads and transforms rows but skips target writes and callback batch handlers. Caller-authored readers and transforms can still have side effects. Debug capture and previews store row data in the migration database; protect that file and review the retention settings.
+`Invoke-M4dMigration -WhatIf` reads and transforms rows but skips target writes and callback batch handlers. Caller-authored readers and transforms can still have side effects. Debug capture and previews store row data in the migration database; protect that file and review the retention settings.
 
 ### Error behavior
 
 Source-reader failures are retried up to `-SourceReadMaxAttempts` (default `3`) from the latest durable source cursor. Exceptions from a batch handler are retried up to `-MaxAttempts` (default `5`); a result explicitly marked as containing errors is terminal and is not retried. `-MaxErrorRatePercent` and per-step `ErrorRateThresholdPercent` can accept a cumulative row-error percentage; both default to strict stop-on-error. Reader, handler, and infrastructure exceptions remain fatal.
 
-The dashboard displays persisted run and batch failures, can export recorded batch error details, queue failed batches for replay, and edit/retry individual rows when a Transform, Filter, or callback reports an exact input index. Source-reader, batch-level, and unattributed target errors remain batch-level. Step continuation does not retry the failed step; downstream receives only outputs emitted by that step, and an approved source-reader failure skips unread rows. Recovery decisions take effect only when `Invoke-Migration` is rerun with the same run ID and compatible step definition. Runs with accepted row errors or an operator-approved continuation finish as `CompletedWithErrors`. See [Invoke-Migration error behavior](./cmdlets/invoke-migration.md#error-and-recovery-behavior) and [recovery and replay](./concepts/recovery-and-replay.md) for the full contract.
+The dashboard displays persisted run and batch failures, can export recorded batch error details, queue failed batches for replay, and edit/retry individual rows when a Transform, Filter, or callback reports an exact input index. Source-reader, batch-level, and unattributed target errors remain batch-level. Step continuation does not retry the failed step; downstream receives only outputs emitted by that step, and an approved source-reader failure skips unread rows. Recovery decisions take effect only when `Invoke-M4dMigration` is rerun with the same run ID and compatible step definition. Runs with accepted row errors or an operator-approved continuation finish as `CompletedWithErrors`. See [Invoke-M4dMigration error behavior](./cmdlets/invoke-migration.md#error-and-recovery-behavior) and [recovery and replay](./concepts/recovery-and-replay.md) for the full contract.

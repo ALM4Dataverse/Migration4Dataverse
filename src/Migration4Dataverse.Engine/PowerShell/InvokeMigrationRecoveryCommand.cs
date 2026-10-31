@@ -12,7 +12,7 @@ public sealed record MigrationRecoveryResult(
 
 [Cmdlet(
     VerbsLifecycle.Invoke,
-    "MigrationRecovery",
+    "M4dMigrationRecovery",
     DefaultParameterSetName = RetryBatchesParameterSet,
     SupportsShouldProcess = true,
     ConfirmImpact = ConfirmImpact.Medium)]

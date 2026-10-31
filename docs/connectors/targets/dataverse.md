@@ -13,7 +13,7 @@ The `dataverse` target writes mapped rows through `Rnwood.Dataverse.Data.PowerSh
 | `ConnectionId` | Yes | ID in `-Connections` for a supported connection, or an array of connections to balance operations across identities. |
 | `Table` | Yes | Dataverse logical table name. |
 | `Operation` | No | `Upsert` (default), `Create`, `Update`, `Delete`, or `CreateOrUpdateIfNeeded`. |
-| `BatchSize` | No | Positive fixed batch size, default 10 independently of `Invoke-Migration -BatchSize`; maximum 1,000. An explicit value overrides the default. |
+| `BatchSize` | No | Positive fixed batch size, default 10 independently of `Invoke-M4dMigration -BatchSize`; maximum 1,000. An explicit value overrides the default. |
 | `MaxConcurrency` | No | Optional positive per-target concurrency cap. By default, the target uses its connection's recommended concurrency budget, bounded by the invocation limit. |
 | `Options` | No | Matching keys, lookup behavior, or supported write options forwarded to the upstream module. |
 
@@ -108,8 +108,8 @@ A known record can also be referenced by `{ TableName, Id }`. The adapter enable
 
 ## Batch size, concurrency, and retries
 
-Batch size is fixed for each run. Dataverse targets default to 10-row batches regardless of `Invoke-Migration -BatchSize`; set the target's `BatchSize` to choose another positive value up to 1,000. `MaxConcurrency` is an optional fixed per-target cap. When omitted, the target uses the connection's recommended concurrency budget. The pool enforces separate budgets for each identity, while `Invoke-Migration -MaxDegreeOfParallelism` (default 64) remains the overall worker ceiling. A target-level cap can lower concurrency but cannot raise either limit.
+Batch size is fixed for each run. Dataverse targets default to 10-row batches regardless of `Invoke-M4dMigration -BatchSize`; set the target's `BatchSize` to choose another positive value up to 1,000. `MaxConcurrency` is an optional fixed per-target cap. When omitted, the target uses the connection's recommended concurrency budget. The pool enforces separate budgets for each identity, while `Invoke-M4dMigration -MaxDegreeOfParallelism` (default 64) remains the overall worker ceiling. A target-level cap can lower concurrency but cannot raise either limit.
 
-Retry and throttle telemetry remains visible in migration diagnostics, but it does not automatically change batch size or concurrency. Tuning profiles saved by older versions are ignored; [`Clear-MigrationTargetTuning`](../../cmdlets/clear-migration-target-tuning.md) remains available to remove those legacy values.
+Retry and throttle telemetry remains visible in migration diagnostics, but it does not automatically change batch size or concurrency. Tuning profiles saved by older versions are ignored; [`Clear-M4dMigrationTargetTuning`](../../cmdlets/clear-migration-target-tuning.md) remains available to remove those legacy values.
 
-Retries are enabled by default. `Invoke-Migration -DataverseNoRetryDiagnosticMode` disables the Dataverse connection, cmdlet, and scheduler retry layers for a diagnostic run. It can cause transient errors to fail immediately; see [`Invoke-Migration`](../../cmdlets/invoke-migration.md).
+Retries are enabled by default. `Invoke-M4dMigration -DataverseNoRetryDiagnosticMode` disables the Dataverse connection, cmdlet, and scheduler retry layers for a diagnostic run. It can cause transient errors to fail immediately; see [`Invoke-M4dMigration`](../../cmdlets/invoke-migration.md).

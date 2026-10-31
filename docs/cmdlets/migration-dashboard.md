@@ -1,38 +1,38 @@
 # Migration dashboard
 
-`Start-MigrationDashboard` starts the engine-hosted React single-page app and local HTTP API. The SPA uses React Flow for pipeline graphs. The dashboard is read-only except for explicit actions to queue failed batches for replay or approve continuing downstream from a selected failed step; it cannot start or resume a scheduler. `Stop-MigrationDashboard` stops and disposes the returned server handle.
+`Start-M4dMigrationDashboard` starts the engine-hosted React single-page app and local HTTP API. The SPA uses React Flow for pipeline graphs. The dashboard is read-only except for explicit actions to queue failed batches for replay or approve continuing downstream from a selected failed step; it cannot start or resume a scheduler. `Stop-M4dMigrationDashboard` stops and disposes the returned server handle.
 
 ## Parameters
 
-### Start-MigrationDashboard
+### Start-M4dMigrationDashboard
 
 | Parameter | Required | Default / validation | Description |
 |---|---:|---|---|
 | `-DatabasePath` | One of `-DatabasePath` or `-Steps` | Non-empty path | File-backed SQLite migration database whose stored runs are displayed. |
-| `-Steps` | One of `-DatabasePath` or `-Steps` | Empty array | Step definitions to preview; accepts the same objects as `Invoke-Migration`. |
+| `-Steps` | One of `-DatabasePath` or `-Steps` | Empty array | Step definitions to preview; accepts the same objects as `Invoke-M4dMigration`. |
 | `-Connections` | No | `$null` | Connection map used with `-Steps`. Cannot be supplied without steps. |
 | `-Url` | No | `http://127.0.0.1:5180` | HTTP loopback address and port for the dashboard. Non-loopback URLs are rejected. |
 
-`Start-MigrationDashboard` returns a dashboard handle whose `Url` property reports the listening address. Provide at least one of `-DatabasePath` or `-Steps`; supply both to show a configuration preview alongside persisted run history.
+`Start-M4dMigrationDashboard` returns a dashboard handle whose `Url` property reports the listening address. Provide at least one of `-DatabasePath` or `-Steps`; supply both to show a configuration preview alongside persisted run history.
 
-### Stop-MigrationDashboard
+### Stop-M4dMigrationDashboard
 
 | Parameter | Required | Default / validation | Description |
 |---|---:|---|---|
-| `-Dashboard` | Yes | Pipeline input | Dashboard handle returned by `Start-MigrationDashboard`. |
+| `-Dashboard` | Yes | Pipeline input | Dashboard handle returned by `Start-M4dMigrationDashboard`. |
 
 The interface uses the project logo and Fluent UI 9 theme tokens with native HTML controls. The dependency graph fills the workspace below the header; the run overview and combined step inspector are collapsible panels. The inspector has separate tabs for captured rows and configuration. Row inspection is available per step in debug-captured runs: each captured stage has its own search and tab, system metadata appears before individual payload properties, and a toggle switches the payload to one JSON column. Rows load as the table is scrolled; search, column filters, and sorting are applied across all matching snapshots by the server. Selecting a row highlights its lineage and shows captured values at each traced step directly in the graph.
 
 ```powershell
-$dashboard = Start-MigrationDashboard -DatabasePath './state/migration.sqlite3'
+$dashboard = Start-M4dMigrationDashboard -DatabasePath './state/migration.sqlite3'
 Write-Host "Open $($dashboard.Url)"
 try {
-    # Run Invoke-Migration in this process, or leave the dashboard open to inspect stored runs.
+    # Run Invoke-M4dMigration in this process, or leave the dashboard open to inspect stored runs.
     $dashboard | Out-Null
     Read-Host 'Press Enter to stop the dashboard'
 }
 finally {
-    Stop-MigrationDashboard -Dashboard $dashboard
+    Stop-M4dMigrationDashboard -Dashboard $dashboard
 }
 ```
 
@@ -40,16 +40,16 @@ The dashboard can show stored run history, an in-memory configuration preview, o
 
 ```powershell
 # Preview a configuration without executing it or creating a run database.
-$dashboard = Start-MigrationDashboard -Steps $steps -Connections $connections
+$dashboard = Start-M4dMigrationDashboard -Steps $steps -Connections $connections
 
 # Show the supplied configuration alongside persisted run history.
-$dashboard = Start-MigrationDashboard -DatabasePath './state/migration.sqlite3' `
+$dashboard = Start-M4dMigrationDashboard -DatabasePath './state/migration.sqlite3' `
     -Steps $steps -Connections $connections
 ```
 
-`-Steps` and `-Connections` accept the same objects as `Invoke-Migration`. Configuration preview does not execute scripts or connect to endpoints. The preview exists only for the dashboard process; when `Invoke-Migration` runs, a safe configuration snapshot including the scheduler limits is persisted with the run so completed runs can still show their original step properties and configured capacity.
+`-Steps` and `-Connections` accept the same objects as `Invoke-M4dMigration`. Configuration preview does not execute scripts or connect to endpoints. The preview exists only for the dashboard process; when `Invoke-M4dMigration` runs, a safe configuration snapshot including the scheduler limits is persisted with the run so completed runs can still show their original step properties and configured capacity.
 
-The dashboard opens the database through its single-process owner. It may run in a separate PowerShell process from migration clients; when no owner is already running, the dashboard process becomes the implicit owner. To keep the owner independent of a dashboard or migration client, start [`Start-MigrationDatabaseServer`](./migration-database-server.md) in a dedicated process. Multiple distinct run IDs can share the database through that owner. Keep the owner alive until the dashboard and all migration clients have finished.
+The dashboard opens the database through its single-process owner. It may run in a separate PowerShell process from migration clients; when no owner is already running, the dashboard process becomes the implicit owner. To keep the owner independent of a dashboard or migration client, start [`Start-M4dMigrationDatabaseServer`](./migration-database-server.md) in a dedicated process. Multiple distinct run IDs can share the database through that owner. Keep the owner alive until the dashboard and all migration clients have finished.
 
 The default URL is `http://127.0.0.1:5180`. `-Url` may select another HTTP loopback address/port; non-loopback URLs are rejected. Remote access, HTTPS termination, authentication, and multi-user authorization are not implemented.
 
@@ -61,12 +61,12 @@ The default URL is `http://127.0.0.1:5180`. `-Url` may select another HTTP loopb
 - Run selector and compact overview with a target-output rows-per-minute chart, current and run-average rates, elapsed time, target rows, succeeded/error counts, and a progress bar. The chart scale reflects target output only, not source input. When target totals are not finalized, the overview recursively projects them from upstream outputs and observed row ratios. Hover chart points to see their time interval and rate. The ETA uses the projected remaining target rows and observed run-average target output rate when both are available; completed runs show their completion time. If a run is still marked `Running` after its persisted scheduler lease expires, the selector and overview identify it as stalled, show the last persisted update and outstanding work, and explain how to resume it with the same run ID and step definition.
 - Interactive React Flow dependency graph with a separate node for every step, labeled states, filtering, zoom/pan, a minimap, and a longest-observed-dependency-chain highlight. Zoom and pan persist across periodic status refreshes; auto-fit is applied when the selected run or graph topology changes, while selecting a step still centers it. Graph nodes and table rows show a mini rows-per-minute chart from their first working period through completion (or the current time while running); hovering a sample shows its interval and rate in rows per minute. Nodes also show connector- or step-specific details. Dataverse targets display configured or effective batch size and DOP, connection activity, observed retries/throttles, and retry-telemetry availability when runtime state has been recorded. Older runs saved with automatic tuning are labeled as legacy tuning and show the recorded runtime state when available. Clicking a failed status badge or failed-batch count opens a dialog with full recorded error text, attempts, failed-row counts, and any exactly attributed input rows.
 - Persisted run-level failures show the phase, step when known, message, attempt count, and expandable exception details. The notice explains that the scheduler stopped the whole run, shows outstanding work, and warns that completed external writes are not rolled back. Source-reader errors can be inspected here even when no batch was created.
-- The failed-task dialog can export all currently failed batches for the selected step as JSON, including outcomes. When a per-record Transform/Filter error or callback-reported error identifies its exact input row, operators can edit that row's JSON and queue only the edited row for retry. The row retry does not replay successful siblings or upstream steps; emitted outputs remain held until the retry succeeds or errors are explicitly accepted. Other batch-level failures continue to use batch replay. For a failed or cancelled run, operators can also queue all failed batches for replay or approve continuing downstream from an individual failed step. Replay preserves prior attempts, error text, and outcomes; continuation skips the failed step's remaining work and uses only outputs already emitted by it. These choices only persist an operator decision and do not execute work; rerun `Invoke-Migration` with the same run ID and compatible step definition. Reconcile external effects before retry, replay, or continuation.
+- The failed-task dialog can export all currently failed batches for the selected step as JSON, including outcomes. When a per-record Transform/Filter error or callback-reported error identifies its exact input row, operators can edit that row's JSON and queue only the edited row for retry. The row retry does not replay successful siblings or upstream steps; emitted outputs remain held until the retry succeeds or errors are explicitly accepted. Other batch-level failures continue to use batch replay. For a failed or cancelled run, operators can also queue all failed batches for replay or approve continuing downstream from an individual failed step. Replay preserves prior attempts, error text, and outcomes; continuation skips the failed step's remaining work and uses only outputs already emitted by it. These choices only persist an operator decision and do not execute work; rerun `Invoke-M4dMigration` with the same run ID and compatible step definition. Reconcile external effects before retry, replay, or continuation.
 - Runs completed under an error-rate threshold or after an explicit continuation are labeled `CompletedWithErrors`. Downstream receives only successful outputs emitted by the step; source rows not read before a reader failure are skipped when the operator continues past that source.
 - The expanded run overview contains the execution timeline, upstream-blocking hotspots, a scheduler-capacity graph, and CPU/memory charts. Process CPU utilization is computed from process CPU-time samples; memory charts show process working set and managed heap. When available, the runtime-reported process memory budget is plotted and labeled as a host/container budget, not free memory. These measurements include migration and dashboard overhead in the hosting process.
 - For Dataverse connection pools, the expanded overview charts the trailing 30-second average of routed request units per second for each connection in each pool. The average warms up as samples accumulate. Bulk writes count once per target record. Samples are collected every three seconds while the dashboard is open and retained only in browser memory; they are not historical run data.
 - Configuration preview for supplied steps and connections; historical runs display the sanitized configuration captured at invocation plus connection snapshots captured at run start and completion.
-- Optional row snapshot and lineage inspection when that run was created with `Invoke-Migration -EnableDebugCapture` or `Invoke-Migration -WhatIf`. Select a graph step to browse its captured inputs, transform outputs, and downstream rows by stage; search within each stage and select a row to show its captured values at each stage on the graph. Selected Dataverse source or target rows with a captured primary ID can be opened in the environment's default model-driven app. Snapshot and lineage grids use Fluent UI DataGrid with sorting, server-side column filters for all matching snapshots, drag or keyboard column reordering, resizing, content-based widths capped at 360 pixels, and a searchable column-visibility checklist. Payload cells show a copy-value action on hover or keyboard focus. Captured binary values show their filename, media type, representation, and byte size instead of the internal staging path; the selected-row panel compares file hashes across lineage stages. A download is streamed on demand by the local dashboard without buffering the file into a browser blob. Staged files can be unavailable after a successful run cleans them up.
+- Optional row snapshot and lineage inspection when that run was created with `Invoke-M4dMigration -EnableDebugCapture` or `Invoke-M4dMigration -WhatIf`. Select a graph step to browse its captured inputs, transform outputs, and downstream rows by stage; search within each stage and select a row to show its captured values at each stage on the graph. Selected Dataverse source or target rows with a captured primary ID can be opened in the environment's default model-driven app. Snapshot and lineage grids use Fluent UI DataGrid with sorting, server-side column filters for all matching snapshots, drag or keyboard column reordering, resizing, content-based widths capped at 360 pixels, and a searchable column-visibility checklist. Payload cells show a copy-value action on hover or keyboard focus. Captured binary values show their filename, media type, representation, and byte size instead of the internal staging path; the selected-row panel compares file hashes across lineage stages. A download is streamed on demand by the local dashboard without buffering the file into a browser blob. Staged files can be unavailable after a successful run cleans them up.
 
 Totals are based on persisted data. Standard `Records` batches are counted when queued; arbitrary callback payloads without a `Records` array are marked unknown. Source totals can be configured explicitly or resolved before the run using a wrapped SQLite/DuckDB query (or explicit `CountQuery`), Dataverse `-RecordCount` for Simple/FetchXML, a custom-source `CountCallback`, or Parquet file metadata. Other source totals become known as rows flow. Intermediate and target totals are finalized only after their inputs complete; before then, per-step progress recursively projects input rows from upstream projected outputs and observed row ratios, or falls back to the count of currently materialized batches when a branch cannot be projected. The overview recursively projects target-write totals from upstream outputs and observed row ratios, and uses the projected remaining target rows divided by observed run-average target output rate for its ETA. These estimates can change as more rows flow and are not guarantees. With multiple targets, the overview counts target-write work, not unique source rows. The orange path is the longest observed activity chain, not a guaranteed critical path or completion estimate.
 
@@ -74,7 +74,7 @@ Runtime hotspots rank active downstream steps by the number of upstream steps cu
 
 The scheduler-capacity graph compares persisted outstanding batches, in-flight batches, and the most impactful/busiest step's outstanding batches with the run's configured global queue, worker, and per-step queue limits. Values are sampled every three seconds while the dashboard is open and retained in browser memory for the current page session. The counts include persisted pending and in-flight batches but not producer reservations, so they may temporarily be lower than the scheduler's exact reserved capacity.
 
-The dashboard polls the API every three seconds. Apart from editing and queueing an exactly attributed row, queueing terminal failed batches for replay, and approving a failed-step continuation, it does not expose controls to pause, skip, or execute a migration. Decisions remain pending until a caller reruns `Invoke-Migration` with the same run ID and compatible step definition. Recovery endpoints require a same-origin request and reject a run with an active scheduler lease. Row edits are limited to JSON objects and requests up to 10 MB.
+The dashboard polls the API every three seconds. Apart from editing and queueing an exactly attributed row, queueing terminal failed batches for replay, and approving a failed-step continuation, it does not expose controls to pause, skip, or execute a migration. Decisions remain pending until a caller reruns `Invoke-M4dMigration` with the same run ID and compatible step definition. Recovery endpoints require a same-origin request and reject a run with an active scheduler lease. Row edits are limited to JSON objects and requests up to 10 MB.
 
 > [!WARNING]
 > The dashboard has no authentication and runs only on loopback. Failed-batch recovery changes durable migration state, and JSON exports can contain outcomes or business data. Keep the dashboard and database in a trusted local session, protect the SQLite file, and do not expose the port to untrusted users.

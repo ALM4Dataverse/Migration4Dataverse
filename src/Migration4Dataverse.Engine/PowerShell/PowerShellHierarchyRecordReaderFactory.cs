@@ -132,7 +132,7 @@ public sealed class PowerShellHierarchyRecordReaderFactory
             {
                 throw new ArgumentException(
                     $"Partitioned Dataverse source '{level.StepId}' has {definition.Partitions.Count} partitions, " +
-                    $"but the executor has only {_executor.MaxRunspaces} runspaces. Increase Invoke-Migration -MaxDegreeOfParallelism " +
+                    $"but the executor has only {_executor.MaxRunspaces} runspaces. Increase Invoke-M4dMigration -MaxDegreeOfParallelism " +
                     "or reduce the number of partitions.");
             }
 

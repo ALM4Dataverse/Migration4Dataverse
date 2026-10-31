@@ -5,7 +5,7 @@ using Migration4Dataverse.Engine.Storage;
 
 namespace Migration4Dataverse.Engine.PowerShell;
 
-[Cmdlet(VerbsCommon.Get, "MigrationDebugRow")]
+[Cmdlet(VerbsCommon.Get, "M4dMigrationDebugRow")]
 [OutputType(typeof(MigrationDebugSnapshotPage))]
 [OutputType(typeof(MigrationDebugSnapshot))]
 public sealed class GetMigrationDebugRowCommand : MigrationStoreCmdletBase

@@ -1,14 +1,14 @@
-# New-MigrationBinaryValue
+# New-M4dMigrationBinaryValue
 
 Creates a file-backed binary value for use in a migration source callback or mapping. Binary values are staged outside the migration database; only a small, versioned reference is stored in migration batches.
 
 ## Syntax
 
 ```powershell
-New-MigrationBinaryValue -FilePath <string> -StagingRoot <string> [-FileName <string>] [-ContentType <string>]
-New-MigrationBinaryValue -InputStream <Stream> -StagingRoot <string> [-FileName <string>] [-ContentType <string>]
-New-MigrationBinaryValue -Bytes <byte[]> -StagingRoot <string> [-FileName <string>] [-ContentType <string>]
-New-MigrationBinaryValue -Base64 <string> -StagingRoot <string> [-FileName <string>] [-ContentType <string>]
+New-M4dMigrationBinaryValue -FilePath <string> -StagingRoot <string> [-FileName <string>] [-ContentType <string>]
+New-M4dMigrationBinaryValue -InputStream <Stream> -StagingRoot <string> [-FileName <string>] [-ContentType <string>]
+New-M4dMigrationBinaryValue -Bytes <byte[]> -StagingRoot <string> [-FileName <string>] [-ContentType <string>]
+New-M4dMigrationBinaryValue -Base64 <string> -StagingRoot <string> [-FileName <string>] [-ContentType <string>]
 ```
 
 In source callbacks, use `$BinaryContext.StagingRoot`. A regular PowerShell Transform receives `$BinaryContext` as its second argument. A Transform that also receives a connection gets the binary context after that connection. A custom target receives the root as `$Context.BinaryStagingRoot`.
@@ -32,4 +32,4 @@ The returned `MigrationBinaryValue` supports:
 Returning a binary value unchanged from a mapping passes the same content and metadata along. To replace it, create a writer, stream the new bytes into it, and return the value from `Complete()`. Staged values remain available while a run may be resumed after failure or cancellation; successful non-preview runs remove their run-specific staging directory.
 
 > [!IMPORTANT]
-> A failed or cancelled run's binary staging files are local to the machine and filesystem used by `Invoke-Migration`. Resume the run with access to the same staging directory; do not remove it before the run is complete.
+> A failed or cancelled run's binary staging files are local to the machine and filesystem used by `Invoke-M4dMigration`. Resume the run with access to the same staging directory; do not remove it before the run is complete.

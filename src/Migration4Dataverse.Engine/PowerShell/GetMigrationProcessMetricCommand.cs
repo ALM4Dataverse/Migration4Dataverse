@@ -11,7 +11,7 @@ public sealed record MigrationProcessMetricSnapshot(
     long? MemoryLimitBytes,
     DateTimeOffset CapturedUtc);
 
-[Cmdlet(VerbsCommon.Get, "MigrationProcessMetric")]
+[Cmdlet(VerbsCommon.Get, "M4dMigrationProcessMetric")]
 [OutputType(typeof(MigrationProcessMetricSnapshot))]
 public sealed class GetMigrationProcessMetricCommand : PSCmdlet
 {

@@ -18,7 +18,7 @@ export function DashboardContent({ controller }: { controller: DashboardControll
     <section className="empty-state">
       <Layers3 size={44} />
       <Text variant="xxLarge">No migration runs found</Text>
-      <Text>Start an Invoke-Migration run using this database, or run the monitoring demo.</Text>
+      <Text>Start an Invoke-M4dMigration run using this database, or run the monitoring demo.</Text>
     </section>
   ) : (
     <main className="dashboard-main">

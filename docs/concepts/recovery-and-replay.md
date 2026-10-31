@@ -2,11 +2,11 @@
 
 The SQLite store persists run identity, run-level failure details, batches, outcomes, checkpoints, leases, dependency events, failed-batch retry history, and attributable row errors. Reuse the same `RunId` to resume compatible work after cancellation or interruption.
 
-Each database has one local owner process for Migration4Dataverse store access. Multiple distinct run IDs can execute concurrently through that owner; a per-run lease prevents two schedulers from owning the same run ID. If separate PowerShell processes share a database, start [`Start-MigrationDatabaseServer`](../cmdlets/migration-database-server.md) in a dedicated process first.
+Each database has one local owner process for Migration4Dataverse store access. Multiple distinct run IDs can execute concurrently through that owner; a per-run lease prevents two schedulers from owning the same run ID. If separate PowerShell processes share a database, start [`Start-M4dMigrationDatabaseServer`](../cmdlets/migration-database-server.md) in a dedicated process first.
 
 ## Row-error thresholds and step continuation
 
-`Invoke-Migration -MaxErrorRatePercent` sets a cumulative per-step failed-row percentage threshold (default `0`, range `0..100`). A step's `ErrorRateThresholdPercent` overrides the global value. The rate is failed rows divided by succeeded plus failed rows across completed batches for that step. A batch that is accepted remains `CompletedWithErrors`; downstream only receives dependency outputs emitted by its handler, and the final run status is `CompletedWithErrors`. Source-reader, exhausted handler, and infrastructure exceptions are not counted in the row-error rate.
+`Invoke-M4dMigration -MaxErrorRatePercent` sets a cumulative per-step failed-row percentage threshold (default `0`, range `0..100`). A step's `ErrorRateThresholdPercent` overrides the global value. The rate is failed rows divided by succeeded plus failed rows across completed batches for that step. A batch that is accepted remains `CompletedWithErrors`; downstream only receives dependency outputs emitted by its handler, and the final run status is `CompletedWithErrors`. Source-reader, exhausted handler, and infrastructure exceptions are not counted in the row-error rate.
 
 ## Editing and retrying an attributable row
 
@@ -19,9 +19,9 @@ Queueing a row retry creates a one-record batch at the same failed step with the
 
 Row-only retry is unavailable when an error cannot be mapped safely to one input row. This includes source-reader failures, whole-batch handler or infrastructure failures, and target connector failures without per-record attribution (including bulk target errors). Use failed-batch replay or step continuation for those errors. Replaying a row can repeat side effects performed by that step, so reconcile external effects and use idempotent handlers where possible.
 
-Queueing the edited row does not execute it. The action requires a Failed or Cancelled run with no active scheduler lease; rerun `Invoke-Migration` with the same run ID and compatible step definition to execute the retry.
+Queueing the edited row does not execute it. The action requires a Failed or Cancelled run with no active scheduler lease; rerun `Invoke-M4dMigration` with the same run ID and compatible step definition to execute the retry.
 
-For an unresolved fatal error, an operator may use the dashboard to approve continuation past one selected step. This does not retry the step: the scheduler drains persisted pending work, skips further enumeration for an approved source-reader failure, and releases only already-emitted dependency outputs. Unread source rows and failed records are not reconstructed. The decision is stored per run and step, requires a Failed or Cancelled run with no active scheduler lease, and takes effect only after rerunning `Invoke-Migration` with the same run ID and compatible step definition. The dashboard preserves the original run failure details when a continued run finishes with errors.
+For an unresolved fatal error, an operator may use the dashboard to approve continuation past one selected step. This does not retry the step: the scheduler drains persisted pending work, skips further enumeration for an approved source-reader failure, and releases only already-emitted dependency outputs. Unread source rows and failed records are not reconstructed. The decision is stored per run and step, requires a Failed or Cancelled run with no active scheduler lease, and takes effect only after rerunning `Invoke-M4dMigration` with the same run ID and compatible step definition. The dashboard preserves the original run failure details when a continued run finishes with errors.
 
 SQLite writes are serialized through the owner, while readers can continue alongside a writer using WAL. A run lease and its batch leases are independent: a scheduler must renew its run lease, and expired batch work can be reclaimed only after its prior batch lease is no longer valid.
 
@@ -46,7 +46,7 @@ A worker can complete an external write and fail before its SQLite completion tr
 - Custom targets must deduplicate or safely overwrite by stable batch identity.
 - Keep source data and step definitions stable while resuming.
 - A run with unaccepted terminal failed batches cannot be resumed as though those batches succeeded. The dashboard can queue all recorded failed batches for replay, queue an edited exact row for retry, or approve continuing past one failed step on a failed or cancelled run with no active scheduler lease. Batch replay preserves prior attempts, errors, and outcomes in retry history, resets current attempts, and leaves batches pending. Continuation skips the selected step's remaining failed/unread work and uses only persisted or explicitly emitted outputs.
-- None of these actions executes work. After correcting a row, fixing the cause, or accepting the partial result and reconciling external effects, rerun `Invoke-Migration` with the same run ID and compatible step definition. A changed generated step hash requires a new run ID. The dashboard does not have the live connections needed to start a scheduler.
+- None of these actions executes work. After correcting a row, fixing the cause, or accepting the partial result and reconciling external effects, rerun `Invoke-M4dMigration` with the same run ID and compatible step definition. A changed generated step hash requires a new run ID. The dashboard does not have the live connections needed to start a scheduler.
 
 Run-level failures record their phase and step when known, exception type, message, details, and attempts. Errors that occur before the run is created (for example, graph validation or source-count resolution) remain invocation errors and cannot appear in run history. The dashboard shows persisted run failures, failed-batch details, and can export batch outcomes as JSON; exports may contain business data.
 

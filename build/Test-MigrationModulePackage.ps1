@@ -117,9 +117,60 @@ if (-not $SkipImport) {
     Import-Module -Name $stagedManifestPath -Force -ErrorAction Stop
 
     try {
-        foreach ($commandName in @('Invoke-Migration', 'New-MigrationJobStore', 'Start-MigrationDashboard')) {
-            if (-not (Get-Command -Name $commandName -ErrorAction SilentlyContinue)) {
+        $expectedCommands = @(
+            'Invoke-M4dMigration'
+            'Get-M4dMigrationRun'
+            'Get-M4dMigrationStep'
+            'Get-M4dMigrationBatch'
+            'Get-M4dMigrationError'
+            'Get-M4dMigrationRetryHistory'
+            'Get-M4dMigrationDebugRow'
+            'Get-M4dMigrationDebugRowBinary'
+            'Get-M4dMigrationConfigurationPreview'
+            'Get-M4dMigrationProcessMetric'
+            'Get-M4dMigrationDataverseConnectionThroughput'
+            'Invoke-M4dMigrationRecovery'
+            'Clear-M4dMigrationTargetTuning'
+            'Start-M4dMigrationDatabaseServer'
+            'New-M4dMigrationBinaryValue'
+            'New-M4dMigrationJobStore'
+            'Complete-M4dMigrationBatch'
+            'Set-M4dMigrationRunStatus'
+            'Start-M4dMigrationDashboard'
+            'Stop-M4dMigrationDashboard'
+        )
+        $moduleCommands = @(Get-Command -Module Migration4Dataverse)
+        foreach ($commandName in $expectedCommands) {
+            if ($commandName -notin $moduleCommands.Name) {
                 throw "Imported module does not expose '$commandName'."
+            }
+        }
+
+        $legacyCommands = @(
+            'Invoke-Migration'
+            'Get-MigrationRun'
+            'Get-MigrationStep'
+            'Get-MigrationBatch'
+            'Get-MigrationError'
+            'Get-MigrationRetryHistory'
+            'Get-MigrationDebugRow'
+            'Get-MigrationDebugRowBinary'
+            'Get-MigrationConfigurationPreview'
+            'Get-MigrationProcessMetric'
+            'Get-MigrationDataverseConnectionThroughput'
+            'Invoke-MigrationRecovery'
+            'Clear-MigrationTargetTuning'
+            'Start-MigrationDatabaseServer'
+            'New-MigrationBinaryValue'
+            'New-MigrationJobStore'
+            'Complete-MigrationBatch'
+            'Set-MigrationRunStatus'
+            'Start-MigrationDashboard'
+            'Stop-MigrationDashboard'
+        )
+        foreach ($commandName in $legacyCommands) {
+            if ($commandName -in $moduleCommands.Name) {
+                throw "Imported module still exposes legacy command '$commandName'."
             }
         }
 

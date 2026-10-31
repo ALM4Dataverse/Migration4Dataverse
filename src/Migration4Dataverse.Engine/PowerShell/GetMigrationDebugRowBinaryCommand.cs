@@ -4,7 +4,7 @@ using Migration4Dataverse.Engine.Connectors;
 
 namespace Migration4Dataverse.Engine.PowerShell;
 
-[Cmdlet(VerbsCommon.Get, "MigrationDebugRowBinary")]
+[Cmdlet(VerbsCommon.Get, "M4dMigrationDebugRowBinary")]
 [OutputType(typeof(MigrationBinaryValue))]
 public sealed class GetMigrationDebugRowBinaryCommand : MigrationStoreCmdletBase
 {

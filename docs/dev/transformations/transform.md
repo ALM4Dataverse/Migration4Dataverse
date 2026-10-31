@@ -24,7 +24,7 @@ Transform is a standalone node; it is not an optional property on another step. 
 
 ## Database-backed migration graph transforms
 
-The separate `Invoke-Migration` graph supports SQLite and DuckDB transforms. The engine creates a database file beside `-DatabasePath`, keyed by provider, run ID, and transform step ID. The same run/step reuses its stable file when resumed; distinct runs and steps get distinct files. Do not provide a `ConnectionId` for a SQLite or DuckDB Transform. `Transform.InitializeSql` runs when the graph is created, before any records or batches are processed, and can create lookup or configuration tables used by the transform. It runs again when a compatible run is resumed, so make it idempotent. An inline SQLite `Script` receives the current row and its engine-managed database connection:
+The separate `Invoke-M4dMigration` graph supports SQLite and DuckDB transforms. The engine creates a database file beside `-DatabasePath`, keyed by provider, run ID, and transform step ID. The same run/step reuses its stable file when resumed; distinct runs and steps get distinct files. Do not provide a `ConnectionId` for a SQLite or DuckDB Transform. `Transform.InitializeSql` runs when the graph is created, before any records or batches are processed, and can create lookup or configuration tables used by the transform. It runs again when a compatible run is resumed, so make it idempotent. An inline SQLite `Script` receives the current row and its engine-managed database connection:
 
 ```powershell
 @{

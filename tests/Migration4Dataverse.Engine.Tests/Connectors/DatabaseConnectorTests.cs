@@ -504,7 +504,7 @@ public sealed class DatabaseConnectorTests
         powershell.Invoke();
         Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
         powershell.Commands.Clear();
-        powershell.AddCommand("Invoke-Migration")
+        powershell.AddCommand("Invoke-M4dMigration")
             .AddParameter("DatabasePath", files.GetPath("migration.sqlite"))
             .AddParameter("RunName", "SQLite database connectors")
             .AddParameter("RunId", "sqlite-database-connectors")
@@ -531,7 +531,7 @@ public sealed class DatabaseConnectorTests
         Assert.Equal(2L, Scalar<long>(managedTransform, "SELECT COUNT(*) FROM audit"));
 
         powershell.Commands.Clear();
-        var secondOutput = powershell.AddCommand("Invoke-Migration")
+        var secondOutput = powershell.AddCommand("Invoke-M4dMigration")
             .AddParameter("DatabasePath", files.GetPath("migration.sqlite"))
             .AddParameter("RunName", "SQLite database connectors second run")
             .AddParameter("RunId", "sqlite-database-connectors-second")
@@ -676,7 +676,7 @@ public sealed class DatabaseConnectorTests
         powershell.Invoke();
         Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
         powershell.Commands.Clear();
-        powershell.AddCommand("Invoke-Migration")
+        powershell.AddCommand("Invoke-M4dMigration")
             .AddParameter("DatabasePath", files.GetPath("migration.sqlite"))
             .AddParameter("RunName", "SQLite SQL transforms")
             .AddParameter("RunId", "sqlite-sql-transforms")
@@ -832,7 +832,7 @@ public sealed class DatabaseConnectorTests
         powershell.Invoke();
         Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
         powershell.Commands.Clear();
-        powershell.AddCommand("Invoke-Migration")
+        powershell.AddCommand("Invoke-M4dMigration")
             .AddParameter("DatabasePath", files.GetPath("migration.sqlite"))
             .AddParameter("RunName", "DuckDB prepared transform")
             .AddParameter("RunId", "duckdb-prepared-transform")

@@ -25,7 +25,7 @@ Start with the [repository README](../README.md) to install the module or build 
 ### Run and monitor
 
 - [Cmdlets and functions](./cmdlets/README.md) — command index.
-- [Invoke-Migration](./cmdlets/invoke-migration.md) — run, resume, preview, and debug capture.
+- [Invoke-M4dMigration](./cmdlets/invoke-migration.md) — run, resume, preview, and debug capture.
 - [Migration dashboard](./cmdlets/migration-dashboard.md) — local monitoring and row inspection.
 - [Run inspection and recovery](./cmdlets/migration-inspection-and-recovery.md) — inspect persisted status, errors, and rows or queue recovery from PowerShell.
 - [Batching and backpressure](./concepts/batching.md) — queue limits and concurrency behavior.
@@ -42,5 +42,5 @@ The C# engine is an internal implementation, not a supported public C# API. Thes
 - [Engine overview](./dev/engine-overview.md) — internal scheduler, development, and test workflow.
 - [Releasing](./dev/releasing.md) — module packaging, PowerShell Gallery publishing, and semantic-release workflow.
 - [Architecture](./dev/architecture.md) — persistence, scheduling, recovery, and component boundaries.
-- [Internal data-flow transformations](./dev/transformations/README.md) — the separate engine transformation pipeline, not `Invoke-Migration` step types.
+- [Internal data-flow transformations](./dev/transformations/README.md) — the separate engine transformation pipeline, not `Invoke-M4dMigration` step types.
 - [Feature plan](../PLAN.md) — implementation status and remaining work.

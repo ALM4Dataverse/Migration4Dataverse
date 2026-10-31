@@ -15,7 +15,7 @@ public sealed record MigrationErrorDetail(
     IReadOnlyList<MigrationDashboardRowError> RowErrors,
     MigrationRunFailure? RunFailure);
 
-[Cmdlet(VerbsCommon.Get, "MigrationError")]
+[Cmdlet(VerbsCommon.Get, "M4dMigrationError")]
 [OutputType(typeof(MigrationErrorDetail))]
 public sealed class GetMigrationErrorCommand : MigrationStoreCmdletBase
 {

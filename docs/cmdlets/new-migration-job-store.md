@@ -1,6 +1,6 @@
-# New-MigrationJobStore
+# New-M4dMigrationJobStore
 
-Opens a migration database store for advanced PowerShell integrations. Ordinary migrations should use `Invoke-Migration`, which manages the store automatically.
+Opens a migration database store for advanced PowerShell integrations. Ordinary migrations should use `Invoke-M4dMigration`, which manages the store automatically.
 
 ## Parameters
 
@@ -11,7 +11,7 @@ Opens a migration database store for advanced PowerShell integrations. Ordinary 
 ## Example
 
 ```powershell
-$store = New-MigrationJobStore -DatabasePath './state/migration.sqlite3'
+$store = New-M4dMigrationJobStore -DatabasePath './state/migration.sqlite3'
 ```
 
-The store resolves the path, creates its parent directory when needed, and initializes the SQLite schema through the database owner. The returned object is an implementation-level handle; use it only with the documented lower-level functions such as [`Complete-MigrationBatch`](./complete-migration-batch.md) and [`Set-MigrationRunStatus`](./set-migration-run-status.md).
+The store resolves the path, creates its parent directory when needed, and initializes the SQLite schema through the database owner. The returned object is an implementation-level handle; use it only with the documented lower-level functions such as [`Complete-M4dMigrationBatch`](./complete-migration-batch.md) and [`Set-M4dMigrationRunStatus`](./set-migration-run-status.md).

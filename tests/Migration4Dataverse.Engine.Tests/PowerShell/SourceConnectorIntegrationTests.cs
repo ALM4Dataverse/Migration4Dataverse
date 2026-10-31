@@ -289,7 +289,7 @@ public sealed class SourceConnectorIntegrationTests
         Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
 
         powershell.Commands.Clear();
-        powershell.AddCommand("Invoke-Migration")
+        powershell.AddCommand("Invoke-M4dMigration")
             .AddParameter("DatabasePath", databasePath)
             .AddParameter("RunName", "Source connector integration")
             .AddParameter("RunId", Guid.NewGuid().ToString("N"))

@@ -3,7 +3,7 @@ using Migration4Dataverse.Engine.Storage;
 
 namespace Migration4Dataverse.Engine.PowerShell;
 
-[Cmdlet(VerbsCommon.Get, "MigrationStep")]
+[Cmdlet(VerbsCommon.Get, "M4dMigrationStep")]
 [OutputType(typeof(MigrationDashboardStep))]
 public sealed class GetMigrationStepCommand : MigrationStoreCmdletBase
 {

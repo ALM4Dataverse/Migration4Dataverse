@@ -1,4 +1,4 @@
-# Clear-MigrationTargetTuning
+# Clear-M4dMigrationTargetTuning
 
 Removes legacy Dataverse tuning profiles from a migration SQLite database. Current migrations no longer read or write these values; the cmdlet is retained to clean up profiles created by older versions.
 
@@ -14,8 +14,8 @@ The cmdlet supports `-WhatIf` and `-Confirm`. It outputs the number of deleted p
 
 ```powershell
 # Clear one target's legacy profile.
-Clear-MigrationTargetTuning -DatabasePath './state/migration.sqlite3' -StepId 'AccountsTarget'
+Clear-M4dMigrationTargetTuning -DatabasePath './state/migration.sqlite3' -StepId 'AccountsTarget'
 
 # Clear all legacy profiles.
-Clear-MigrationTargetTuning -DatabasePath './state/migration.sqlite3' -All
+Clear-M4dMigrationTargetTuning -DatabasePath './state/migration.sqlite3' -All
 ```

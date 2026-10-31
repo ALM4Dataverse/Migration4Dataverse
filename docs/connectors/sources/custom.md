@@ -38,7 +38,7 @@ Source = @{
 
 Every page must contain no more than `PageSize` records. Diagnostics must go to a non-output stream such as `Write-Verbose`; additional success-stream output invalidates the page.
 
-Each record may contain a `MigrationBinaryValue`, `byte[]`, or readable `Stream`. The engine stages binary content separately before it enters the persisted migration queue. Prefer a stream or `New-MigrationBinaryValue -FilePath` for large files; avoid converting a file to a byte array or Base64 string unless the source API requires it.
+Each record may contain a `MigrationBinaryValue`, `byte[]`, or readable `Stream`. The engine stages binary content separately before it enters the persisted migration queue. Prefer a stream or `New-M4dMigrationBinaryValue -FilePath` for large files; avoid converting a file to a byte array or Base64 string unless the source API requires it.
 
 | Callback value | Type in the migration mapping |
 |---|---|

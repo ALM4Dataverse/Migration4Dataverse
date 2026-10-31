@@ -1,6 +1,6 @@
 # Migration basics
 
-A migration moves rows from one place to another. You describe the steps and how rows flow between them; `Invoke-Migration` runs those steps and manages the work.
+A migration moves rows from one place to another. You describe the steps and how rows flow between them; `Invoke-M4dMigration` runs those steps and manages the work.
 
 ## The main parts
 
@@ -21,7 +21,7 @@ Each step has an `Id`. Its `Inputs` names the step or steps that provide its row
 
 ## Connections: where steps find data
 
-A source or target's `ConnectionId` is a name that points to a runtime value supplied separately to `Invoke-Migration` with `-Connections`. For example, a step may say `ConnectionId = 'files'`, while the connection map associates `files` with a directory. A Dataverse connection ID points to an authenticated connection object.
+A source or target's `ConnectionId` is a name that points to a runtime value supplied separately to `Invoke-M4dMigration` with `-Connections`. For example, a step may say `ConnectionId = 'files'`, while the connection map associates `files` with a directory. A Dataverse connection ID points to an authenticated connection object.
 
 This keeps the migration definition separate from live objects and credentials. File connectors use a directory or exact file; SQLite and DuckDB use a database path, with connections created by the engine; SQL Server, PostgreSQL, MySQL, and Oracle use caller-supplied ADO.NET connections; object-storage connectors use provider clients; HTTP sources use a URI or `HttpClient`; MongoDB uses an `IMongoClient` or `IMongoDatabase`; and Dataverse uses a connection created with `Rnwood.Dataverse.Data.PowerShell`. Custom connectors can use a caller-provided connection object. SQLite and DuckDB transforms use engine-managed databases, while Dataverse transforms use a Dataverse connection.
 
