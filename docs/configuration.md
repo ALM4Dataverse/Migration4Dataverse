@@ -1,9 +1,17 @@
 # Migration step configuration
 
-`Invoke-M4dMigration -Steps` accepts PowerShell objects; native hashtables are the simplest way to define a migration. The definitions are not a standalone JSON or SSIS package. A migration is a directed acyclic graph whose nodes read, transform, route, or write rows.
+Migration definitions are executable PowerShell `.m4d` files that assign one root `$Migration` hashtable. Native hashtables are the simplest way to define the graph. The definitions are not a standalone JSON or SSIS package. A migration is a directed acyclic graph whose nodes read, transform, route, or write rows.
+
+Put the graph, named connections, run defaults, and optional lifecycle hooks in the `.m4d` file, then run it with the recommended CLI:
+
+```sh
+m4d run ./migration.m4d
+```
+
+The file defines `$Migration` and does not call the runner. Advanced PowerShell users can invoke the same file with [`Invoke-M4dMigration`](./cmdlets/invoke-migration.md).
 
 > [!NOTE]
-> Put live connection objects in `-Connections`, not in the step definitions. This keeps credentials and runtime objects separate from the configuration used for run history and resume checks.
+> Put live connection objects in `$Migration.Connections`, not in the step definitions. This keeps credentials and runtime objects separate from the configuration used for run history and resume checks.
 
 ## A small migration
 
@@ -52,9 +60,17 @@ $connections = @{
     crm = $dataverseConnection
 }
 
-Invoke-M4dMigration -DatabasePath './migration.sqlite3' `
-    -RunName 'Account import' -Steps $steps -Connections $connections
+$Migration = @{
+    Steps = $steps
+    Connections = $connections
+    RunOptions = @{
+        DatabasePath = './migration.sqlite3'
+        RunName = 'Account import'
+    }
+}
 ```
+
+Save this as `migration.m4d`. Run it with `m4d run ./migration.m4d`; explicit CLI options override matching `RunOptions` defaults. Advanced PowerShell use is `Invoke-M4dMigration -Path ./migration.m4d`.
 
 ## Node contract
 

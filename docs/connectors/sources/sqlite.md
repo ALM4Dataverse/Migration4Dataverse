@@ -28,10 +28,17 @@ $steps = @(
     }
 )
 
-Invoke-M4dMigration -DatabasePath './migration.sqlite3' `
-    -RunName 'SQLite read' -Steps $steps `
-    -Connections @{ 'sqlite-source' = $sourceFile }
+$Migration = @{
+    Steps = $steps
+    Connections = @{ 'sqlite-source' = $sourceFile }
+    RunOptions = @{
+        DatabasePath = './migration.sqlite3'
+        RunName = 'SQLite read'
+    }
+}
 ```
+
+Save this as a `.m4d` file and run it with `Invoke-M4dMigration -Path ./migration.m4d`.
 
 | Option | Default | Description |
 |---|---:|---|

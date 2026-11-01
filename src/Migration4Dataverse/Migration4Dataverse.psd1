@@ -16,13 +16,15 @@
     )
     FunctionsToExport = @(
         'New-M4dMigrationJobStore'
+        'New-M4dMigrationFile'
+        'Invoke-M4dMigration'
         'Complete-M4dMigrationBatch'
         'Set-M4dMigrationRunStatus'
         'Start-M4dMigrationDashboard'
         'Stop-M4dMigrationDashboard'
     )
     CmdletsToExport = @(
-        'Invoke-M4dMigration'
+        'Invoke-M4dMigrationGraph'
         'Get-M4dMigrationRun'
         'Get-M4dMigrationStep'
         'Get-M4dMigrationBatch'

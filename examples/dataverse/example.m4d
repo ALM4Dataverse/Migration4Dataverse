@@ -1,13 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if ($PSVersionTable.PSVersion -lt [version]'7.6') {
-    throw 'Migration4Dataverse targets PowerShell 7.6 or later (.NET 10).'
-}
-
-$repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $dataDirectory = Join-Path $PSScriptRoot 'generated-data'
-$runId = $env:M4D_RUN_ID
 $databasePath = Join-Path $dataDirectory 'migration.sqlite3'
 $null = [System.IO.Directory]::CreateDirectory($dataDirectory)
 $requiredFiles = @(
@@ -30,17 +24,9 @@ foreach ($fileName in $requiredFiles) {
     }
 }
 
-$moduleManifest = Join-Path $repositoryRoot 'src/Migration4Dataverse/Migration4Dataverse.psd1'
-Import-Module -Name $moduleManifest -Force -ErrorAction Stop
 $connections = @{
     'example-files' = [System.IO.DirectoryInfo]::new($dataDirectory)
 }
-$connectionProfileName = 'Migration4DataverseExample'
-Import-Module Rnwood.Dataverse.Data.PowerShell -MinimumVersion '3.3.0' -ErrorAction Stop
-$connections['example-dataverse'] = Get-DataverseConnection `
-    -Name $connectionProfileName `
-    -DisableAffinityCookie `
-    -ErrorAction Stop
 
 $steps = @(
     @{
@@ -935,46 +921,26 @@ $steps += @(
     }
 )
 
-$runName = 'Salesforce Kaggle sample dataset'
-
-$dashboard = Start-M4dMigrationDashboard -DatabasePath $databasePath
-try {
-    Write-Host 'Migration dashboard is available at:'
-    Write-Host "  $($dashboard.Url)"
-    # Dataverse target batch size and concurrency are fixed for the run; legacy tuning profiles are ignored.
-    # Clear legacy profiles from older versions with Clear-M4dMigrationTargetTuning if needed.
-    Invoke-M4dMigration `
-        -DatabasePath $databasePath `
-        -RunName $runName `
-        -RunId $runId `
-        -Steps $steps `
-        -Connections $connections `
-        -BatchSize 250 `
-        -MaxDegreeOfParallelism 32 `
-        -EnableDebugCapture `
-        -Verbose
-
-    if ([Console]::IsInputRedirected) {
-        Write-Host 'Migration completed.'
-    }
-    else {
-        Write-Host 'Migration completed. The dashboard remains open for run and row-trace inspection.'
-        Write-Host 'Press Enter to stop the dashboard server.'
-        $null = Read-Host
-    }
+$runOptions = @{
+    DatabasePath = $databasePath
+    RunName = 'Salesforce Kaggle sample dataset'
+    BatchSize = 250
+    MaxDegreeOfParallelism = 32
+    EnableDebugCapture = $true
 }
-catch {
-    if (-not [Console]::IsInputRedirected) {
-        Write-Host 'Migration failed. The dashboard remains open so you can inspect the failed run.'
-        Write-Host "  $($dashboard.Url)"
-    }
-    Write-Host $_
-    if (-not [Console]::IsInputRedirected) {
-        Write-Host 'Press Enter to stop the dashboard server.'
-        $null = Read-Host
-    }
-    throw
+if (-not [string]::IsNullOrWhiteSpace($env:M4D_RUN_ID)) {
+    $runOptions.RunId = $env:M4D_RUN_ID
 }
-finally {
-    Stop-M4dMigrationDashboard -Dashboard $dashboard
+
+$Migration = @{
+    Steps = $steps
+    Connections = $connections
+    RunOptions = $runOptions
+    PreRun = {
+        param($context)
+        $context.Connections['example-dataverse'] = Get-DataverseConnection `
+            -Name 'Migration4DataverseExample' `
+            -DisableAffinityCookie `
+            -ErrorAction Stop
+    }
 }

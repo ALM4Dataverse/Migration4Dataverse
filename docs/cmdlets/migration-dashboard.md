@@ -2,6 +2,8 @@
 
 `Start-M4dMigrationDashboard` starts the engine-hosted React single-page app and local HTTP API. The SPA uses React Flow for pipeline graphs. The dashboard is read-only except for explicit actions to queue failed batches for replay or approve continuing downstream from a selected failed step; it cannot start or resume a scheduler. `Stop-M4dMigrationDashboard` stops and disposes the returned server handle.
 
+The standalone CLI `run` command starts the dashboard automatically with the migration's effective database path and resolved steps/connections, including connections initialized by `PreRun`. It prints the URL and keeps the command open after the migration completes until Ctrl+C; use `--no-dashboard` for headless runs. The dashboard lifecycle is managed by the CLI, not by the `.m4d` definition. To run a dashboard independently, use `start-dashboard` with the same database path.
+
 ## Parameters
 
 ### Start-M4dMigrationDashboard
@@ -97,9 +99,15 @@ Snapshots carry deterministic lineage IDs, stage names, attempt numbers, batch/s
 
 ## Dataverse example
 
-The [Dataverse example setup](../../examples/dataverse/Setup-Example.ps1) prepares the dataset and connection profile; then run the [Dataverse migration](../../examples/dataverse/example.ps1). It starts the dashboard while the example imports the dataset and streams its sidecar-backed file attachment to Dataverse.
+The [Dataverse example setup](../../examples/dataverse/Setup-Example.ps1) prepares the dataset and connection profile. The [Dataverse migration](../../examples/dataverse/example.m4d) does not manage the dashboard; the CLI starts it automatically when running the migration:
 
-Open the printed `http://127.0.0.1:5180` URL while the sample runs. The dashboard remains available after completion until the example exits.
+```sh
+m4d run ./examples/dataverse/example-sequential.m4d
+```
+
+The CLI prints the dashboard URL before the migration starts and keeps the dashboard available after completion until Ctrl+C. Use `--no-dashboard` for a headless run. The migration imports the dataset and streams its sidecar-backed file attachment to Dataverse.
+
+Open the printed `http://127.0.0.1:5180` URL while the sample runs. The dashboard remains available after migration completion until its CLI process exits.
 
 ## HTTP API
 

@@ -119,6 +119,7 @@ if (-not $SkipImport) {
     try {
         $expectedCommands = @(
             'Invoke-M4dMigration'
+            'Invoke-M4dMigrationGraph'
             'Get-M4dMigrationRun'
             'Get-M4dMigrationStep'
             'Get-M4dMigrationBatch'
@@ -134,6 +135,7 @@ if (-not $SkipImport) {
             'Start-M4dMigrationDatabaseServer'
             'New-M4dMigrationBinaryValue'
             'New-M4dMigrationJobStore'
+            'New-M4dMigrationFile'
             'Complete-M4dMigrationBatch'
             'Set-M4dMigrationRunStatus'
             'Start-M4dMigrationDashboard'
@@ -144,6 +146,90 @@ if (-not $SkipImport) {
             if ($commandName -notin $moduleCommands.Name) {
                 throw "Imported module does not expose '$commandName'."
             }
+        }
+        if ((Get-Command Invoke-M4dMigration -Module Migration4Dataverse).CommandType -ne 'Function' -or
+            'Invoke-M4dMigrationFile' -in $moduleCommands.Name) {
+            throw 'The module must expose the file runner as Invoke-M4dMigration and remove the separate file command.'
+        }
+
+        $lifecycleTestDirectory = Join-Path ([System.IO.Path]::GetTempPath()) (
+            'M4dMigrationFileTest-{0}' -f [guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $lifecycleTestDirectory
+        try {
+            $definitionPath = Join-Path $lifecycleTestDirectory 'lifecycle.m4d'
+            $markerPath = Join-Path $lifecycleTestDirectory 'post-run.txt'
+            $parametersPath = Join-Path $lifecycleTestDirectory 'parameters.txt'
+            $definition = @"
+`$Migration = @{
+    Steps = @(@{ Id = 'Source'; Type = 'source' })
+    RunOptions = @{
+        DatabasePath = 'file-default.sqlite'
+        RunName = 'file-default'
+    }
+    PreRun = {
+        param(`$context)
+        [System.IO.File]::WriteAllText(
+            '$parametersPath',
+            "`$(`$context.Parameters.DatabasePath)|`$(`$context.Parameters.RunName)")
+        throw 'pre-run test failure'
+    }
+    PostRun = { [System.IO.File]::WriteAllText('$markerPath', 'post-ran') }
+}
+"@
+            [System.IO.File]::WriteAllText($definitionPath, $definition)
+            try {
+                Invoke-M4dMigration -Path $definitionPath `
+                    -DatabasePath (Join-Path $lifecycleTestDirectory 'unused.sqlite') `
+                    -RunName 'ModulePackageLifecycleTest'
+                throw 'Expected the pre-run hook in the package smoke test to fail.'
+            }
+            catch {
+                if ($_.Exception.Message -notmatch 'Migration lifecycle failed: PreRun failed') {
+                    throw "Unexpected migration file test failure: $_"
+                }
+            }
+            if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf) -or
+                [System.IO.File]::ReadAllText($markerPath) -ne 'post-ran') {
+                throw 'Invoke-M4dMigration did not run PostRun after PreRun failed.'
+            }
+            $expectedParameters = "$(Join-Path $lifecycleTestDirectory 'unused.sqlite')|ModulePackageLifecycleTest"
+            if ([System.IO.File]::ReadAllText($parametersPath) -ne $expectedParameters) {
+                throw 'Explicit Invoke-M4dMigration parameters did not override .m4d RunOptions.'
+            }
+
+            $templatePath = Join-Path $lifecycleTestDirectory 'new-migration.m4d'
+            New-M4dMigrationFile -Path $templatePath -WhatIf
+            if (Test-Path -LiteralPath $templatePath) {
+                throw 'New-M4dMigrationFile -WhatIf created the file.'
+            }
+            New-M4dMigrationFile -Path $templatePath
+            $template = [System.IO.File]::ReadAllText($templatePath)
+            foreach ($requiredText in @('$Migration = @{', 'RunOptions = @{', 'PreRun = {', 'PostRun = {')) {
+                if (-not $template.Contains($requiredText, [StringComparison]::Ordinal)) {
+                    throw "The generated migration template is missing '$requiredText'."
+                }
+            }
+            $templateTokens = $null
+            $templateErrors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile(
+                $templatePath,
+                [ref]$templateTokens,
+                [ref]$templateErrors)
+            if ($templateErrors.Count -gt 0) {
+                throw "The generated migration template has parse errors: $($templateErrors.Message -join '; ')"
+            }
+            try {
+                New-M4dMigrationFile -Path $templatePath
+                throw 'New-M4dMigrationFile overwrote an existing file without -Force.'
+            }
+            catch {
+                if ($_.Exception.Message -notmatch 'already exists') {
+                    throw
+                }
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $lifecycleTestDirectory -Recurse -Force
         }
 
         $legacyCommands = @(

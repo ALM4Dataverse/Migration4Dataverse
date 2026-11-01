@@ -1,10 +1,11 @@
 # Documentation
 
-Choose the section that matches what you are doing. The PowerShell guides describe the supported migration workflow; the developer guides describe repository internals.
+The self-contained CLI is the recommended way to install and run migrations. The PowerShell module and cmdlet references are for advanced interactive use and custom integrations. The developer guides describe repository internals.
 
-## PowerShell users
+## Start here: CLI users
 
-Start with the [repository README](../README.md) to install the module or build it from a source checkout, then run an example.
+- [Standalone CLI](./cli.md) — download and run the zero-prerequisite executable, define a `.m4d` file, and use CLI commands.
+- [Repository README](../README.md) — quick start, motivations, features, and runnable examples.
 
 ### Define a migration
 
@@ -24,12 +25,17 @@ Start with the [repository README](../README.md) to install the module or build 
 
 ### Run and monitor
 
-- [Standalone CLI](./cli.md) — bundled runtimes, commands, options, output, and exit codes.
+- [Migration dashboard](./cmdlets/migration-dashboard.md) — local monitoring and row inspection.
+- [Run inspection and recovery](./cmdlets/migration-inspection-and-recovery.md) — inspect persisted status, errors, and rows or queue recovery from the CLI or PowerShell.
+- [Batching and backpressure](./concepts/batching.md) — queue limits and concurrency behavior.
+
+## Advanced PowerShell interface
+
+Use the module when you want an interactive PowerShell workflow, custom orchestration, or direct cmdlet access:
+
 - [Cmdlets and functions](./cmdlets/README.md) — command index.
 - [Invoke-M4dMigration](./cmdlets/invoke-migration.md) — run, resume, preview, and debug capture.
-- [Migration dashboard](./cmdlets/migration-dashboard.md) — local monitoring and row inspection.
-- [Run inspection and recovery](./cmdlets/migration-inspection-and-recovery.md) — inspect persisted status, errors, and rows or queue recovery from PowerShell.
-- [Batching and backpressure](./concepts/batching.md) — queue limits and concurrency behavior.
+- [New-M4dMigrationFile](./cmdlets/new-migration-file.md) — create a commented `.m4d` definition template.
 - [PowerShell reference](./reference.md) — supported migration contract, organized by topic.
 
 > [!NOTE]

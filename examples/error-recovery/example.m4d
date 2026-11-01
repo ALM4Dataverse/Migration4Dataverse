@@ -1,0 +1,82 @@
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$dataDirectory = Join-Path $PSScriptRoot 'generated-data'
+$outputDirectory = Join-Path $dataDirectory 'output'
+$databasePath = Join-Path $dataDirectory 'migration.sqlite3'
+$sourcePath = Join-Path $dataDirectory 'rows.jsonl'
+$null = [System.IO.Directory]::CreateDirectory($dataDirectory)
+if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+    $rows = @(
+        '{"SourceId":"transform-row","RecordId":"00000000-0000-0000-0000-000000000001","Name":"transform-error"}'
+        '{"SourceId":"survivor-row","RecordId":"00000000-0000-0000-0000-000000000005","Name":"survivor"}'
+    )
+    [System.IO.File]::WriteAllLines(
+        $sourcePath,
+        $rows,
+        [System.Text.UTF8Encoding]::new($false))
+}
+
+$null = [System.IO.Directory]::CreateDirectory($outputDirectory)
+$connections = @{
+    files = [System.IO.DirectoryInfo]$dataDirectory
+    target = [System.IO.DirectoryInfo]$outputDirectory
+}
+
+$Migration = @{
+    Steps = @(
+        @{
+            Id = 'Rows'
+            Type = 'source'
+            Inputs = @()
+            Source = @{
+                Type = 'file'
+                Format = @{ Type = 'jsonl' }
+                ConnectionId = 'files'
+                Path = 'rows.jsonl'
+                Key = 'SourceId'
+                Id = 'RecordId'
+            }
+        }
+        @{
+            Id = 'Transform'
+            Type = 'transform'
+            Inputs = @('Rows')
+            Script = {
+                param($row)
+                if ($row.Name -eq 'transform-error') {
+                    throw 'Edit or retry the transform-error row to continue.'
+                }
+                $row
+            }
+        }
+        @{
+            Id = 'Filter'
+            Type = 'filter'
+            Inputs = @('Transform')
+            Script = {
+                $true
+            }
+        }
+        @{
+            Id = 'Target'
+            Type = 'target'
+            Inputs = @('Filter')
+            Target = @{
+                Type = 'file'
+                Format = @{ Type = 'jsonl' }
+                ConnectionId = 'target'
+                Path = 'recovered-rows.jsonl'
+            }
+        }
+    )
+    Connections = $connections
+    RunOptions = @{
+        DatabasePath = $databasePath
+        RunName = 'Transform row error recovery'
+        BatchSize = 1
+        MaxAttempts = 1
+        MaxDegreeOfParallelism = 1
+        EnableDebugCapture = $true
+    }
+}

@@ -6,7 +6,8 @@ Use `Invoke-M4dMigration` to run a migration. The inspection and recovery comman
 
 | Command | Kind | Reference |
 |---|---|---|
-| `Invoke-M4dMigration` | Binary cmdlet | [Invoke-M4dMigration](./invoke-migration.md) |
+| `Invoke-M4dMigration` | Function | [Invoke-M4dMigration](./invoke-migration.md) |
+| `New-M4dMigrationFile` | Function | [New-M4dMigrationFile](./new-migration-file.md) |
 | `Get-M4dMigrationRun` | Binary cmdlet | [Get-M4dMigrationRun](./get-migration-run.md) |
 | `Get-M4dMigrationStep`, `Get-M4dMigrationBatch`, `Get-M4dMigrationError`, `Get-M4dMigrationRetryHistory` | Binary cmdlets | [Inspecting runs and recovering from errors](./migration-inspection-and-recovery.md) |
 | `Get-M4dMigrationDebugRow`, `Get-M4dMigrationDebugRowBinary` | Binary cmdlets | [Inspecting runs and recovering from errors](./migration-inspection-and-recovery.md) |
@@ -27,3 +28,5 @@ These functions are exported for integrations that work directly with the migrat
 | `New-M4dMigrationJobStore` | [New-M4dMigrationJobStore](./new-migration-job-store.md) |
 | `Complete-M4dMigrationBatch` | [Complete-M4dMigrationBatch](./complete-migration-batch.md) |
 | `Set-M4dMigrationRunStatus` | [Set-M4dMigrationRunStatus](./set-migration-run-status.md) |
+
+`Invoke-M4dMigrationGraph` is also exported for advanced integrations that supply graph objects directly. It exposes the internal graph engine rather than the supported `.m4d` file contract; use [`Invoke-M4dMigration`](./invoke-migration.md) for ordinary migrations. Its CLI action is grouped under `advanced`.

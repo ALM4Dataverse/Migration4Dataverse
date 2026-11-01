@@ -45,7 +45,7 @@ The dashboard visually arranges these objects as a graph and charts; the cmdlets
 
 ## Queueing recovery actions
 
-`Invoke-M4dMigrationRecovery` persists one operator decision. It does not execute a migration. It supports `-WhatIf` and `-Confirm`; after queueing an action, rerun `Invoke-M4dMigration` with the same run ID and compatible step definitions.
+`Invoke-M4dMigrationRecovery` persists one operator decision. It does not execute a migration. It supports `-WhatIf` and `-Confirm`; after queueing an action, rerun the same `.m4d` file with the same run ID and compatible step definitions.
 
 Queue all failed batches for replay:
 
@@ -54,8 +54,8 @@ Invoke-M4dMigrationRecovery -DatabasePath $databasePath -RunId $runId `
     -RetryFailedBatches -WhatIf
 Invoke-M4dMigrationRecovery -DatabasePath $databasePath -RunId $runId `
     -RetryFailedBatches
-Invoke-M4dMigration -DatabasePath $databasePath -RunName $runName -RunId $runId `
-    -Steps $steps -Connections $connections
+Invoke-M4dMigration -Path $migrationPath -DatabasePath $databasePath `
+    -RunName $runName -RunId $runId
 ```
 
 Edit and queue one exactly attributed row. This is available for failed Transform, Filter, and callback rows when their handlers reported an exact input index. The edited JSON must be an object; successful sibling rows and upstream work are not replayed.
@@ -70,8 +70,8 @@ $payloadJson = ConvertTo-Json -InputObject $payload -Depth 100 -Compress
 Invoke-M4dMigrationRecovery -DatabasePath $databasePath -RunId $runId `
     -StepId $error.StepId -BatchId $error.BatchId `
     -RecordIndex $rowError.RecordIndex -PayloadJson $payloadJson
-Invoke-M4dMigration -DatabasePath $databasePath -RunName $runName -RunId $runId `
-    -Steps $steps -Connections $connections
+Invoke-M4dMigration -Path $migrationPath -DatabasePath $databasePath `
+    -RunName $runName -RunId $runId
 ```
 
 Approve continuation past a failed step when the remaining unread or failed work should be skipped:
@@ -79,8 +79,8 @@ Approve continuation past a failed step when the remaining unread or failed work
 ```powershell
 Invoke-M4dMigrationRecovery -DatabasePath $databasePath -RunId $runId `
     -StepId 'Source' -ContinueAfterFailure
-Invoke-M4dMigration -DatabasePath $databasePath -RunName $runName -RunId $runId `
-    -Steps $steps -Connections $connections
+Invoke-M4dMigration -Path $migrationPath -DatabasePath $databasePath `
+    -RunName $runName -RunId $runId
 ```
 
 Source-reader failures are shown as run-level errors. Batch-level failures, including unattributed target errors, can be replayed or continued past, but cannot use row-only retry. A row retry, replay, or continuation may repeat external side effects; reconcile them and use idempotent handlers where possible. See [error handling and recovery](../concepts/recovery-and-replay.md) for the full execution and downstream semantics.
@@ -97,4 +97,4 @@ Source-reader failures are shown as run-level errors. Batch-level failures, incl
 | Target | Connector write failures are batch-level unless a handler explicitly reports safe per-row attribution. | Replay failed batches or continue past the target step; row-only retry is unavailable for unattributed bulk failures. |
 | Callback | A callback can report exact input indices in `MigrationBatchResult.RowErrors`, or fail as a whole batch/source reader. | Edit and retry attributed rows; replay batch failures; continue past source-reader or step failures. |
 
-Run the offline [error-recovery example](../../examples/error-recovery/example.ps1) with its [setup script](../../examples/error-recovery/Setup-Example.ps1) to inspect source-reader errors, edit and retry Transform/Filter/callback rows, and replay a failed Target batch in the dashboard and cmdlets. Append and Join are built-in structural operators without user callbacks; their normal input data does not generate an operator error. If a batch-processing error occurs there, the same batch replay or step-continuation options apply, while errors from upstream steps remain attributed to those steps.
+Run the offline [Transform recovery migration](../../examples/error-recovery/example.m4d) and [Filter recovery migration](../../examples/error-recovery/example-filter.m4d). Each creates its small input dataset if needed; the optional [setup script](../../examples/error-recovery/Setup-Example.ps1) resets both datasets. Use `m4d get-error` to inspect the intentional row failure, then `m4d invoke-recovery` to queue its corrected payload and rerun with the same `--run-id`. The standalone CLI exposes the recovery operations used by this guide; the PowerShell cmdlets are available for advanced integrations. Append and Join are built-in structural operators without user callbacks; their normal input data does not generate an operator error. If a batch-processing error occurs there, the same batch replay or step-continuation options apply, while errors from upstream steps remain attributed to those steps.
