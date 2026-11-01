@@ -13,7 +13,10 @@ if ([string]::IsNullOrWhiteSpace($env:PSGALLERY_API_KEY)) {
 }
 
 $testScriptPath = Join-Path $PSScriptRoot 'Test-MigrationModulePackage.ps1'
-$packagePath = & $testScriptPath -Version $Version -SkipBuild
+$repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$packageOutputPath = Join-Path $repositoryRoot 'artifacts/packages'
+$null = & $testScriptPath -Version $Version -SkipBuild -OutputPath $packageOutputPath
+$packagePath = Join-Path $packageOutputPath "Migration4Dataverse.$Version.nupkg"
 if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
     throw "The package '$packagePath' was not created."
 }
