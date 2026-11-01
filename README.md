@@ -208,7 +208,13 @@ Pass `--run-id` with the same ID to resume either example.
 
 To start a standalone dashboard, run `start-dashboard` with the same `--database-path`; it remains in the foreground until Ctrl+C. See the [dashboard guide](./docs/cmdlets/migration-dashboard.md) for configuration previews, row inspection, data retention, and local-access limitations.
 
-![Migration4Dataverse dashboard showing the dependency graph, captured rows, and selected-row lineage](./docs/assets/migration-dashboard-running.png)
+| Follow a running migration in the dependency graph | Monitor step status in the table |
+|---|---|
+| ![Running migration graph with step progress and dependencies](./docs/assets/dashboard-graph-selected.png) | ![Running migration table with per-step status, row counts, batches, and throughput](./docs/assets/dashboard-table-view.png) |
+| Inspect and search captured rows | Select a row to trace its values and lineage across steps |
+| ![Captured row inspector with stage tabs, a row search field, and row values](./docs/assets/dashboard-step-inspection.png) | ![Selected row highlighted across the migration graph with captured row details below](./docs/assets/migration-dashboard-running.png) |
+
+Select a failed status or failed-batch count to inspect recorded errors. The dashboard can also queue an edited row for retry, replay failed batches, or approve continuing downstream from a failed step; see [dashboard error handling and recovery](./docs/cmdlets/migration-dashboard.md) and the runnable [offline error-recovery example](./examples/error-recovery/example.m4d).
 
 ## Documentation
 
