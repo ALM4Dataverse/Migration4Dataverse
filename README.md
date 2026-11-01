@@ -4,22 +4,24 @@
 
 # Migration4Dataverse
 
-**PowerShell migrations for Microsoft Dataverse and local data pipelines.**
+**A flexible, fast, zero-prerequisite migration engine optimized for Microsoft Dataverse.**
 
 > [!WARNING]
 > This repository is an early proof of concept, not a production-ready migration product. Review the examples and test them against a non-production environment before using them with real data.
 
-Migration4Dataverse lets you describe a migration as PowerShell steps and run it with `Invoke-M4dMigration`. Source and target connections are supplied separately from the step definitions. The engine handles batching, dependencies, local run history, and recovery.
+Migration4Dataverse lets you describe a migration in a readable `.m4d` file and run it with the self-contained `m4d` CLI. Source and target connections are supplied separately from the step definitions. The engine handles batching, dependencies, local run history, and recovery.
 
 Supported connectors include local files (CSV, JSON Lines, Parquet, Excel, binary, and custom formats), Azure Blob, Amazon S3, Azure Data Lake Storage Gen2, Google Cloud Storage, SQLite, DuckDB, SQL Server, PostgreSQL, MySQL, Oracle, HTTP/OData, Salesforce Sales Cloud, SharePoint, HubSpot, Zendesk, ServiceNow, MongoDB, Dataverse, and custom PowerShell callbacks. A local dashboard can show run progress, outcomes, and optional captured-row lineage.
 
 ## Why Migration4Dataverse?
 
-Dataverse migrations are often specific to an organization's data model: each job may need its own mappings, table dependencies, and custom handling. The goal is to make that logic transparent and adaptable without asking every project to build its own orchestration and recovery machinery.
+Migration4Dataverse is being built as a flexible, fast, and easy-to-install engine optimized for Microsoft Dataverse, while also supporting local files, databases, APIs, and other services. The standalone CLI bundles its runtimes and modules, so users can run migrations without first installing .NET, PowerShell, or a Migration4Dataverse module.
 
-Migration definitions, row mappings, and custom callbacks are ordinary PowerShell scripts. They can be read, reviewed, versioned, and changed without compiling an extension for each transformation. PowerShell remains the flexible orchestration surface; the runtime supplies bounded batching, dependency coordination, persisted run state, checkpoints, and recovery so those mechanics do not have to be reimplemented in every migration.
+Dataverse migrations are often specific to an organization's data model: each job may need its own mappings, table dependencies, and custom handling. `.m4d` definitions keep that logic transparent and adaptable without asking each project to build its own orchestration and recovery machinery. The format is executable PowerShell, so mappings and callbacks remain easy to review and extend without compiling an extension for each transformation.
 
-The project is also intended to run locally without SSIS, a separate SQL Server, or an Azure-hosted execution service. Embedded SQLite and DuckDB can provide local staging and SQL-based processing. A local SQLite owner can coordinate store access for multiple PowerShell processes, while migration work stays in those callers; see [`Start-M4dMigrationDatabaseServer`](./docs/cmdlets/migration-database-server.md).
+The project is designed for the age of AI coding agents as well as human developers: migration files are plain-text, structured, and generated from a complete commented template, making them straightforward to create, inspect, review, and modify. The runtime supplies bounded batching, dependency coordination, persisted run state, checkpoints, and recovery so that those mechanics do not need to be reimplemented in every migration.
+
+Migrations run locally without SSIS, a separate SQL Server, or an Azure-hosted execution service. Embedded SQLite and DuckDB can provide local staging and SQL-based processing.
 
 > [!NOTE]
 > This is a single-machine migration tool, not a distributed scale-out platform.
@@ -32,56 +34,41 @@ The project is also intended to run locally without SSIS, a separate SQL Server,
 - Extend the engine with custom PowerShell connectors and streaming file-format readers and writers.
 - Move binary attachments through file-backed values, sidecars, and Dataverse File/Image or document connectors; mappings can pass values through or apply Base64, JSON-stream, and MIME-type transformations.
 
-## Install
+## Recommended: install the standalone CLI
 
-Install the module from the PowerShell Gallery:
+Download the executable matching your operating system and CPU architecture from [GitHub Releases](https://github.com/rnwood/Migration4Dataverse/releases). It includes .NET, PowerShell, Migration4Dataverse, and the Dataverse connector module; no runtime or module installation is needed on the target machine.
+
+```sh
+# On Linux/macOS, make the downloaded executable runnable.
+chmod +x ./Migration4Dataverse.Cli-linux-x64
+./Migration4Dataverse.Cli-linux-x64 --help
+./Migration4Dataverse.Cli-linux-x64 new-file --path ./migration-job.m4d
+./Migration4Dataverse.Cli-linux-x64 run ./migration-job.m4d
+```
+
+See the [standalone CLI guide](./docs/cli.md) for supported platforms, commands, JSON events, and exit codes.
+Release assets have platform-specific filenames; these examples use the Linux x64 asset. Rename it to `m4d` or substitute the matching full path for your platform.
+
+### Advanced: PowerShell module
+
+Use the PowerShell Gallery module when you need an interactive PowerShell workflow, custom orchestration, or direct cmdlet access. It requires PowerShell 7.6 or later (.NET 10); its Dataverse module dependency is installed automatically:
 
 ```powershell
 Install-Module Migration4Dataverse -Scope CurrentUser
+Invoke-M4dMigration -Path ./migration-job.m4d
 ```
-
-The Gallery package requires PowerShell 7.6 or later and installs the required `Rnwood.Dataverse.Data.PowerShell` connector (3.3.0 or later) as a dependency.
-
-## Standalone CLI
-
-Releases also provide a single-file CLI for Windows x64/ARM64, Linux x64/ARM64, and macOS ARM64. It bundles pinned .NET 10, PowerShell 7.6.7, and Dataverse PowerShell 3.3.0; no runtime or module installation is needed, and the executable can run offline after download.
-Release assets have platform-specific filenames; rename the downloaded executable to `m4d` or use its full path in the examples below.
-
-```sh
-m4d --help
-m4d run --script ./migration-job.ps1 --database-path ./migration.sqlite3
-m4d get-run --database-path ./migration.sqlite3 --run-id <run-id> --json
-```
-
-See the [standalone CLI guide](./docs/cli.md) for script modes, commands, JSON events, and exit codes.
 
 ## Quick start
 
-The repository examples run from a source checkout. Building from source requires PowerShell 7.6 or later, the .NET 10 SDK, and Node.js 24 or later with npm 11 or later to build the dashboard assets. Build the module, install the Dataverse connector module, and run the Dataverse example from the repository root:
+Create a commented starter file, edit its `$Migration` definition, and run it:
 
-```powershell
-dotnet build Migration4Dataverse.slnx --configuration Release
-Install-Module Rnwood.Dataverse.Data.PowerShell -MinimumVersion 3.3.0 -Scope CurrentUser
-pwsh ./examples/dataverse/Setup-Example.ps1
-pwsh ./examples/dataverse/example.ps1
+```sh
+./Migration4Dataverse.Cli-linux-x64 new-file --path ./migration-job.m4d
+# Edit migration-job.m4d to define its source, steps, and target.
+./Migration4Dataverse.Cli-linux-x64 run ./migration-job.m4d --database-path ./migration.sqlite3
 ```
 
-> [!NOTE]
-> The examples import the PowerShell module from this checkout. Build the solution in Release configuration before running them.
-
-To exercise error inspection and recovery locally without an external service:
-
-```powershell
-pwsh ./examples/error-recovery/Setup-Example.ps1
-pwsh ./examples/error-recovery/example.ps1
-```
-
-> [!NOTE]
-> The module manifest requires `Rnwood.Dataverse.Data.PowerShell` 3.3.0 or later even for offline examples. Install it with `Install-Module Rnwood.Dataverse.Data.PowerShell -MinimumVersion 3.3.0 -Scope CurrentUser` if you have not already.
-
-The recovery example pauses after each expected failure so you can inspect it in the dashboard before applying the demonstrated cmdlet action.
-
-The setup script downloads the sample dataset, creates a JSONL sidecar reference and a generated text attachment, and prepares the Dataverse connection and File column. The migration maps the attachment to that account and streams it to Dataverse.
+No separate PowerShell, .NET, or module installation is required for these CLI commands. See the [CLI guide](./docs/cli.md) for options and the `.m4d` file contract.
 
 ## Define a migration
 
@@ -141,11 +128,23 @@ $connections = @{
     crm = $dataverseConnection
 }
 
-Invoke-M4dMigration -DatabasePath './migration.sqlite3' `
-    -RunName 'Account import' -Steps $steps -Connections $connections
+$Migration = @{
+    Steps = $steps
+    Connections = $connections
+    RunOptions = @{
+        DatabasePath = './migration.sqlite3'
+        RunName = 'Account import'
+    }
+}
 ```
 
-Create `$dataverseConnection` with `Rnwood.Dataverse.Data.PowerShell`; the Dataverse example below shows how to load a saved connection profile.
+Save this definition as `migration-job.m4d`, then run it with the CLI:
+
+```sh
+m4d run ./migration-job.m4d
+```
+
+The [Dataverse example](./examples/dataverse/example.m4d) shows how a `PreRun` hook loads a saved connection profile.
 
 The `ConnectionId` values in the steps are names, not credentials or open connections. The actual values are passed separately in `-Connections`: here, `files` points to a folder and `crm` is an authenticated Dataverse connection. This keeps runtime connection details separate from the migration definition.
 
@@ -153,52 +152,67 @@ Start with the [migration basics](./docs/concepts/migration-basics.md) for a pla
 
 ## Example migrations
 
+These runnable examples use the supported `.m4d` contract and the CLI.
+
 The Dataverse examples use the full [Sample Sales CRM Data](https://www.kaggle.com/datasets/sushicatsan/sample-sales-crm-data) dataset. Setup also generates a roughly 1 MB text attachment beside a JSONL reference, keeping the file bytes out of the structured record.
 
 | Target | Example | Setup | Demonstrates |
 |---|---|---|---|
-| Dataverse | [example.ps1](./examples/dataverse/example.ps1) | [Setup-Example.ps1](./examples/dataverse/Setup-Example.ps1) | Imports a multi-table dataset with keyed joins; resolves a JSONL sidecar into a file-backed value, detects its MIME type, and uploads a streamed replacement to a Dataverse File column. |
-| Dataverse (sequential) | [example-sequential.ps1](./examples/dataverse/example-sequential.ps1) | [Setup-Example.ps1](./examples/dataverse/Setup-Example.ps1) | Uses completion dependencies and alternate keys, then passes the same sidecar-backed value unchanged to a Dataverse File column. |
-| Local files (offline) | [example.ps1](./examples/error-recovery/example.ps1) | [Setup-Example.ps1](./examples/error-recovery/Setup-Example.ps1) | Inspects and recovers from source-reader, Transform, Filter, Target, and callback errors with the dashboard and PowerShell cmdlets. |
+| Dataverse | [example.m4d](./examples/dataverse/example.m4d) | [Setup-Example.ps1](./examples/dataverse/Setup-Example.ps1) | Imports a multi-table dataset with keyed joins; resolves a JSONL sidecar into a file-backed value, detects its MIME type, and uploads a streamed replacement to a Dataverse File column. |
+| Dataverse (sequential) | [example-sequential.m4d](./examples/dataverse/example-sequential.m4d) | [Setup-Example.ps1](./examples/dataverse/Setup-Example.ps1) | Uses completion dependencies and alternate keys, then passes the same sidecar-backed value unchanged to a Dataverse File column. |
+| Local files (offline) | [example.m4d](./examples/error-recovery/example.m4d) | Optional [Setup-Example.ps1](./examples/error-recovery/Setup-Example.ps1) | Captures a Transform row error for inspection and retry through CLI recovery commands. |
+| Local files (offline) | [example-filter.m4d](./examples/error-recovery/example-filter.m4d) | Optional [Setup-Example.ps1](./examples/error-recovery/Setup-Example.ps1) | Captures a Filter row error for inspection and retry through CLI recovery commands. |
 
-Run setup and migration from the repository root:
+Run the local example without an external service or PowerShell setup step:
 
-```powershell
-pwsh ./examples/dataverse/Setup-Example.ps1
-pwsh ./examples/dataverse/example.ps1
+```sh
+./Migration4Dataverse.Cli-linux-x64 run ./examples/error-recovery/example.m4d --run-id error-recovery-demo
+./Migration4Dataverse.Cli-linux-x64 get-error --database-path ./examples/error-recovery/generated-data/migration.sqlite3 \
+  --run-id error-recovery-demo
+./Migration4Dataverse.Cli-linux-x64 run ./examples/error-recovery/example-filter.m4d --run-id filter-recovery-demo
 ```
 
-## Dataverse example
+Use `get-error` to identify the failed batch and row, then `invoke-recovery` to queue a corrected payload. Rerun the same `.m4d` file with the same `--run-id`.
 
-The Dataverse setup downloads the pinned sample dataset and stores a device-code-authenticated connection profile named `Migration4DataverseExample`. The migration imports nine CSV files and writes records to the configured organization. It also creates or customizes Dataverse tables, alternate keys, and an account File column, so use a test organization and review the setup script before running it. The generated attachment is a separate file referenced from JSONL; the primary example streams it through a mapping that detects MIME type, while the sequential example passes it through unchanged.
-
-Install the required PowerShell module (version 3.3.0 or later), then set up and run the sample:
+For Dataverse, first prepare a test organization and sample dataset with the setup script, then run either migration file:
 
 ```powershell
+# Dataset/org setup is a separate PowerShell preparation script, not a migration file.
 Install-Module Rnwood.Dataverse.Data.PowerShell -MinimumVersion 3.3.0 -Scope CurrentUser
 pwsh ./examples/dataverse/Setup-Example.ps1
-pwsh ./examples/dataverse/example.ps1
 ```
+
+```sh
+./Migration4Dataverse.Cli-linux-x64 run ./examples/dataverse/example.m4d
+./Migration4Dataverse.Cli-linux-x64 run ./examples/dataverse/example-sequential.m4d
+```
+
+The setup uses PowerShell 7.6 or later and the Dataverse PowerShell module because it provisions the connection profile and Dataverse metadata. The self-contained CLI needs no runtime prerequisites to run the migration itself. The Dataverse setup downloads the pinned sample dataset and stores a device-code-authenticated connection profile named `Migration4DataverseExample`. The migration imports nine CSV files and writes records to the configured organization. It also creates or customizes Dataverse tables, alternate keys, and an account File column, so use a test organization and review the setup script before running it. The generated attachment is a separate file referenced from JSONL; the primary example streams it through a mapping that detects MIME type, while the sequential example passes it through unchanged.
 
 For sign-in and connection management, see the upstream [authentication guide](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/getting-started/authentication.md), [connections concept](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/docs/core-concepts/connections.md), and [`Get-DataverseConnection` cmdlet reference](https://github.com/ALM4Dataverse/Rnwood.Dataverse.Data.PowerShell/blob/main/Rnwood.Dataverse.Data.PowerShell/docs/Get-DataverseConnection.md). The [Dataverse source](./docs/connectors/sources/dataverse.md) and [Dataverse target](./docs/connectors/targets/dataverse.md) guides describe the migration adapter's additional rules.
 
-Set `$env:M4D_RUN_ID` to resume the primary example with its existing run ID. The sequential example uses a separate database and can be resumed with `$env:M4D_SEQUENTIAL_RUN_ID`.
+Pass `--run-id` with the same ID to resume either example.
 
 > [!IMPORTANT]
 > The sample uses a custom table for synthetic Salesforce users; Dataverse assigns imported records to the signed-in user. Source owner IDs are retained as data, not used to set Dataverse ownership. Monetary values have no source currency and use the active price list's currency.
 
 ## Dashboard
 
-The Dataverse examples start a local dashboard so you can inspect run history, migration progress, and captured row lineage.
+`run` starts the dashboard automatically using the effective database path and the resolved migration configuration, including connections initialized by `PreRun`. It prints the URL, runs the migration, and keeps the dashboard available until Ctrl+C; after closing it, the command returns the migration's exit code. Use `--no-dashboard` for automated or headless runs.
 
-Open the printed `http://127.0.0.1:5180` URL while a migration runs. See the [dashboard guide](./docs/cmdlets/migration-dashboard.md) for configuration previews, row inspection, data retention, and local-access limitations.
+```sh
+./Migration4Dataverse.Cli-linux-x64 run ./examples/dataverse/example-sequential.m4d
+```
+
+To start a standalone dashboard, run `start-dashboard` with the same `--database-path`; it remains in the foreground until Ctrl+C. See the [dashboard guide](./docs/cmdlets/migration-dashboard.md) for configuration previews, row inspection, data retention, and local-access limitations.
 
 ![Migration4Dataverse dashboard showing the dependency graph, captured rows, and selected-row lineage](./docs/assets/migration-dashboard-running.png)
 
 ## Documentation
 
-- [Documentation index](./docs/README.md) — guides for PowerShell users and a separate section for contributors.
-- [PowerShell cmdlets](./docs/cmdlets/README.md) — command syntax and behavior.
+- [Documentation index](./docs/README.md) — CLI-first user guidance, advanced PowerShell references, and contributor documentation.
+- [Standalone CLI](./docs/cli.md) — the recommended zero-prerequisite install and command reference.
+- [PowerShell cmdlets](./docs/cmdlets/README.md) — advanced API command syntax and behavior.
 - [Step configuration](./docs/configuration.md) — graph shape, connections, callbacks, and step behavior.
 - [Connectors](./docs/connectors/sources/README.md) — source and target connector guides.
 - [Migration basics](./docs/concepts/migration-basics.md) — sources, transforms, filters, targets, and connections in plain language.

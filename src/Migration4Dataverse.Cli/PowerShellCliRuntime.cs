@@ -122,9 +122,10 @@ internal sealed class PowerShellCliRuntime : IDisposable
     public int Invoke(
         CommandInfo commandInfo,
         IReadOnlyDictionary<string, CliParameterValue> cliParameters,
-        string? setupScriptPath,
+        string? migrationFilePath,
         CliEventWriter? jsonOutput,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool startDashboard = false)
     {
         _jsonOutput = jsonOutput;
         _hadErrors = false;
@@ -132,18 +133,29 @@ internal sealed class PowerShellCliRuntime : IDisposable
         _runspace.SessionStateProxy.SetVariable("__m4dCliMigrationFailed", false);
         _runspace.SessionStateProxy.SetVariable("__m4dCliMigrationInvoked", false);
         _runspace.SessionStateProxy.SetVariable("__m4dCliDashboardHandle", null);
+        _runspace.SessionStateProxy.SetVariable("__m4dCliStartDashboard", startDashboard);
 
-        if (!string.IsNullOrWhiteSpace(setupScriptPath))
+        var isMigrationCommand =
+            string.Equals(commandInfo.Name, "Invoke-M4dMigration", StringComparison.OrdinalIgnoreCase);
+        if (isMigrationCommand)
         {
-            var scriptPath = Path.GetFullPath(setupScriptPath);
-            if (!File.Exists(scriptPath) ||
-                !string.Equals(Path.GetExtension(scriptPath), ".ps1", StringComparison.OrdinalIgnoreCase))
+            if (string.IsNullOrWhiteSpace(migrationFilePath))
             {
-                WriteError("The setup script must be an existing .ps1 file.", ExitCodes.InvalidArgumentsOrJob);
+                WriteError("Provide a .m4d migration definition file.", ExitCodes.InvalidArgumentsOrJob);
                 return ExitCodes.InvalidArgumentsOrJob;
             }
 
-            var scriptAst = Parser.ParseFile(scriptPath, out _, out var parseErrors);
+            var scriptPath = Path.GetFullPath(migrationFilePath);
+            if (!File.Exists(scriptPath) ||
+                !string.Equals(Path.GetExtension(scriptPath), ".m4d", StringComparison.OrdinalIgnoreCase))
+            {
+                WriteError(
+                    "The migration definition must be an existing .m4d file.",
+                    ExitCodes.InvalidArgumentsOrJob);
+                return ExitCodes.InvalidArgumentsOrJob;
+            }
+
+            Parser.ParseFile(scriptPath, out _, out var parseErrors);
             if (parseErrors.Length > 0)
             {
                 WriteError(
@@ -152,47 +164,39 @@ internal sealed class PowerShellCliRuntime : IDisposable
                 return ExitCodes.InvalidArgumentsOrJob;
             }
 
-            var scriptParameterDefaults = CreateScriptParameterDefaults(
+            var definitionInvocation = CreateInvocation(
                 commandInfo,
                 cliParameters,
-                out var parameterError);
-            if (parameterError is not null)
+                loadSessionDefaults: false);
+            if (definitionInvocation.Error is not null)
             {
-                WriteError(parameterError, ExitCodes.InvalidArgumentsOrJob);
+                WriteError(definitionInvocation.Error, ExitCodes.InvalidArgumentsOrJob);
                 return ExitCodes.InvalidArgumentsOrJob;
             }
 
-            var originalParameterDefaults = _runspace.SessionStateProxy.GetVariable("PSDefaultParameterValues");
-            if (scriptParameterDefaults is not null)
-            {
-                var parameterDefaults = originalParameterDefaults is IDictionary existingDefaults
-                    ? new Hashtable(existingDefaults, StringComparer.OrdinalIgnoreCase)
-                    : new Hashtable(StringComparer.OrdinalIgnoreCase);
-                foreach (DictionaryEntry parameterDefault in scriptParameterDefaults)
-                {
-                    parameterDefaults[parameterDefault.Key] = parameterDefault.Value;
-                }
-                _runspace.SessionStateProxy.SetVariable("PSDefaultParameterValues", parameterDefaults);
-            }
-
             _errorExitCode = ExitCodes.InvalidArgumentsOrJob;
-            int scriptResult;
-            try
-            {
-                scriptResult = InvokeScript(scriptPath, commandInfo.Name, cancellationToken);
-            }
-            finally
-            {
-                if (scriptParameterDefaults is not null)
-                {
-                    _runspace.SessionStateProxy.SetVariable(
-                        "PSDefaultParameterValues",
-                        originalParameterDefaults);
-                }
-            }
+            var migrationResult = InvokeMigrationDefinition(
+                commandInfo,
+                scriptPath,
+                definitionInvocation.Parameters,
+                cancellationToken);
             if (cancellationToken.IsCancellationRequested)
             {
+                StopStartedDashboard();
                 return ExitCodes.Cancelled;
+            }
+            var exitCode = migrationResult;
+            if (_hadErrors)
+            {
+                exitCode = _errorExitCode;
+            }
+            else if (HasInvokedMigration() && HasFailedMigrationResult())
+            {
+                exitCode = ExitCodes.MigrationFailure;
+            }
+            if (startDashboard && HasStartedDashboard())
+            {
+                return WaitForDashboardToStop(cancellationToken, exitCode);
             }
             if (_hadErrors)
             {
@@ -202,15 +206,12 @@ internal sealed class PowerShellCliRuntime : IDisposable
             {
                 return HasFailedMigrationResult()
                     ? ExitCodes.MigrationFailure
-                    : scriptResult;
+                    : migrationResult;
             }
+            return migrationResult;
         }
 
         _errorExitCode = ExitCodes.InvalidArgumentsOrJob;
-        if (string.Equals(commandInfo.Name, "Invoke-M4dMigration", StringComparison.OrdinalIgnoreCase))
-        {
-            SetMigrationDefaults(cliParameters, setupScriptPath);
-        }
 
         var invocation = CreateInvocation(commandInfo, cliParameters);
         if (invocation.Error is not null)
@@ -223,6 +224,7 @@ internal sealed class PowerShellCliRuntime : IDisposable
         var result = InvokeCommandPipeline(commandInfo, invocation.Parameters, cancellationToken);
         if (cancellationToken.IsCancellationRequested)
         {
+            StopStartedDashboard();
             return ExitCodes.Cancelled;
         }
         if (_hadErrors)
@@ -239,7 +241,7 @@ internal sealed class PowerShellCliRuntime : IDisposable
                 "Start-M4dMigrationDashboard",
                 StringComparison.OrdinalIgnoreCase))
         {
-            return WaitForDashboardToStop(cancellationToken);
+            return WaitForDashboardToStop(cancellationToken, ExitCodes.Cancelled);
         }
 
         return result;
@@ -297,19 +299,24 @@ internal sealed class PowerShellCliRuntime : IDisposable
             ?.Value
         ?? throw new InvalidOperationException($"Assembly metadata '{name}' is missing.");
 
-    private int InvokeScript(string scriptPath, string commandName, CancellationToken cancellationToken)
+    private int InvokeMigrationDefinition(
+        CommandInfo commandInfo,
+        string path,
+        IReadOnlyDictionary<string, object?> parameters,
+        CancellationToken cancellationToken)
     {
-        _errorExitCode = ExitCodes.InvalidArgumentsOrJob;
+        var migrationParameters = new Dictionary<string, object?>(parameters, StringComparer.OrdinalIgnoreCase)
+        {
+            ["Path"] = path
+        };
+
         var breakpoint = _runspace.Debugger.SetCommandBreakpoint(
-            commandName,
+            "Invoke-M4dMigrationGraph",
             ScriptBlock.Create("$global:__m4dCliMigrationInvoked = $true; continue"),
             null);
         try
         {
-            using var powerShell = CreatePipeline(_errorExitCode);
-            powerShell.AddScript($". '{scriptPath.Replace("'", "''", StringComparison.Ordinal)}'", useLocalScope: false);
-            AddOutputObserver(powerShell);
-            return InvokePipeline(powerShell, cancellationToken);
+            return InvokeCommandPipeline(commandInfo, migrationParameters, cancellationToken);
         }
         finally
         {
@@ -381,6 +388,10 @@ internal sealed class PowerShellCliRuntime : IDisposable
             {
                 return ExitCodes.Cancelled;
             }
+            if (IsMigrationLifecycleFailure(exception))
+            {
+                _errorExitCode = ExitCodes.MigrationFailure;
+            }
             if (!_hadErrors)
             {
                 _hadErrors = true;
@@ -392,7 +403,8 @@ internal sealed class PowerShellCliRuntime : IDisposable
 
     private InvocationResult CreateInvocation(
         CommandInfo commandInfo,
-        IReadOnlyDictionary<string, CliParameterValue> cliParameters)
+        IReadOnlyDictionary<string, CliParameterValue> cliParameters,
+        bool loadSessionDefaults = true)
     {
         var parameters = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
         string? commonDatabasePath = null;
@@ -423,7 +435,10 @@ internal sealed class PowerShellCliRuntime : IDisposable
             }
         }
 
-        foreach (var parameter in commandInfo.Parameters.Values)
+        IEnumerable<ParameterMetadata> parametersToLoad = loadSessionDefaults
+            ? commandInfo.Parameters.Values
+            : Enumerable.Empty<ParameterMetadata>();
+        foreach (var parameter in parametersToLoad)
         {
             if (parameters.ContainsKey(parameter.Name))
             {
@@ -450,18 +465,6 @@ internal sealed class PowerShellCliRuntime : IDisposable
         }
 
         commonDatabasePath ??= _runspace.SessionStateProxy.GetVariable("DatabasePath")?.ToString();
-        if (string.Equals(commandInfo.Name, "Invoke-M4dMigration", StringComparison.OrdinalIgnoreCase))
-        {
-            if (!parameters.TryGetValue("Steps", out var steps))
-            {
-                return new InvocationResult(parameters, "The migration job must define one or more $Steps.");
-            }
-            if (ValidateMigrationSteps(steps) is { } validationError)
-            {
-                return new InvocationResult(parameters, validationError);
-            }
-        }
-
         if (commandInfo.Parameters.ContainsKey("Store") &&
             !parameters.ContainsKey("Store") &&
             !string.IsNullOrWhiteSpace(commonDatabasePath))
@@ -475,21 +478,6 @@ internal sealed class PowerShellCliRuntime : IDisposable
                 return new InvocationResult(
                     parameters,
                     $"Could not open the migration store at '{commonDatabasePath}': {exception.Message}");
-            }
-        }
-
-        if (string.Equals(commandInfo.Name, "Invoke-M4dMigration", StringComparison.OrdinalIgnoreCase))
-        {
-            var scriptPath = _runspace.SessionStateProxy.GetVariable("M4dCliScriptPath")?.ToString();
-            if (string.IsNullOrWhiteSpace(parameters.GetValueOrDefault("DatabasePath")?.ToString()))
-            {
-                parameters["DatabasePath"] = Path.Combine(Environment.CurrentDirectory, "migration.sqlite3");
-            }
-            if (string.IsNullOrWhiteSpace(parameters.GetValueOrDefault("RunName")?.ToString()))
-            {
-                parameters["RunName"] = string.IsNullOrWhiteSpace(scriptPath)
-                    ? "Migration"
-                    : Path.GetFileNameWithoutExtension(scriptPath);
             }
         }
 
@@ -576,62 +564,6 @@ internal sealed class PowerShellCliRuntime : IDisposable
         type == typeof(Stream) ||
         type == typeof(object);
 
-    private static string? ValidateMigrationSteps(object? value)
-    {
-        while (value is PSObject psObject && psObject.BaseObject is not null)
-        {
-            value = psObject.BaseObject;
-        }
-
-        var steps = value switch
-        {
-            IDictionary => [value],
-            IEnumerable enumerable when value is not string => enumerable.Cast<object?>().ToArray(),
-            _ => Array.Empty<object?>()
-        };
-        if (steps.Length == 0)
-        {
-            return "The migration job must define one or more $Steps.";
-        }
-
-        for (var index = 0; index < steps.Length; index++)
-        {
-            var step = steps[index];
-            var id = GetStepProperty(step, "Id");
-            var type = GetStepProperty(step, "Type");
-            if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(type))
-            {
-                return $"Migration step {index + 1} must define non-empty Id and Type values.";
-            }
-        }
-
-        return null;
-    }
-
-    private static string? GetStepProperty(object? step, string propertyName)
-    {
-        while (step is PSObject psObject && psObject.BaseObject is not null)
-        {
-            step = psObject.BaseObject;
-        }
-
-        if (step is IDictionary dictionary)
-        {
-            foreach (DictionaryEntry entry in dictionary)
-            {
-                if (string.Equals(entry.Key?.ToString(), propertyName, StringComparison.OrdinalIgnoreCase))
-                {
-                    return entry.Value?.ToString();
-                }
-            }
-            return null;
-        }
-
-        return step is null
-            ? null
-            : PSObject.AsPSObject(step).Properties[propertyName]?.Value?.ToString();
-    }
-
     private object OpenStore(string databasePath)
     {
         using var powerShell = PowerShell.Create();
@@ -649,78 +581,35 @@ internal sealed class PowerShellCliRuntime : IDisposable
         return result[0].BaseObject;
     }
 
-    private void SetMigrationDefaults(
-        IReadOnlyDictionary<string, CliParameterValue> cliParameters,
-        string? setupScriptPath)
-    {
-        _runspace.SessionStateProxy.SetVariable("M4dCliScriptPath", setupScriptPath);
-        if (cliParameters.TryGetValue("DatabasePath", out var databasePath) &&
-            databasePath.Value is string path)
-        {
-            _runspace.SessionStateProxy.SetVariable("DatabasePath", path);
-        }
-        if (cliParameters.TryGetValue("RunName", out var runName) &&
-            runName.Value is string name)
-        {
-            _runspace.SessionStateProxy.SetVariable("RunName", name);
-        }
-    }
-
-    private Hashtable? CreateScriptParameterDefaults(
-        CommandInfo commandInfo,
-        IReadOnlyDictionary<string, CliParameterValue> cliParameters,
-        out string? error)
-    {
-        error = null;
-        if (cliParameters.Count == 0)
-        {
-            return null;
-        }
-
-        var defaults = new Hashtable(StringComparer.OrdinalIgnoreCase);
-        foreach (var supplied in cliParameters)
-        {
-            if (!commandInfo.Parameters.TryGetValue(supplied.Key, out var metadata))
-            {
-                error = $"The {commandInfo.Name} command has no '{supplied.Key}' parameter.";
-                return null;
-            }
-
-            try
-            {
-                defaults[$"{commandInfo.Name}:{metadata.Name}"] =
-                    ConvertParameterValue(metadata, supplied.Value);
-            }
-            catch (Exception exception) when (
-                exception is FormatException or JsonException or ArgumentException)
-            {
-                error = $"Invalid value for --{ToKebabCase(supplied.Key)}: {exception.Message}";
-                return null;
-            }
-        }
-
-        return defaults;
-    }
-
-    private int WaitForDashboardToStop(CancellationToken cancellationToken)
+    private int WaitForDashboardToStop(CancellationToken cancellationToken, int exitCodeAfterStop)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
             cancellationToken.WaitHandle.WaitOne(200);
         }
 
+        var stopResult = StopStartedDashboard();
+        return stopResult == ExitCodes.Success ? exitCodeAfterStop : stopResult;
+    }
+
+    private int StopStartedDashboard()
+    {
         var dashboard = _runspace.SessionStateProxy.GetVariable("__m4dCliDashboardHandle");
         if (dashboard is null)
         {
-            return ExitCodes.Cancelled;
+            return ExitCodes.Success;
         }
 
         using var powerShell = CreatePipeline(ExitCodes.MigrationFailure);
         powerShell.AddCommand("Stop-M4dMigrationDashboard")
             .AddParameter("Dashboard", dashboard);
-        InvokePipeline(powerShell, CancellationToken.None);
-        return ExitCodes.Cancelled;
+        var result = InvokePipeline(powerShell, CancellationToken.None);
+        _runspace.SessionStateProxy.SetVariable("__m4dCliDashboardHandle", null);
+        return result;
     }
+
+    private bool HasStartedDashboard() =>
+        _runspace.SessionStateProxy.GetVariable("__m4dCliDashboardHandle") is not null;
 
     private PowerShell CreatePipeline(int errorExitCode)
     {
@@ -731,7 +620,12 @@ internal sealed class PowerShellCliRuntime : IDisposable
             var error = powerShell.Streams.Error[eventArgs.Index];
             _hadErrors = true;
             var reportedExitCode = errorExitCode;
-            if (IsParameterError(error))
+            if (IsMigrationLifecycleFailure(error))
+            {
+                _errorExitCode = ExitCodes.MigrationFailure;
+                reportedExitCode = ExitCodes.MigrationFailure;
+            }
+            else if (IsParameterError(error))
             {
                 _errorExitCode = ExitCodes.InvalidArgumentsOrJob;
                 reportedExitCode = ExitCodes.InvalidArgumentsOrJob;
@@ -762,6 +656,19 @@ internal sealed class PowerShellCliRuntime : IDisposable
         error.Exception is ParameterBindingException or ValidationMetadataException ||
         error.FullyQualifiedErrorId.Contains("MissingMandatoryParameter", StringComparison.OrdinalIgnoreCase) ||
         error.FullyQualifiedErrorId.Contains("ParameterBinding", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsMigrationLifecycleFailure(Exception exception) =>
+        exception.ToString().Contains("Migration lifecycle failed:", StringComparison.OrdinalIgnoreCase) ||
+        exception.ToString().Contains("Migration execution failed:", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsMigrationLifecycleFailure(ErrorRecord error) =>
+        error.FullyQualifiedErrorId.Contains(
+            "M4dMigrationLifecycleFailure",
+            StringComparison.OrdinalIgnoreCase) ||
+        error.FullyQualifiedErrorId.Contains(
+            "M4dMigrationExecutionFailure",
+            StringComparison.OrdinalIgnoreCase) ||
+        IsMigrationLifecycleFailure(error.Exception);
 
     private static string ToKebabCase(string value) =>
         System.Text.RegularExpressions.Regex.Replace(value, "([a-z0-9])([A-Z])", "$1-$2")

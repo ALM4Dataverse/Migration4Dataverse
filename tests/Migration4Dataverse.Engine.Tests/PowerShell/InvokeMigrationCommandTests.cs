@@ -21,6 +21,31 @@ public sealed class InvokeMigrationCommandTests
     }
 
     [Fact]
+    public void AdditionalStepHashComponentsAffectGeneratedHash()
+    {
+        var computeStepHash = typeof(InvokeMigrationCommand).GetMethod(
+            "ComputeStepHash",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(computeStepHash);
+
+        object?[] GetArguments(string hookSource) =>
+        [
+            Array.Empty<PSObject>(),
+            Array.Empty<string>(),
+            Array.Empty<Microsoft.PowerShell.Commands.ModuleSpecification>(),
+            Array.Empty<PSModuleInfo>(),
+            Array.Empty<(string Path, string Content)>(),
+            Array.Empty<string>(),
+            new[] { hookSource }
+        ];
+
+        var firstHash = Assert.IsType<string>(computeStepHash!.Invoke(null, GetArguments("PreRun:v1")));
+        var secondHash = Assert.IsType<string>(computeStepHash.Invoke(null, GetArguments("PreRun:v2")));
+
+        Assert.NotEqual(firstHash, secondHash);
+    }
+
+    [Fact]
     public void SharedScriptsFromFilesAndInlineDefinitionsAreAvailableToTransforms()
     {
         var temporaryDirectory = Path.Combine(
@@ -85,7 +110,7 @@ public sealed class InvokeMigrationCommandTests
             };
 
             powershell.Commands.Clear();
-            var output = powershell.AddCommand("Invoke-M4dMigration")
+            var output = powershell.AddCommand("Invoke-M4dMigrationGraph")
                 .AddParameter("DatabasePath", Path.Combine(temporaryDirectory, "migration.sqlite"))
                 .AddParameter("RunName", "SharedScripts")
                 .AddParameter("RunId", "shared-scripts")
@@ -214,7 +239,7 @@ public sealed class InvokeMigrationCommandTests
 
             powershell.Commands.Clear();
             var databasePath = Path.Combine(temporaryDirectory, "migration.sqlite");
-            var output = powershell.AddCommand("Invoke-M4dMigration")
+            var output = powershell.AddCommand("Invoke-M4dMigrationGraph")
                 .AddParameter("DatabasePath", databasePath)
                 .AddParameter("RunName", "WhatIfPreview")
                 .AddParameter("RunId", "whatif-preview")
@@ -292,7 +317,7 @@ public sealed class InvokeMigrationCommandTests
 
             powershell.Commands.Clear();
             var exception = Assert.Throws<CmdletInvocationException>(() =>
-                powershell.AddCommand("Invoke-M4dMigration")
+                powershell.AddCommand("Invoke-M4dMigrationGraph")
                 .AddParameter("DatabasePath", Path.Combine(temporaryDirectory, "migration.sqlite3"))
                 .AddParameter("RunName", "NoRetryDiagnosticTest")
                 .AddParameter("RunId", "no-retry-diagnostic-test")
@@ -353,7 +378,7 @@ public sealed class InvokeMigrationCommandTests
             Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
 
             powershell.Commands.Clear();
-            var output = powershell.AddCommand("Invoke-M4dMigration")
+            var output = powershell.AddCommand("Invoke-M4dMigrationGraph")
                 .AddParameter("DatabasePath", Path.Combine(temporaryDirectory, "migration.sqlite3"))
                 .AddParameter("RunName", "ProgressOutputTest")
                 .AddParameter("RunId", "progress-output-test")
@@ -439,7 +464,7 @@ public sealed class InvokeMigrationCommandTests
             Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
 
             powershell.Commands.Clear();
-            var output = powershell.AddCommand("Invoke-M4dMigration")
+            var output = powershell.AddCommand("Invoke-M4dMigrationGraph")
                 .AddParameter("DatabasePath", Path.Combine(temporaryDirectory, "migration.sqlite3"))
                 .AddParameter("RunName", "HashtableStepDefinitions")
                 .AddParameter("RunId", "hashtable-step-definitions")
@@ -519,7 +544,7 @@ public sealed class InvokeMigrationCommandTests
             Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
 
             powershell.Commands.Clear();
-            var output = powershell.AddCommand("Invoke-M4dMigration")
+            var output = powershell.AddCommand("Invoke-M4dMigrationGraph")
                 .AddParameter("DatabasePath", Path.Combine(temporaryDirectory, "migration.sqlite3"))
                 .AddParameter("RunName", "FileInfoConnections")
                 .AddParameter("RunId", "fileinfo-connections")
@@ -629,7 +654,7 @@ public sealed class InvokeMigrationCommandTests
 
             powershell.Commands.Clear();
             var databasePath = Path.Combine(temporaryDirectory, "migration.sqlite");
-            var output = powershell.AddCommand("Invoke-M4dMigration")
+            var output = powershell.AddCommand("Invoke-M4dMigrationGraph")
                 .AddParameter("DatabasePath", databasePath)
                 .AddParameter("RunName", "DatabaseCountQuery")
                 .AddParameter("RunId", "database-count-query")
@@ -743,7 +768,7 @@ public sealed class InvokeMigrationCommandTests
 
             powershell.Commands.Clear();
             var databasePath = Path.Combine(temporaryDirectory, "migration.sqlite");
-            var output = powershell.AddCommand("Invoke-M4dMigration")
+            var output = powershell.AddCommand("Invoke-M4dMigrationGraph")
                 .AddParameter("DatabasePath", databasePath)
                 .AddParameter("RunName", "CustomSourceCount")
                 .AddParameter("RunId", "custom-source-count")
@@ -861,7 +886,7 @@ public sealed class InvokeMigrationCommandTests
             Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
 
             powershell.Commands.Clear();
-            powershell.AddCommand("Invoke-M4dMigration")
+            powershell.AddCommand("Invoke-M4dMigrationGraph")
                 .AddParameter("DatabasePath", Path.Combine(temporaryDirectory, "migration.sqlite3"))
                 .AddParameter("RunName", "GenericMultiParentTest")
                 .AddParameter("RunId", "generic-multi-parent-test")
@@ -948,7 +973,7 @@ public sealed class InvokeMigrationCommandTests
 
             powershell.Commands.Clear();
             var exception = Assert.Throws<CmdletInvocationException>(() =>
-                powershell.AddCommand("Invoke-M4dMigration")
+                powershell.AddCommand("Invoke-M4dMigrationGraph")
                     .AddParameter("DatabasePath", Path.Combine(temporaryDirectory, "migration.sqlite3"))
                     .AddParameter("RunName", "LegacyMappingTest")
                     .AddParameter("Steps", new[] { legacyJob })
@@ -1056,7 +1081,7 @@ public sealed class InvokeMigrationCommandTests
 
                 powershell.Commands.Clear();
                 var exception = Assert.Throws<CmdletInvocationException>(() =>
-                    powershell.AddCommand("Invoke-M4dMigration")
+                    powershell.AddCommand("Invoke-M4dMigrationGraph")
                         .AddParameter("DatabasePath", Path.Combine(temporaryDirectory, "migration.sqlite3"))
                         .AddParameter("RunName", "InvalidInputTest")
                         .AddParameter("Steps", invalid.Steps)
@@ -1120,7 +1145,7 @@ public sealed class InvokeMigrationCommandTests
 
                 powershell.Commands.Clear();
                 var exception = Assert.Throws<CmdletInvocationException>(() =>
-                    powershell.AddCommand("Invoke-M4dMigration")
+                    powershell.AddCommand("Invoke-M4dMigrationGraph")
                         .AddParameter("DatabasePath", databasePath)
                         .AddParameter("RunName", "RowRetryTest")
                         .AddParameter("RunId", runId)
@@ -1154,7 +1179,7 @@ public sealed class InvokeMigrationCommandTests
                 retryPowerShell.HadErrors,
                 string.Join(Environment.NewLine, retryPowerShell.Streams.Error));
             retryPowerShell.Commands.Clear();
-            var output = retryPowerShell.AddCommand("Invoke-M4dMigration")
+            var output = retryPowerShell.AddCommand("Invoke-M4dMigrationGraph")
                 .AddParameter("DatabasePath", databasePath)
                 .AddParameter("RunName", "RowRetryTest")
                 .AddParameter("RunId", runId)
@@ -1253,7 +1278,7 @@ public sealed class InvokeMigrationCommandTests
                 Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
 
                 powershell.Commands.Clear();
-                powershell.AddCommand("Invoke-M4dMigration")
+                powershell.AddCommand("Invoke-M4dMigrationGraph")
                     .AddParameter("DatabasePath", databasePath)
                     .AddParameter("RunName", "TypedConnectorTest")
                     .AddParameter("RunId", "typed-connector-test")
@@ -1382,7 +1407,7 @@ public sealed class InvokeMigrationCommandTests
                 Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
 
                 powershell.Commands.Clear();
-                var output = powershell.AddCommand("Invoke-M4dMigration")
+                var output = powershell.AddCommand("Invoke-M4dMigrationGraph")
                     .AddParameter("DatabasePath", Path.Combine(temporaryDirectory, "migration.sqlite3"))
                     .AddParameter("RunName", "RowLinkedSourceTest")
                     .AddParameter("RunId", "row-linked-source-test")
@@ -1501,7 +1526,7 @@ public sealed class InvokeMigrationCommandTests
                 Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
 
                 powershell.Commands.Clear();
-                var output = powershell.AddCommand("Invoke-M4dMigration")
+                var output = powershell.AddCommand("Invoke-M4dMigrationGraph")
                     .AddParameter("DatabasePath", Path.Combine(temporaryDirectory, "migration.sqlite3"))
                     .AddParameter("RunName", "MultiParentSourceTest")
                     .AddParameter("RunId", "multi-parent-source-test")
@@ -1666,7 +1691,7 @@ public sealed class InvokeMigrationCommandTests
                 Assert.False(powershell.HadErrors, string.Join(Environment.NewLine, powershell.Streams.Error));
 
                 powershell.Commands.Clear();
-                var output = powershell.AddCommand("Invoke-M4dMigration")
+                var output = powershell.AddCommand("Invoke-M4dMigrationGraph")
                     .AddParameter("DatabasePath", Path.Combine(temporaryDirectory, "migration.sqlite3"))
                     .AddParameter("RunName", "SingleJoinOutputTest")
                     .AddParameter("RunId", "single-join-output-test")

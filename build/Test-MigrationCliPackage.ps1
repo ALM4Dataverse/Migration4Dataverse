@@ -86,10 +86,8 @@ $expectedCommands = @(
     'invoke-recovery',
     'clear-target-tuning',
     'start-database-server',
-    'new-binary-value',
-    'new-job-store',
-    'complete-batch',
-    'set-run-status',
+    'new-file',
+    'advanced',
     'start-dashboard',
     'stop-dashboard'
 )
@@ -99,10 +97,16 @@ foreach ($command in $expectedCommands) {
     }
 }
 
+$advancedHelp = Invoke-Cli -Arguments @('advanced', '--help')
+if ($advancedHelp.ExitCode -ne 0 -or
+    -not $advancedHelp.StandardOutput.Contains('invoke-graph', [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'The advanced command group did not expose the invoke-graph command.'
+}
+
 $runHelp = Invoke-Cli -Arguments @('run', '--help')
 if ($runHelp.ExitCode -ne 0 -or
-    -not $runHelp.StandardOutput.Contains('Runs a PowerShell-defined migration graph', [StringComparison]::Ordinal)) {
-    throw 'The run command did not show the migration cmdlet help synopsis.'
+    -not $runHelp.StandardOutput.Contains('Runs a migration defined in a .m4d file', [StringComparison]::Ordinal)) {
+    throw 'The run command did not show the migration definition help synopsis.'
 }
 
 $getRunHelp = Invoke-Cli -Arguments @('get-run', '--help')
@@ -133,9 +137,10 @@ try {
         '{"SourceId":"row-2","RecordId":"00000000-0000-0000-0000-000000000002","Name":"second"}'
     ) | Set-Content -LiteralPath $inputPath -Encoding utf8NoBOM
 
-    $scriptPath = Join-Path $workDirectory 'job.ps1'
+    $migrationFilePath = Join-Path $workDirectory 'job.m4d'
     @'
-$Steps = @(
+$Migration = @{
+    Steps = @(
     @{
         Id = 'Rows'
         Type = 'source'
@@ -161,20 +166,22 @@ $Steps = @(
         }
     }
 )
-$Connections = @{
-    files = [System.IO.DirectoryInfo]$PSScriptRoot
-    target = [System.IO.DirectoryInfo]$PSScriptRoot
+    Connections = @{
+        files = [System.IO.DirectoryInfo]$PSScriptRoot
+        target = [System.IO.DirectoryInfo]$PSScriptRoot
+    }
 }
-'@ | Set-Content -LiteralPath $scriptPath -Encoding utf8NoBOM
+'@ | Set-Content -LiteralPath $migrationFilePath -Encoding utf8NoBOM
 
     $databasePath = Join-Path $workDirectory 'migration.sqlite3'
     $migration = Invoke-Cli -Arguments @(
         'run',
-        '--script', $scriptPath,
+        $migrationFilePath,
         '--database-path', $databasePath,
         '--run-name', 'CLI package smoke test',
         '--batch-size', '1',
         '--max-degree-of-parallelism', '1',
+        '--no-dashboard',
         '--json'
     )
     if ($migration.ExitCode -ne 0) {
@@ -188,6 +195,18 @@ $Connections = @{
     $migrationEvents = Assert-JsonEvents -Output $migration.StandardOutput
     if ($migrationEvents[-1].type -ne 'completed' -or $migrationEvents[-1].exitCode -ne 0) {
         throw 'The migration did not emit a successful completion event.'
+    }
+
+    $templatePath = Join-Path $workDirectory 'created.m4d'
+    $template = Invoke-Cli -Arguments @('new-file', '--path', $templatePath)
+    if ($template.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $templatePath -PathType Leaf)) {
+        throw "The new-file CLI action failed. Error: $($template.StandardError)"
+    }
+    $templateContent = [System.IO.File]::ReadAllText($templatePath)
+    foreach ($requiredText in @('$Migration = @{', 'RunOptions = @{', 'PreRun = {', 'PostRun = {')) {
+        if (-not $templateContent.Contains($requiredText, [StringComparison]::Ordinal)) {
+            throw "The generated migration template is missing '$requiredText'."
+        }
     }
 
     $outputPath = Join-Path $workDirectory 'output.jsonl'

@@ -9,7 +9,7 @@ using Migration4Dataverse.Engine.Storage;
 
 namespace Migration4Dataverse.Engine.PowerShell;
 
-[Cmdlet(VerbsLifecycle.Invoke, "M4dMigration")]
+[Cmdlet(VerbsLifecycle.Invoke, "M4dMigrationGraph")]
 [OutputType(typeof(DependencySchedulerResult))]
 public sealed class InvokeMigrationCommand : PSCmdlet
 {
@@ -28,6 +28,9 @@ public sealed class InvokeMigrationCommand : PSCmdlet
 
     [Parameter]
     public string? StepHash { get; set; }
+
+    [Parameter]
+    public string[] AdditionalStepHashComponents { get; set; } = Array.Empty<string>();
 
     [Parameter(Mandatory = true)]
     [ValidateNotNullOrEmpty]
@@ -118,6 +121,8 @@ public sealed class InvokeMigrationCommand : PSCmdlet
             .ToArray();
         var requiredModules = RequiredModules
             ?? throw new ArgumentNullException(nameof(RequiredModules));
+        var additionalStepHashComponents = AdditionalStepHashComponents
+            ?? throw new ArgumentNullException(nameof(AdditionalStepHashComponents));
         var schedulerOptions = new DependencySchedulerOptions
         {
             MaxDegreeOfParallelism = MaxDegreeOfParallelism,
@@ -160,7 +165,8 @@ public sealed class InvokeMigrationCommand : PSCmdlet
                 requiredModules,
                 executor.ResolvedRequiredModules,
                 helperFiles,
-                sharedScripts)
+                sharedScripts,
+                additionalStepHashComponents)
             : StepHash;
         var effectiveStepHash = WhatIf.IsPresent ? $"{stepHash}:whatif-preview-v1" : stepHash;
         if (MaxErrorRatePercent > 0)
@@ -380,7 +386,8 @@ public sealed class InvokeMigrationCommand : PSCmdlet
         IEnumerable<ModuleSpecification> requiredModules,
         IEnumerable<PSModuleInfo> resolvedRequiredModules,
         IEnumerable<(string Path, string Content)> helperFiles,
-        IEnumerable<string> sharedScripts)
+        IEnumerable<string> sharedScripts,
+        IEnumerable<string> additionalStepHashComponents)
     {
         var stepArray = steps.ToArray();
         var normalizedSteps = stepArray.Select(NormalizeForHash).ToArray();
@@ -413,6 +420,10 @@ public sealed class InvokeMigrationCommand : PSCmdlet
         var normalizedSharedScripts = sharedScripts
             .Select(script => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(script))).ToLowerInvariant())
             .ToArray();
+        var normalizedAdditionalStepHashComponents = additionalStepHashComponents
+            .Select(component => Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(component))).ToLowerInvariant())
+            .ToArray();
         var hasKeyedInput = stepArray.Any(step =>
         {
             var type = GetStepProperty(step, "Type")?.ToString();
@@ -429,7 +440,8 @@ public sealed class InvokeMigrationCommand : PSCmdlet
                 RequiredModules = normalizedRequiredModules,
                 ResolvedRequiredModules = normalizedResolvedModules,
                 HelperFiles = normalizedHelperFiles,
-                SharedScripts = normalizedSharedScripts
+                SharedScripts = normalizedSharedScripts,
+                AdditionalStepHashComponents = normalizedAdditionalStepHashComponents
             }
             : new
             {
@@ -438,7 +450,8 @@ public sealed class InvokeMigrationCommand : PSCmdlet
                 RequiredModules = normalizedRequiredModules,
                 ResolvedRequiredModules = normalizedResolvedModules,
                 HelperFiles = normalizedHelperFiles,
-                SharedScripts = normalizedSharedScripts
+                SharedScripts = normalizedSharedScripts,
+                AdditionalStepHashComponents = normalizedAdditionalStepHashComponents
             };
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(shape)));
         return Convert.ToHexString(bytes).ToLowerInvariant();

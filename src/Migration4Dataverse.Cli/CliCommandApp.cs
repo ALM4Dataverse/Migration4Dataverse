@@ -7,14 +7,37 @@ namespace Migration4Dataverse.Cli;
 
 internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationToken cancellationToken)
 {
+    private static readonly HashSet<string> AdvancedCommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Invoke-M4dMigrationGraph",
+        "New-M4dMigrationBinaryValue",
+        "New-M4dMigrationJobStore",
+        "Complete-M4dMigrationBatch",
+        "Set-M4dMigrationRunStatus"
+    };
+
     public RootCommand Build()
     {
         var root = new RootCommand(
             "Run Migration4Dataverse PowerShell commands with the bundled .NET and PowerShell runtimes.");
+        var advanced = new Command("advanced", "Lower-level commands for custom integrations.");
 
         foreach (var commandInfo in runtime.GetExportedCommands())
         {
-            root.Subcommands.Add(CreateCommand(commandInfo));
+            var command = CreateCommand(commandInfo);
+            if (AdvancedCommands.Contains(commandInfo.Name))
+            {
+                advanced.Subcommands.Add(command);
+            }
+            else
+            {
+                root.Subcommands.Add(command);
+            }
+        }
+
+        if (advanced.Subcommands.Count > 0)
+        {
+            root.Subcommands.Add(advanced);
         }
 
         return root;
@@ -30,20 +53,31 @@ internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationTo
         {
             Description = "Emit newline-delimited JSON events."
         };
-        var scriptOption = new Option<string?>("--script")
-        {
-            Description = "Run a PowerShell setup/job script before invoking the command."
-        };
         command.Options.Add(jsonOption);
-        command.Options.Add(scriptOption);
 
+        Option<bool>? noDashboardOption = null;
         var options = new List<ICliOptionBinding>();
         var metadata = commandInfo.Parameters;
+        var isMigrationCommand =
+            string.Equals(commandInfo.Name, "Invoke-M4dMigration", StringComparison.OrdinalIgnoreCase);
+        if (isMigrationCommand)
+        {
+            noDashboardOption = new Option<bool>("--no-dashboard")
+            {
+                Description = "Do not start the local dashboard; useful for automated or headless runs."
+            };
+            command.Options.Add(noDashboardOption);
+        }
         var hasDatabasePath = metadata.ContainsKey("DatabasePath");
         var injectsStore = metadata.ContainsKey("Store");
 
         foreach (var parameter in metadata.Values.OrderBy(parameter => parameter.Name, StringComparer.OrdinalIgnoreCase))
         {
+            if (isMigrationCommand && parameter.Name.Equals("Path", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             if (IsPowerShellCommonParameter(parameter.Name) &&
                 parameter.Name is not "WhatIf" and not "Confirm" and not "Verbose" and not "Debug")
             {
@@ -66,15 +100,15 @@ internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationTo
                 "DatabasePath"));
         }
 
-        Argument<string?>? scriptArgument = null;
-        if (string.Equals(commandInfo.Name, "Invoke-M4dMigration", StringComparison.OrdinalIgnoreCase))
+        Argument<string?>? migrationFileArgument = null;
+        if (isMigrationCommand)
         {
-            scriptArgument = new Argument<string?>("migration-script")
+            migrationFileArgument = new Argument<string?>("migration-file")
             {
-                Description = "PowerShell script that invokes Invoke-M4dMigration or defines $Steps and $Connections. CLI options act as defaults for script invocations.",
-                Arity = ArgumentArity.ZeroOrOne
+                Description = "Path to a .m4d migration definition. CLI options override RunOptions in the file.",
+                Arity = ArgumentArity.ExactlyOne
             };
-            command.Arguments.Add(scriptArgument);
+            command.Arguments.Add(migrationFileArgument);
         }
 
         command.SetAction(parseResult =>
@@ -92,25 +126,12 @@ internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationTo
                 }
             }
 
-            var scriptPath = parseResult.GetValue(scriptOption);
-            if (scriptArgument is not null)
+            var migrationFilePath = migrationFileArgument is null
+                ? null
+                : parseResult.GetValue(migrationFileArgument);
+            if (isMigrationCommand && string.IsNullOrWhiteSpace(migrationFilePath))
             {
-                var positionalScript = parseResult.GetValue(scriptArgument);
-                if (scriptPath is not null && positionalScript is not null)
-                {
-                    WriteParseError("Provide the migration script either positionally or with --script, not both.", parseResult.GetValue(jsonOption));
-                    return ExitCodes.InvalidArgumentsOrJob;
-                }
-                scriptPath ??= positionalScript;
-            }
-
-            if (string.Equals(commandInfo.Name, "Invoke-M4dMigration", StringComparison.OrdinalIgnoreCase) &&
-                string.IsNullOrWhiteSpace(scriptPath) &&
-                !parameters.ContainsKey("Steps"))
-            {
-                WriteParseError(
-                    "Provide a migration script with --script or define the migration graph with --steps-json.",
-                    parseResult.GetValue(jsonOption));
+                WriteParseError("Provide a .m4d migration definition file.", parseResult.GetValue(jsonOption));
                 return ExitCodes.InvalidArgumentsOrJob;
             }
 
@@ -121,9 +142,10 @@ internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationTo
             var exitCode = runtime.Invoke(
                 commandInfo,
                 parameters,
-                scriptPath,
+                migrationFilePath,
                 eventWriter,
-                cancellationToken);
+                cancellationToken,
+                startDashboard: isMigrationCommand && !parseResult.GetValue(noDashboardOption!));
             eventWriter?.Write(
                 "completed",
                 new Dictionary<string, object?> { ["exitCode"] = exitCode });
@@ -256,7 +278,7 @@ internal sealed class CliCommandApp(PowerShellCliRuntime runtime, CancellationTo
     {
         var option = new Option<string?>($"{optionName}-json")
         {
-            Description = $"{description} Supply JSON or use --script for live PowerShell objects."
+            Description = $"{description} Supply JSON; use .m4d files for live PowerShell objects."
         };
         command.Options.Add(option);
         return new CliOptionBinding<string?>(parameterName, parseResult => parseResult.GetValue(option))

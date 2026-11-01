@@ -7,10 +7,10 @@ This guide describes the current implementation, not a promise of complete Kings
 
 ## System boundaries
 
-The system boundaries are four binary PowerShell cmdlets, a local monitoring UI/API with constrained failed-batch recovery and continuation approval, a separate transformation API, and a local SQLite owner service:
+The system boundaries are a file-based PowerShell entry point, binary PowerShell inspection and recovery cmdlets, a local monitoring UI/API with constrained failed-batch recovery and continuation approval, a separate transformation API, and a local SQLite owner service:
 
-1. **The binary PowerShell cmdlet** [`Invoke-M4dMigration`](../../src/Migration4Dataverse.Engine/PowerShell/InvokeMigrationCommand.cs) accepts a top-level `Steps` DAG. [`PowerShellMigrationStepFactory`](../../src/Migration4Dataverse.Engine/PowerShell/PowerShellMigrationStepFactory.Graph.cs) converts Source, Join, Transform, Filter, Append, Target, and callback nodes into [`MigrationStepDefinition`](../../src/Migration4Dataverse.Engine/Scheduling/MigrationStepDefinition.cs) objects for the shared [`DependencyScheduler`](../../src/Migration4Dataverse.Engine/Scheduling/DependencyScheduler.cs). Keyed source and join inputs declare their row-flow dependencies; `DependsOn` is reserved for additional whole-step completion barriers. A two-input Join stages and indexes inputs on disk, emits matches incrementally, then sends one nested row to a one-input Transform. Callback mode supports explicit multi-parent batch readiness through `MigrationDependencyOutput.RequiredBatchIds`.
-2. **The data-flow API** in `Migration4Dataverse.Engine.Transformations` remains a separate named transformation DAG. PowerShell callers define it with hashtables and inline Transform and Filter script blocks; the engine internally binds those scripts to their node IDs. Its stream-wide Sort and Merge operators are not yet wired into `Invoke-M4dMigration`.
+1. **The public PowerShell entry point** [`Invoke-M4dMigration`](../cmdlets/invoke-migration.md) loads the `.m4d` file, applies explicit command options over file defaults, and runs its `PreRun` / `PostRun` hooks. It invokes the internal binary [`Invoke-M4dMigrationGraph`](../../src/Migration4Dataverse.Engine/PowerShell/InvokeMigrationCommand.cs), which accepts a top-level `Steps` DAG. [`PowerShellMigrationStepFactory`](../../src/Migration4Dataverse.Engine/PowerShell/PowerShellMigrationStepFactory.Graph.cs) converts Source, Join, Transform, Filter, Append, Target, and callback nodes into [`MigrationStepDefinition`](../../src/Migration4Dataverse.Engine/Scheduling/MigrationStepDefinition.cs) objects for the shared [`DependencyScheduler`](../../src/Migration4Dataverse.Engine/Scheduling/DependencyScheduler.cs). Keyed source and join inputs declare their row-flow dependencies; `DependsOn` is reserved for additional whole-step completion barriers. A two-input Join stages and indexes inputs on disk, emits matches incrementally, then sends one nested row to a one-input Transform. Callback mode supports explicit multi-parent batch readiness through `MigrationDependencyOutput.RequiredBatchIds`.
+2. **The data-flow API** in `Migration4Dataverse.Engine.Transformations` remains a separate named transformation DAG. PowerShell callers define it with hashtables and inline Transform and Filter script blocks; the engine internally binds those scripts to their node IDs. Its stream-wide Sort and Merge operators are not yet wired into the migration graph command.
 3. **The dashboard** [`MigrationDashboardServer`](../../src/Migration4Dataverse.Engine/Dashboard/MigrationDashboardServer.cs) hosts the built React/React Flow SPA and API over the same SQLite file. It binds only to a loopback URL; its same-origin POST mutations queue failed batches for replay, queue an edited retry for an exactly attributed row, or approve continuing downstream from one failed step. Basic run/step/batch metadata is always retained; row payload snapshots are opt-in except for `Invoke-M4dMigration -WhatIf`, which captures planned target inputs. While a run is active, it also reads in-memory per-member Dataverse pool counters for the live connection-throughput chart.
 4. **The database owner** is hosted by the first caller that opens a database, or explicitly with `Start-M4dMigrationDatabaseServer`. It is the only Migration4Dataverse process that opens that SQLite file; other processes use same-user named-pipe IPC. Scheduler execution, workers, live connections, and callbacks remain in each caller process. A database can serve multiple active run IDs, with per-run leases preventing duplicate schedulers for the same run.
 5. **Run history** is queryable through [`Get-M4dMigrationRun`](../../src/Migration4Dataverse.Engine/PowerShell/GetMigrationRunCommand.cs). The dashboard can also preview caller-supplied step and connection objects without starting a migration or opening a database.
@@ -19,10 +19,11 @@ The system boundaries are four binary PowerShell cmdlets, a local monitoring UI/
 
 ```mermaid
 flowchart LR
-    definition["Migration step definitions"]
+    definition[".m4d migration definition"]
     connections["Caller-owned named connections"]
     scripts["Helper scripts and required modules"]
-    invoke["Invoke-M4dMigration"]
+    fileRunner["Invoke-M4dMigration and lifecycle hooks"]
+    invoke["Internal Invoke-M4dMigrationGraph"]
     factory["PowerShellMigrationStepFactory"]
     scheduler["DependencyScheduler"]
     feeder["Source step feeder"]
@@ -35,9 +36,10 @@ flowchart LR
     completion["Step completion tracker"]
     storeClient["MigrationStoreFactory / IMigrationStore"]
 
-    definition --> invoke
-    connections --> invoke
-    scripts --> invoke
+    definition --> fileRunner
+    connections --> fileRunner
+    scripts --> fileRunner
+    fileRunner --> invoke
     invoke --> factory --> scheduler
     scheduler --> feeder
     feeder --> readers --> scheduler

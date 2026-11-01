@@ -22,10 +22,17 @@ $steps = @(
     }
 )
 
-Invoke-M4dMigration -DatabasePath './migration.sqlite3' `
-    -RunName 'DuckDB write' -Steps $steps `
-    -Connections @{ 'duckdb-target' = $targetFile }
+$Migration = @{
+    Steps = $steps
+    Connections = @{ 'duckdb-target' = $targetFile }
+    RunOptions = @{
+        DatabasePath = './migration.sqlite3'
+        RunName = 'DuckDB write'
+    }
+}
 ```
+
+Save this as a `.m4d` file and run it with `Invoke-M4dMigration -Path ./migration.m4d`.
 
 | Option | Default | Description |
 |---|---:|---|

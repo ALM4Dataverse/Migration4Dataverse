@@ -24,7 +24,8 @@ Start with [step configuration](./configuration.md). For keyed dependencies, joi
 ## PowerShell commands
 
 - [Cmdlets and functions](./cmdlets/README.md) — exported command index.
-- [`Invoke-M4dMigration`](./cmdlets/invoke-migration.md) — run options, module loading, previews, and resume behavior.
+- [`Invoke-M4dMigration`](./cmdlets/invoke-migration.md) — load a `.m4d` definition, run lifecycle hooks, and apply options.
+- [`New-M4dMigrationFile`](./cmdlets/new-migration-file.md) — create a complete commented migration template.
 - [`Get-M4dMigrationRun`](./cmdlets/get-migration-run.md) — list or inspect saved runs.
 - [Run inspection and recovery](./cmdlets/migration-inspection-and-recovery.md) — inspect steps, batches, errors, captured rows, and queue recovery actions from PowerShell.
 - [Migration dashboard](./cmdlets/migration-dashboard.md) — view run history, progress, and optional row lineage.

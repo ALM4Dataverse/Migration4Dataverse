@@ -690,6 +690,10 @@ internal static partial class PowerShellMigrationStepFactory
                                 $targetOptions.BypassBusinessLogicExecutionStepIds
                         }
                         $records = [object[]][Migration4Dataverse.Engine.PowerShell.DataverseLookupReferenceResolver]::Resolve($records)
+                        for ($recordIndex = 0; $recordIndex -lt $records.Count; $recordIndex++) {
+                            $fields = ConvertTo-MigrationFields -Value $records[$recordIndex] -StepId $context.StepId
+                            $records[$recordIndex] = [pscustomobject]$fields
+                        }
 
                         if ($targetOperation -eq 'Delete' -and $context.JoinInputConsumers.Count -gt 0) {
                             throw "Dataverse Delete target step '$($context.StepId)' cannot provide parent records to Join steps."

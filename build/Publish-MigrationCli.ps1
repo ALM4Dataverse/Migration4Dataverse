@@ -75,7 +75,7 @@ try {
     if (-not (Test-Path -LiteralPath $dataverseManifestPath -PathType Leaf)) {
         throw "The Dataverse module manifest was not found at '$dataverseManifestPath'."
     }
-    foreach ($framework in @('net462', 'net9.0', 'net10.0')) {
+    foreach ($framework in @('net462', 'net9.0')) {
         foreach ($component in @('cmdlets', 'loader')) {
             $unusedFrameworkPath = Join-Path $dataverseModulePath "$component/$framework"
             if (Test-Path -LiteralPath $unusedFrameworkPath) {
@@ -83,6 +83,11 @@ try {
             }
         }
     }
+    Get-ChildItem -LiteralPath $dataverseModulePath `
+        -Filter 'Microsoft.Extensions.Logging.Abstractions.dll' `
+        -File `
+        -Recurse |
+        Remove-Item -Force
 
     $bundledDataverseModule = Test-ModuleManifest -Path $dataverseManifestPath -ErrorAction Stop
     if ($bundledDataverseModule.Version -ne [version]$moduleVersion) {

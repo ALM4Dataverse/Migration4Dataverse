@@ -6,8 +6,11 @@ public sealed class ExampleScriptTests
 {
     [Theory]
     [InlineData("examples/dataverse/Setup-Example.ps1")]
-    [InlineData("examples/dataverse/example.ps1")]
-    [InlineData("examples/dataverse/example-sequential.ps1")]
+    [InlineData("examples/dataverse/example.m4d")]
+    [InlineData("examples/dataverse/example-sequential.m4d")]
+    [InlineData("examples/error-recovery/Setup-Example.ps1")]
+    [InlineData("examples/error-recovery/example.m4d")]
+    [InlineData("examples/error-recovery/example-filter.m4d")]
     [InlineData("src/Migration4Dataverse/Migration4Dataverse.psm1")]
     [InlineData("src/Migration4Dataverse/Migration4Dataverse.psd1")]
     [InlineData("build/Stage-MigrationModule.ps1")]
@@ -51,8 +54,8 @@ public sealed class ExampleScriptTests
         var repositoryRoot = FindRepositoryRoot();
         var examples = new[]
         {
-            "examples/dataverse/example.ps1",
-            "examples/dataverse/example-sequential.ps1"
+            "examples/dataverse/example.m4d",
+            "examples/dataverse/example-sequential.m4d"
         };
 
         foreach (var relativePath in examples)
@@ -61,15 +64,39 @@ public sealed class ExampleScriptTests
             var script = File.ReadAllText(scriptPath);
 
             Assert.Contains("Type = 'dataverse'", script, StringComparison.Ordinal);
+            Assert.Contains("$Migration = @{", script, StringComparison.Ordinal);
+            Assert.DoesNotContain("Invoke-M4dMigrationGraph", script, StringComparison.Ordinal);
             Assert.DoesNotContain("ExampleMigration.ps1", script, StringComparison.Ordinal);
             Assert.DoesNotContain("ExampleConnectionOptions.ps1", script, StringComparison.Ordinal);
             Assert.DoesNotContain("$PSBoundParameters", script, StringComparison.Ordinal);
+            Assert.DoesNotContain("Import-Module Rnwood.Dataverse.Data.PowerShell", script, StringComparison.Ordinal);
+            Assert.DoesNotContain("Start-M4dMigrationDashboard", script, StringComparison.Ordinal);
+            Assert.DoesNotContain("Stop-M4dMigrationDashboard", script, StringComparison.Ordinal);
         }
     }
 
+    [Fact]
+    public void MigrationExamplesUseM4dFilesWithoutCallingTheRunner()
+    {
+        var examplesDirectory = Path.Combine(FindRepositoryRoot(), "examples");
+        var migrationFiles = Directory.GetFiles(examplesDirectory, "*.m4d", SearchOption.AllDirectories);
+        var scriptFiles = Directory.GetFiles(examplesDirectory, "*.ps1", SearchOption.AllDirectories);
+
+        Assert.NotEmpty(migrationFiles);
+        Assert.All(migrationFiles, file =>
+        {
+            var definition = File.ReadAllText(file);
+            Assert.Contains("$Migration = @{", definition, StringComparison.Ordinal);
+            Assert.DoesNotContain("Invoke-M4dMigrationGraph", definition, StringComparison.Ordinal);
+            Assert.DoesNotContain("Invoke-M4dMigration ", definition, StringComparison.Ordinal);
+        });
+        Assert.All(scriptFiles, file =>
+            Assert.Equal("Setup-Example.ps1", Path.GetFileName(file)));
+    }
+
     [Theory]
-    [InlineData("examples/dataverse/example.ps1")]
-    [InlineData("examples/dataverse/example-sequential.ps1")]
+    [InlineData("examples/dataverse/example.m4d")]
+    [InlineData("examples/dataverse/example-sequential.m4d")]
     public void DataverseExamplesShowSidecarBackedFileUploads(string relativePath)
     {
         var repositoryRoot = FindRepositoryRoot();
@@ -83,7 +110,7 @@ public sealed class ExampleScriptTests
         Assert.Contains("Type = 'File'", setupScript, StringComparison.Ordinal);
         Assert.Contains("$attachmentSidecarName/$attachmentFileName", setupScript, StringComparison.Ordinal);
 
-        if (string.Equals(relativePath, "examples/dataverse/example.ps1", StringComparison.Ordinal))
+        if (string.Equals(relativePath, "examples/dataverse/example.m4d", StringComparison.Ordinal))
         {
             Assert.Contains(".CreateWriter(", migrationScript, StringComparison.Ordinal);
             Assert.Contains(".DetectMimeType()", migrationScript, StringComparison.Ordinal);

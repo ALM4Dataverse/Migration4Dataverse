@@ -15,7 +15,14 @@ The failed-task dialog shows editable input-row JSON only when the step reports 
 > [!WARNING]
 > The dashboard displays persisted migration payloads, which may contain sensitive data. Limit access to the local dashboard and treat row details and exported error data according to the source data's handling requirements.
 
-Queueing a row retry creates a one-record batch at the same failed step with the edited payload. It does not rerun upstream steps or successful sibling rows. Dependency outputs already emitted for successful siblings remain held until the attributable errors are repaired or explicitly accepted; after a successful row retry, those outputs and the retried row's outputs can proceed downstream. The retry preserves the row's stored lineage references and does not advance a source-reader checkpoint.
+Queueing a row retry creates a one-record batch at the same failed step with the edited payload. It does not rerun upstream steps or successful sibling rows. Dependency outputs already emitted for successful siblings remain held until the attributable errors are repaired or explicitly accepted; after a successful row retry, those outputs and the retried row's outputs can proceed downstream. The retry preserves the row's stored lineage references and does not advance a source-reader checkpoint. From the recommended CLI, inspect the failed row with `m4d get-error`, queue its corrected JSON, then rerun the same migration with the same run ID:
+
+```sh
+m4d invoke-recovery --database-path ./migration.sqlite3 --run-id <run-id> \
+  --step-id Transform --batch-id <batch-id> --record-index 0 \
+  --payload-json '{"SourceId":"...","Name":"corrected value"}'
+m4d run ./migration-job.m4d --database-path ./migration.sqlite3 --run-id <run-id>
+```
 
 Row-only retry is unavailable when an error cannot be mapped safely to one input row. This includes source-reader failures, whole-batch handler or infrastructure failures, and target connector failures without per-record attribution (including bulk target errors). Use failed-batch replay or step continuation for those errors. Replaying a row can repeat side effects performed by that step, so reconcile external effects and use idempotent handlers where possible.
 

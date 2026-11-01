@@ -351,6 +351,9 @@ public sealed class DataverseTargetOperationsTests
                         [switch] $PassThru
                     )
                     process {
+                        if ($InputObject -is [System.Collections.IDictionary]) {
+                            throw 'Set-DataverseRecord must receive record objects, not dictionaries.'
+                        }
                         $details = [System.Collections.Generic.List[string]]::new()
                         if ($CreateOnly) { $details.Add('create-only') }
                         if ($NoCreate) { $details.Add('no-create') }
@@ -383,6 +386,9 @@ public sealed class DataverseTargetOperationsTests
                         [string[][]] $MatchOn
                     )
                     process {
+                        if ($InputObject -is [System.Collections.IDictionary]) {
+                            throw 'Remove-DataverseRecord must receive record objects, not dictionaries.'
+                        }
                         $match = if ($MatchOn) { 'match=' + ($MatchOn[0] -join ',') } else { 'id' }
                         Add-Content -LiteralPath (Join-Path $PSScriptRoot 'calls.txt') -Value "${TableName}:Remove:$match"
                     }

@@ -9,7 +9,7 @@ Migration4Dataverse is published to the PowerShell Gallery and GitHub Releases. 
 - `feat:` creates a minor release.
 - `!` in the title or a `BREAKING CHANGE` footer creates a major release.
 - `docs:`, `test:`, `build:`, `ci:`, `chore:`, `refactor:`, and `revert:` do not create a release by themselves.
-- semantic-release tags the repository, publishes to the PowerShell Gallery, creates a GitHub Release, uploads the nupkg and standalone CLI executables, and appends the version-specific installation command.
+- semantic-release tags the repository, publishes to the PowerShell Gallery, creates a GitHub Release, uploads the nupkg and standalone CLI executables, and appends version-specific instructions for both installation paths.
 - There is no release pull request. Merging a release-worthy PR to `main` publishes immediately.
 
 The source manifest keeps a development version. `build/Stage-MigrationModule.ps1` injects the semantic-release version into the staged manifest. Do not hand-edit `ModuleVersion` for releases.
@@ -71,7 +71,7 @@ Configure these settings before the first automated release:
 3. Stage, test, and publish the self-contained CLI for all five supported runtime identifiers.
 4. Stage, test, pack, and publish the module to the PowerShell Gallery.
 5. Create the GitHub Release and upload the nupkg and CLI executables.
-6. Append the exact installation command to the GitHub Release.
+6. Add a recommended zero-prerequisite CLI download/run section and an advanced PowerShell Gallery installation section to the GitHub Release description. The module section states its PowerShell 7.6+ / .NET 10 runtime prerequisite.
 
 If Gallery publishing fails, the GitHub Release is not created. If GitHub release creation fails after publishing, do not republish the same version; retry only the GitHub release step.
 
@@ -84,11 +84,13 @@ The staged module contains:
 - `LICENSE`
 - `lib/net10.0/` with the complete Release engine output, including `runtimes/` for Linux, macOS, and Windows
 
-The manifest requires `Rnwood.Dataverse.Data.PowerShell` 3.3.0 or later. `Install-Module Migration4Dataverse` installs that dependency automatically.
+The standalone CLI is the recommended distribution for ordinary migrations. It bundles the .NET and PowerShell runtimes, the versioned Migration4Dataverse module, and `Rnwood.Dataverse.Data.PowerShell`; the target machine does not need .NET, PowerShell, or a separately installed module.
+
+The PowerShell Gallery module is intended for advanced interactive use and custom integrations. It requires PowerShell 7.6 or later (the .NET 10 runtime). Its manifest requires `Rnwood.Dataverse.Data.PowerShell` 3.3.0 or later, and `Install-Module Migration4Dataverse` installs that dependency automatically.
 
 `build/Test-MigrationModulePackage.ps1` creates the nupkg under `artifacts/packages`, verifies the expected module and native-library entries, rejects packages above 240 MB, and imports the staged module. The full package is currently about 460 MiB installed and roughly 169 MB compressed.
 
-`build/Publish-MigrationCli.ps1` stages the versioned Migration4Dataverse module alongside exactly `Rnwood.Dataverse.Data.PowerShell` 3.3.0, then publishes self-contained single-file executables with .NET 10.0.13 and PowerShell SDK 7.6.7 for `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, and `osx-arm64`. It runs `build/Test-MigrationCliPackage.ps1` against Linux x64, which checks the full command surface, parser errors, NDJSON output, and a local file-to-file migration. CLI binaries are written under `artifacts/cli/<version>/`.
+`build/Publish-MigrationCli.ps1` stages the versioned Migration4Dataverse module alongside exactly `Rnwood.Dataverse.Data.PowerShell` 3.3.0, then publishes self-contained single-file executables with .NET 10.0.13 and PowerShell SDK 7.6.7 for `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, and `osx-arm64`. The CLI bundle retains the Dataverse module's `net8.0` loader and `net10.0` cmdlets; the loader selects the runtime-compatible cmdlet assemblies. It omits the module's bundled logging-abstractions assemblies so its Dataverse client and cmdlets use the same logging type identity as the CLI host. It runs `build/Test-MigrationCliPackage.ps1` against Linux x64, which checks the full command surface, parser errors, NDJSON output, and a local file-to-file migration. CLI binaries are written under `artifacts/cli/<version>/`.
 
 ## Local validation
 
@@ -102,7 +104,7 @@ pwsh ./build/Test-MigrationModulePackage.ps1 -Version 0.0.0 -SkipBuild
 pwsh ./build/Publish-MigrationCli.ps1 -Version 0.0.0 -RuntimeIdentifiers linux-x64 -SkipBuild
 ```
 
-Publishing all five release assets requires network access to restore the RID-specific .NET runtime packs. Building a CLI requires PowerShell 7.6+ to stage the module and .NET 10 SDK; the produced executable does not require either on the target machine.
+Publishing all five release assets requires network access to restore the RID-specific .NET runtime packs. Building a CLI requires PowerShell 7.6+ to stage the module and .NET 10 SDK; the produced executable does not require either on the target machine. Building the repository's embedded dashboard assets additionally requires Node.js 24+ with npm 11+.
 
 To validate a clean Gallery installation after publishing:
 
