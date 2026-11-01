@@ -2,6 +2,20 @@
 <helpItems schema="maml" xmlns="http://msh">
   <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
     <command:details>
+      <command:name>Get-M4dMigrationComponent</command:name>
+      <command:verb>Get</command:verb>
+      <command:noun>M4dMigrationComponent</command:noun>
+      <maml:description><maml:para>Lists migration sources, targets, and graph actions with Markdown-based help.</maml:para></maml:description>
+    </command:details>
+    <maml:description><maml:para>Returns the supported source and target connector types and migration graph actions documented by Migration4Dataverse. Use Detailed with Name to return the complete Markdown guide or action guidance.</maml:para></maml:description>
+    <command:parameters>
+      <command:parameter><maml:name>Category</maml:name><maml:description><maml:para>Limit results to Source, Target, or Action components.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Name</maml:name><maml:description><maml:para>Return the component with this exact connector or action name.</maml:para></maml:description></command:parameter>
+      <command:parameter><maml:name>Detailed</maml:name><maml:description><maml:para>Return the full Markdown guide or related action documentation in Help instead of its short description.</maml:para></maml:description></command:parameter>
+    </command:parameters>
+  </command:command>
+  <command:command xmlns:maml="http://schemas.microsoft.com/maml/2004/10" xmlns:command="http://schemas.microsoft.com/maml/dev/command/2004/10" xmlns:dev="http://schemas.microsoft.com/maml/dev/2004/10" xmlns:MSHelp="http://msdn.microsoft.com/mshelp">
+    <command:details>
       <command:name>Clear-M4dMigrationTargetTuning</command:name>
       <command:verb>Clear</command:verb>
       <command:noun>M4dMigrationTargetTuning</command:noun>

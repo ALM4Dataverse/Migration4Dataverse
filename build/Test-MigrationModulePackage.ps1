@@ -128,6 +128,7 @@ if (-not $SkipImport) {
             'Get-M4dMigrationDebugRow'
             'Get-M4dMigrationDebugRowBinary'
             'Get-M4dMigrationConfigurationPreview'
+            'Get-M4dMigrationComponent'
             'Get-M4dMigrationProcessMetric'
             'Get-M4dMigrationDataverseConnectionThroughput'
             'Invoke-M4dMigrationRecovery'
@@ -204,7 +205,16 @@ if (-not $SkipImport) {
             }
             New-M4dMigrationFile -Path $templatePath
             $template = [System.IO.File]::ReadAllText($templatePath)
-            foreach ($requiredText in @('$Migration = @{', 'RunOptions = @{', 'PreRun = {', 'PostRun = {')) {
+            foreach ($requiredText in @(
+                '$Migration = @{'
+                'RunOptions = @{'
+                'PreRun = {'
+                'PostRun = {'
+                'm4d get-component --category Source'
+                'm4d get-component --category Target'
+                'm4d get-component --category Action'
+                'Get-M4dMigrationComponent'
+            )) {
                 if (-not $template.Contains($requiredText, [StringComparison]::Ordinal)) {
                     throw "The generated migration template is missing '$requiredText'."
                 }

@@ -33,6 +33,7 @@
         'Get-M4dMigrationDebugRow'
         'Get-M4dMigrationDebugRowBinary'
         'Get-M4dMigrationConfigurationPreview'
+        'Get-M4dMigrationComponent'
         'Get-M4dMigrationProcessMetric'
         'Get-M4dMigrationDataverseConnectionThroughput'
         'Invoke-M4dMigrationRecovery'

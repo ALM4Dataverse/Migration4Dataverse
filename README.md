@@ -70,6 +70,8 @@ Create a commented starter file, edit its `$Migration` definition, and run it:
 
 No separate PowerShell, .NET, or module installation is required for these CLI commands. See the [CLI guide](./docs/cli.md) for options and the `.m4d` file contract.
 
+To browse supported connectors and graph actions with help, use `m4d get-component --category Source` (or `Target` / `Action`); add `--name file --detailed` for the full guide.
+
 ## Define a migration
 
 Think of a migration as rows moving from a source, through optional processing, to a target:

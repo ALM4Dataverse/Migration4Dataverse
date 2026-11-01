@@ -18,6 +18,15 @@ The examples below use `m4d` as the executable name. Rename the downloaded file 
 
 `--help` lists user-facing commands and their options. Lower-level graph, store, and value-construction commands are grouped under `advanced`. Command and parameter descriptions come from the bundled PowerShell `Get-Help` content. CLI names remove the `M4dMigration` noun prefix; for example, `Invoke-M4dMigration` is `run`, and `Get-M4dMigrationRun` is `get-run`.
 
+Use `get-component` to browse the documented migration sources, targets, and graph actions. Each entry includes a short help description; `--detailed` returns the full Markdown guide for a selected component:
+
+```sh
+m4d get-component --category Source
+m4d get-component --category Target
+m4d get-component --category Action
+m4d get-component --category Source --name file --detailed
+```
+
 ### Advanced: PowerShell module
 
 The module is for users who want to call Migration4Dataverse from PowerShell or build custom orchestration around its commands. It requires PowerShell 7.6 or later, which runs on the .NET 10 runtime. The Gallery installation resolves the Dataverse PowerShell module dependency:
@@ -80,6 +89,7 @@ All commands exported by the bundled module are available:
 | `Get-M4dMigrationDebugRow` | `get-debug-row` |
 | `Get-M4dMigrationDebugRowBinary` | `get-debug-row-binary` |
 | `Get-M4dMigrationConfigurationPreview` | `get-configuration-preview` |
+| `Get-M4dMigrationComponent` | `get-component` |
 | `Get-M4dMigrationProcessMetric` | `get-process-metric` |
 | `Get-M4dMigrationDataverseConnectionThroughput` | `get-dataverse-connection-throughput` |
 | `Invoke-M4dMigrationRecovery` | `invoke-recovery` |
