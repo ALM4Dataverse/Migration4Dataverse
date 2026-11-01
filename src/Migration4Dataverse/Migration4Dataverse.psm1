@@ -71,6 +71,13 @@ Replace an existing file.
 # Migration4Dataverse migration definition.
 # This file is executable PowerShell; only run files that you trust.
 # Run it with: m4d run ./migration.m4d
+#
+# Discover documented source connectors, target connectors, and graph actions:
+#   m4d get-component --category Source
+#   m4d get-component --category Target
+#   m4d get-component --category Action
+# Add --name <type> --detailed for full Markdown help.
+# In PowerShell, use Get-M4dMigrationComponent with the same parameters.
 
 $Migration = @{
     Steps = @(
@@ -695,5 +702,6 @@ Export-ModuleMember `
         -Cmdlet Invoke-M4dMigrationGraph, Get-M4dMigrationRun, Get-M4dMigrationStep, Get-M4dMigrationBatch, `
         Get-M4dMigrationError, Get-M4dMigrationRetryHistory, Get-M4dMigrationDebugRow, `
         Get-M4dMigrationDebugRowBinary, Get-M4dMigrationConfigurationPreview, Get-M4dMigrationProcessMetric, `
+        Get-M4dMigrationComponent, `
         Get-M4dMigrationDataverseConnectionThroughput, Invoke-M4dMigrationRecovery, `
         Clear-M4dMigrationTargetTuning, Start-M4dMigrationDatabaseServer, New-M4dMigrationBinaryValue

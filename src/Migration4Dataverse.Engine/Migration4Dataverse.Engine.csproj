@@ -18,6 +18,13 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
+    <EmbeddedResource Include="../../docs/connectors/**/*.md" />
+    <EmbeddedResource Include="../../docs/configuration.md">
+      <LogicalName>Migration4Dataverse.Engine.Help.configuration.md</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="../../docs/reference.md">
+      <LogicalName>Migration4Dataverse.Engine.Help.reference.md</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>

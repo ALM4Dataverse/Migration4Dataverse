@@ -377,6 +377,27 @@ public sealed class PowerShellCliRuntimeTests
     }
 
     [Fact]
+    public void ExposesMigrationComponentCatalogAsCliAction()
+    {
+        using var fixture = new CliFixture();
+        using var runtime = fixture.CreateRuntime();
+        var root = new CliCommandApp(runtime, CancellationToken.None).Build();
+        var parseResult = root.Parse(
+        [
+            "get-component",
+            "--category", "Source",
+            "--name", "file",
+            "--detailed"
+        ]);
+
+        Assert.Empty(parseResult.Errors);
+        Assert.Equal(ExitCodes.Success, parseResult.Invoke());
+        Assert.Contains("Name", fixture.Output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("file", fixture.Output.ToString(), StringComparison.Ordinal);
+        Assert.Contains("True", fixture.Output.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void ReturnsDistinctCodesForInvalidJobsAndMigrationFailures()
     {
         using var fixture = new CliFixture();
@@ -700,6 +721,22 @@ public sealed class PowerShellCliRuntimeTests
                         [pscustomobject]@{ DatabasePath = $DatabasePath; RunId = $RunId; Limit = $Limit }
                     }
 
+                    function Get-M4dMigrationComponent {
+                    <#
+                    .SYNOPSIS
+                    Lists migration components with help.
+                    .PARAMETER Category
+                    Filter by component category.
+                    .PARAMETER Name
+                    Filter by component name.
+                    .PARAMETER Detailed
+                    Return full component help.
+                    #>
+                        [CmdletBinding()]
+                        param([string]$Category, [string]$Name, [switch]$Detailed)
+                        [pscustomobject]@{ Category = $Category; Name = $Name; Detailed = [bool]$Detailed }
+                    }
+
                     function New-M4dMigrationJobStore {
                     <#
                     .SYNOPSIS
@@ -775,6 +812,7 @@ public sealed class PowerShellCliRuntimeTests
                     }
 
                     Export-ModuleMember -Function Invoke-M4dMigration, New-M4dMigrationFile, Get-M4dMigrationRun, `
+                        Get-M4dMigrationComponent, `
                         New-M4dMigrationJobStore, Complete-M4dMigrationBatch, Start-M4dMigrationDashboard, `
                         Stop-M4dMigrationDashboard
                     """,
@@ -783,6 +821,7 @@ public sealed class PowerShellCliRuntimeTests
                         "Invoke-M4dMigration",
                         "New-M4dMigrationFile",
                         "Get-M4dMigrationRun",
+                        "Get-M4dMigrationComponent",
                         "New-M4dMigrationJobStore",
                         "Complete-M4dMigrationBatch",
                         "Start-M4dMigrationDashboard",
